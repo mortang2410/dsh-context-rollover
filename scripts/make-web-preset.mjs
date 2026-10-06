@@ -1,35 +1,53 @@
 #!/usr/bin/env node
 /**
- * Regenerate the shipped `standard-rollover` agent preset from the `standard`
- * composition this repo checks in (tests/fixtures/standard/agent.cordis.yml),
- * swapping only the compaction engine row.
+ * Regenerate the shipped `standard-rollover` agent preset from the running
+ * host's own shipped `standard` declaration, swapping only the compaction
+ * engine row.
+ *
+ * The running host (DSH 0.2.0-rc.2) declares a preset as a
+ * `@deepseek-ai/dsh-agent-preset` row carrying an inline `config.plugins`
+ * array inside a `.patch.yml` file, listed in the bundle's `dsh.bundle.patch`
+ * array (`dsh-web-app/presets/standard.patch.yml`). That is the format this
+ * script transforms: it reads the host's declaration, restamps the preset
+ * identity, and replaces the `compaction-basic` row inside the preset's own
+ * `compaction` isolate group with this engine.
  *
  * Maintainer tooling (`pnpm preset:sync`), not a user command: Web users get
- * the preset automatically through the bundle's preset-root registration, and
- * customize it through the supported preset-copy flow. Re-run after harness
- * updates and commit the refreshed `presets/` directory.
+ * the preset because this bundle lists the generated
+ * `presets/standard-rollover/declaration.patch.yml` in its own
+ * `dsh.bundle.patch`. Re-run after host updates and commit the refreshed
+ * `presets/` directory.
  *
- * Plain Node with no dependencies. The transform keeps everything else in the
- * composition byte-identical and fails loud when the shipped shape drifts.
+ * Plain Node with no dependencies. The transform keeps every other byte of
+ * the host's declaration identical and fails loud when the shipped shape
+ * drifts, because an unmatched YAML patch only WARNS and is skipped
+ * (`dsh-app-boot` `applyEntryPatches`, messages `patch: entry %C not found` /
+ * `patch insert: entry %C not found`): a shape this script mis-reads would
+ * install, boot clean, and do nothing at all.
  *
  * Usage:
  *   node scripts/make-web-preset.mjs [--presets-dir <dir>] [--out-dir <dir>]
- *     [--preset-id <id>] [--threshold-ratio <n>] [--reminder-ratio <n>]
- *     [--reminder-message <text>]
+ *     [--preset-id <id>] [--engine-name <specifier>]
+ *     [--threshold-ratio <n>] [--reminder-ratio <n>]
+ *     [--reminder-message <text>] [--handoff-dir <dir>]
+ *     [--handoff-pattern <glob>]
  *     [--retain-tokens <n> | --retain-ratio <n>] [--handoff-max-chars <n>]
  *     [--handoff-only <true|false>]
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
-/** Id of the shipped preset the generated preset derives from. */
+/** The host's shipped declaration this preset derives from. */
 const SOURCE_PRESET = 'standard'
 
-/** Default id (directory name) of the generated preset. */
+/** Row id of the host's shipped declaration inside its patch file. */
+const SOURCE_ROW_ID = 'preset-standard'
+
+/** Default id of the generated preset. */
 const DEFAULT_PRESET_ID = 'standard-rollover'
 
 /**
@@ -42,53 +60,79 @@ const DEFAULT_REMINDER_MESSAGE = 'Context is {percent}% full. Use `/handoff-doc`
   + 'handoff document. Make it fully sufficient for a fresh context to continue the work. After it succeeds, '
   + 'call `new_context`. The handoff document will be the entire continuation context.'
 
+/** Handoff defaults, mirroring `DEFAULT_HANDOFF_DIR`/`DEFAULT_HANDOFF_PATTERN` in `src/config.ts`. */
+const DEFAULT_HANDOFF_DIR = '.scratch/handoff'
+const DEFAULT_HANDOFF_PATTERN = 'HANDOFF-*.md'
+
 /** Directory names must stay path-contained; mirrors the harness preset rule. */
 const PRESET_ID = /^[a-z0-9][a-z0-9-]*$/
 
-/** The exact shipped row this script replaces (indent included). */
-const BASIC_ROW = `    - id: compaction-basic\n      name: '@deepseek-ai/dsh-compaction-basic'`
+/**
+ * The shipped `compaction` group header, verbatim.
+ *
+ * The engine must publish inside this group's `isolate` realm: without one it
+ * would register `ctx.compaction` in the root realm, where the registry
+ * rejects the mount as a leaked service (`mountPreset` ->
+ * `leakedServices`). Matching the block verbatim is also what makes a host
+ * shape change loud instead of silently re-scoping the engine row.
+ */
+const COMPACTION_GROUP = '          - id: compaction\n'
+  + '            name: cordis:group\n'
+  + '            group: true\n'
+  + '            isolate:\n'
+  + '              compaction: true\n'
+  + '              toolResultPruner: true\n'
+
+/** Preset display metadata, carried inline on the declaration row. */
+const PRESET_META = {
+  name: 'Standard + rollover (experimental)',
+  description: 'Full coding agent with model-driven context rollover instead of summarization '
+    + '(generated from the host standard preset). Experimental opt-in; standard remains the default.',
+  order: 2,
+}
 
 /**
- * Candidate roots holding shipped presets (`<root>/standard/agent.cordis.yml`):
- * explicit `--presets-dir` first, then the checked-in fixture this repo owns.
+ * Candidate roots holding the host's shipped declaration
+ * (`<root>/standard.patch.yml`): explicit `--presets-dir` first, then the
+ * checked-in fixture this repo owns.
  *
- * The running host ships its presets as `.patch.yml` declarations rather than
- * `<id>/agent.cordis.yml` directories, so there is no harness path to read
- * them from. `tests/fixtures/standard/agent.cordis.yml` carries exactly the
- * shipped `standard` rows instead, which is what the sync transforms and what
- * the web-preset test regenerates from.
+ * `tests/fixtures/host/standard.patch.yml` is a byte-for-byte copy of the
+ * running host's own declaration, so the sync is reproducible without the
+ * installed host or the sibling checkout.
  * @param presetsDir - value of `--presets-dir`, when given.
  * @returns candidate preset-root directories, nearest first.
  */
 export function candidatePresetRoots(presetsDir) {
   if (presetsDir !== undefined) return [resolve(presetsDir)]
-  return [join(packageDir, 'tests', 'fixtures')]
+  return [join(packageDir, 'tests', 'fixtures', 'host')]
 }
 
 /**
- * Find the `standard` composition the preset derives from.
+ * Find the host declaration the preset derives from.
  * @param presetsDir - value of `--presets-dir`, when given.
  * @param source - source preset id.
- * @returns the absolute composition file path.
- * @throws when no candidate supplies the source preset.
+ * @returns the absolute declaration file path.
+ * @throws when no candidate supplies the source declaration.
  */
 export function findSourcePreset(presetsDir, source = SOURCE_PRESET) {
+  const tried = []
   for (const root of candidatePresetRoots(presetsDir)) {
-    const file = join(root, source, 'agent.cordis.yml')
+    const file = join(root, `${source}.patch.yml`)
+    tried.push(file)
     if (existsSync(file)) return file
   }
   throw new Error(
-    `make-web-preset: no "${source}" preset found; pass --presets-dir <dir> holding <dir>/${source}/agent.cordis.yml`,
+    `make-web-preset: no "${source}" declaration found; tried ${tried.join(', ')}. `
+    + `Pass --presets-dir <dir> holding <dir>/${source}.patch.yml`,
   )
 }
 
 /**
- * Validate the numeric engine configuration and the reminder message,
- * mirroring the engine's own rules so a bad flag fails here instead of at
- * session start.
+ * Validate the numeric engine configuration and the text values, mirroring the
+ * engine's own rules so a bad flag fails here instead of at session start.
  * @param config - raw options.
  * @returns the validated options.
- * @throws on any out-of-range or blank value.
+ * @throws on any out-of-range, blank, or misspelled value.
  */
 export function resolveOptions(config) {
   const thresholdRatio = config.thresholdRatio ?? 0.9
@@ -108,6 +152,16 @@ export function resolveOptions(config) {
   if (typeof reminderMessage !== 'string' || reminderMessage.trim().length === 0) {
     throw new Error(
       `make-web-preset: --reminder-message must be a non-empty string, got ${JSON.stringify(reminderMessage)}`,
+    )
+  }
+  const handoffDir = config.handoffDir ?? DEFAULT_HANDOFF_DIR
+  if (typeof handoffDir !== 'string' || handoffDir.trim().length === 0) {
+    throw new Error(`make-web-preset: --handoff-dir must be a non-empty string, got ${JSON.stringify(handoffDir)}`)
+  }
+  const handoffPattern = config.handoffPattern ?? DEFAULT_HANDOFF_PATTERN
+  if (typeof handoffPattern !== 'string' || handoffPattern.trim().length === 0) {
+    throw new Error(
+      `make-web-preset: --handoff-pattern must be a non-empty string, got ${JSON.stringify(handoffPattern)}`,
     )
   }
   const retainTokens = config.retainTokens ?? null
@@ -130,15 +184,41 @@ export function resolveOptions(config) {
   if (!Number.isSafeInteger(handoffMaxChars) || handoffMaxChars <= 0) {
     throw new Error(`make-web-preset: --handoff-max-chars must be a positive integer, got ${String(handoffMaxChars)}`)
   }
+  const engineName = config.engineName ?? ownPackageName()
+  if (typeof engineName !== 'string' || engineName.trim().length === 0) {
+    throw new Error(`make-web-preset: --engine-name must be a non-empty string, got ${JSON.stringify(engineName)}`)
+  }
   return {
     thresholdRatio,
     reminderRatio,
     reminderMessage,
+    handoffDir,
+    handoffPattern,
     retainTokens,
     retainRatio,
     handoffOnly,
     handoffMaxChars,
+    engineName,
   }
+}
+
+/**
+ * This package's own name: the default bare specifier the engine row carries.
+ *
+ * A bare specifier is the only form that resolves from a preset row. The
+ * registry mounts a preset's rows with `prepareProfileEntries(ctx, plugins,
+ * ctx.baseUrl)`, where `baseUrl` is the composition's base and NOT a preset
+ * directory (there is none in the inline format), so a relative path resolves
+ * somewhere unrelated. The host's boot-time profile resolution routes a bare
+ * name through the installation closure, which is how the shipped presets
+ * name their own plugins.
+ */
+function ownPackageName() {
+  const manifest = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'))
+  if (typeof manifest.name !== 'string' || manifest.name === '') {
+    throw new Error('make-web-preset: this package declares no name')
+  }
+  return manifest.name
 }
 
 /**
@@ -154,77 +234,154 @@ function yamlString(text) {
   return JSON.stringify(text)
 }
 
+/** Render a scalar in single quotes, doubling any embedded quote. */
+function yamlSingleQuoted(text) {
+  return `'${text.replaceAll("'", "''")}'`
+}
+
 /**
- * Render the replacement engine row (same 4-space nesting as the shipped row).
- * @param engineEntry - module specifier of the built engine, as the preset row
- *   names it (relative to the preset directory for shipped presets).
+ * Render the replacement engine row.
+ * @param indent - column of the anchor row's `-`, so the row keeps the host's nesting.
  * @param options - validated options from {@link resolveOptions}.
  * @returns the row text, without trailing newline.
  */
-export function renderEngineRow(engineEntry, options) {
+export function renderEngineRow(indent, options) {
+  const pad = ' '.repeat(indent)
+  // `- id:` sits at `indent`, so the row's keys sit at `indent + 2` and its
+  // `config:` children at `indent + 4`, matching the host's own nesting.
+  const key = (text) => `${pad}    ${text}`
   const tail = options.retainTokens !== null
-    ? `        retainTokens: ${options.retainTokens}`
-    : `        retainRatio: ${options.retainRatio}`
-  return `    # Generated by dsh-context-rollover scripts/make-web-preset.mjs: the same\n`
-    + `    # deterministic rollover backend the host bundle mounts, owned per-session here.\n`
-    + `    # Do not edit; re-run \`pnpm preset:sync\` after harness updates.\n`
-    + `    - id: context-rollover\n`
-    + `      name: '${engineEntry}'\n`
-    + `      config:\n`
-    + `        thresholdRatio: ${options.thresholdRatio}\n`
-    + `        reminderThresholdRatio: ${options.reminderRatio}\n`
-    + `        reminderMessage: ${yamlString(options.reminderMessage)}\n`
-    + `        handoffOnly: ${options.handoffOnly}\n`
+    ? key(`retainTokens: ${options.retainTokens}`)
+    : key(`retainRatio: ${options.retainRatio}`)
+  return `${pad}# Generated by dsh-context-rollover scripts/make-web-preset.mjs: the same\n`
+    + `${pad}# deterministic rollover backend the host bundle mounts, owned per-session here.\n`
+    + `${pad}# Do not edit; re-run \`pnpm preset:sync\` after host updates. The engine is named\n`
+    + `${pad}# by bare package specifier because a preset row has no directory to be relative\n`
+    + `${pad}# to: the registry mounts these rows under the composition's own base.\n`
+    + `${pad}- id: context-rollover\n`
+    + `${pad}  name: ${yamlSingleQuoted(options.engineName)}\n`
+    + `${pad}  config:\n`
+    + `${key(`thresholdRatio: ${options.thresholdRatio}`)}\n`
+    + `${key(`reminderThresholdRatio: ${options.reminderRatio}`)}\n`
+    + `${key(`reminderMessage: ${yamlString(options.reminderMessage)}`)}\n`
+    + `${key(`handoffOnly: ${options.handoffOnly}`)}\n`
     + `${tail}\n`
-    + `        handoffMaxChars: ${options.handoffMaxChars}\n`
-    + `        modelSurface: 'always'`
+    + `${key(`handoffMaxChars: ${options.handoffMaxChars}`)}\n`
+    + `${key(`handoffDir: ${yamlSingleQuoted(options.handoffDir)}`)}\n`
+    + `${key(`handoffPattern: ${yamlSingleQuoted(options.handoffPattern)}`)}\n`
+    + `${key(`modelSurface: 'always'`)}`
 }
 
 /**
- * Swap the shipped `compaction-basic` row for the rollover engine row.
- * Everything else in the composition stays byte-identical.
- * @param text - the shipped composition text.
- * @param engineEntry - module specifier of the built engine.
- * @param options - validated numeric options from {@link resolveOptions}.
- * @returns the preset composition text.
- * @throws when the anchor row is absent or carries an unexpected config block.
+ * Locate the single match of `pattern`, failing loud on zero or many.
+ * @param text - the haystack.
+ * @param pattern - a non-global pattern; this makes the global copy matchAll needs.
+ * @param what - human name of the anchor, for the diagnostic.
+ * @returns the sole match.
  */
-export function transformPresetText(text, engineEntry, options) {
-  const index = text.indexOf(BASIC_ROW)
-  if (index === -1) {
+function singleMatch(text, pattern, what) {
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`
+  const matches = [...text.matchAll(new RegExp(pattern.source, flags))]
+  const only = matches[0]
+  if (matches.length !== 1 || only === undefined) {
     throw new Error(
-      'make-web-preset: the installed standard preset no longer contains the expected compaction-basic row; '
-      + 'update scripts/make-web-preset.mjs to the new shape',
+      `make-web-preset: expected exactly one ${what} in the host declaration, found ${matches.length}; `
+      + 'update scripts/make-web-preset.mjs to the new shipped shape',
     )
   }
-  if (text.indexOf(BASIC_ROW, index + 1) !== -1) {
-    throw new Error('make-web-preset: refusing to rewrite: more than one compaction-basic row found')
+  return only
+}
+
+/**
+ * Splice `replacement` over one match, failing loud on zero or many.
+ * @param text - the haystack.
+ * @param pattern - the anchor; must carry any capture the replacer reads.
+ * @param replacement - the text to substitute, built from the match.
+ * @param what - human name of the anchor, for the diagnostic.
+ * @returns the spliced text with the match start index.
+ */
+function spliceOnce(text, pattern, replacement, what) {
+  const match = singleMatch(text, pattern, what)
+  const start = match.index
+  if (start === undefined) throw new Error(`make-web-preset: internal: no index for ${what}`)
+  const rendered = typeof replacement === 'function' ? replacement(match) : replacement
+  return { text: text.slice(0, start) + rendered + text.slice(start + match[0].length), index: start }
+}
+
+/**
+ * Swap the host declaration's `compaction-basic` row for the rollover engine
+ * row and restamp the preset's identity. Everything else stays byte-identical.
+ * @param text - the host declaration text.
+ * @param options - validated options from {@link resolveOptions}.
+ * @param presetId - generated preset id.
+ * @returns the generated declaration text.
+ * @throws when any anchor row is absent, duplicated, or has gained a block this
+ *   transform would silently mis-scope, or when the compaction isolate group
+ *   the engine must publish into is no longer the shipped one.
+ */
+export function transformPresetText(text, options, presetId = DEFAULT_PRESET_ID) {
+  if (!PRESET_ID.test(presetId)) {
+    throw new Error(`make-web-preset: --preset-id must match ${PRESET_ID}, got ${presetId}`)
   }
-  // A future harness may add keys (e.g. `config:`) to the shipped row. Those
-  // deeper-indented lines would then attach to the replacement row, so fail loud.
-  const after = text.slice(index + BASIC_ROW.length).split('\n')
-  const next = after.slice(1).find(line => line.trim() !== '' && !line.trim().startsWith('#'))
-  if (next !== undefined && /^ {5,}/.test(next)) {
+  // Check the realm-bearing group first: if the host ever moves the anchor out
+  // of it, the replacement row would register into the root realm, where the
+  // registry rejects the whole mount as a leaked service.
+  const groupIndex = text.indexOf(COMPACTION_GROUP)
+  if (groupIndex === -1) {
     throw new Error(
-      'make-web-preset: the installed compaction-basic row carries an unexpected config block; '
-      + 'update scripts/make-web-preset.mjs to the new shape',
+      'make-web-preset: the host standard declaration no longer carries the shipped compaction isolate group; '
+      + 'update scripts/make-web-preset.mjs to the new shipped shape',
     )
   }
-  return text.slice(0, index) + renderEngineRow(engineEntry, options) + text.slice(index + BASIC_ROW.length)
+
+  const anchor = singleMatch(text, /^( +)- id: compaction-basic$/gm, 'compaction-basic row')
+  const indent = anchor[1].length
+  if (anchor.index < groupIndex) {
+    throw new Error('make-web-preset: the compaction-basic row sits outside the compaction isolate group')
+  }
+  const namePattern = new RegExp(`^ {${indent + 2}}name: '@deepseek-ai/dsh-compaction-basic'$`, 'm')
+  const afterAnchor = text.slice(anchor.index + anchor[0].length)
+  const nameMatch = singleMatch(afterAnchor, namePattern, 'compaction-basic plugin name')
+  const anchorRow = `${anchor[0]}\n${nameMatch[0]}`
+  // A future host may add keys (e.g. a `config:` block) to the shipped row.
+  // Those deeper-indented lines would then attach to the replacement row, so
+  // fail loud rather than silently re-scope them.
+  const following = afterAnchor.slice(nameMatch.index + nameMatch[0].length).split('\n').slice(1)
+  const next = following.find(line => line.trim() !== '' && !line.trim().startsWith('#'))
+  if (next !== undefined && next.search(/\S/) > indent) {
+    throw new Error(
+      'make-web-preset: the host compaction-basic row carries an unexpected block; '
+      + 'update scripts/make-web-preset.mjs to the new shipped shape',
+    )
+  }
+  let output = text.slice(0, anchor.index) + renderEngineRow(indent, options) + text.slice(anchor.index + anchorRow.length)
+
+  // Restamp the declaration: row id, preset id, and inline display metadata.
+  output = spliceOnce(
+    output,
+    new RegExp(`^( {4}- id: )${SOURCE_ROW_ID}$`, 'm'),
+    match => `${match[1] ?? ''}preset-${presetId}`,
+    'declaration row id',
+  ).text
+  output = spliceOnce(
+    output,
+    new RegExp(`^( {8}id: )${SOURCE_PRESET}$`, 'm'),
+    match => `${match[1] ?? ''}${presetId}`,
+    'declaration preset id',
+  ).text
+  output = spliceOnce(
+    output,
+    /^ {8}order: 1$/m,
+    `        name: ${yamlString(PRESET_META.name)}\n`
+    + `        description: ${yamlString(PRESET_META.description)}\n`
+    + `        order: ${PRESET_META.order}`,
+    'declaration order',
+  ).text
+  return output
 }
 
 /**
- * Render the preset metadata file.
- * @returns the `preset.yml` text.
- */
-export function renderPresetMeta() {
-  return `name: Standard + rollover (experimental)\n`
-    + `description: Full coding agent with model-driven context rollover instead of summarization (generated from standard). Experimental opt-in; standard remains the default.\n`
-    + `order: 2\n`
-}
-
-/**
- * Minimal `--key value` / `--key=value` argument parser.
+ * Parse `--key value` / `--key=value` arguments.
  * @param argv - process arguments without the node/script prefix.
  * @returns the parsed flags.
  */
@@ -250,16 +407,23 @@ export function parseArgs(argv) {
 
 /** Print usage. */
 export function printHelp() {
-  console.log(`make-web-preset: regenerate the shipped standard-rollover preset (maintainer sync)
+  console.log(`make-web-preset: regenerate the shipped ${DEFAULT_PRESET_ID} preset (maintainer sync)
 
 Options:
-  --presets-dir <dir>     presets root holding standard/ (default: tests/fixtures)
+  --presets-dir <dir>     directory holding the host's standard.patch.yml
+                          (default: tests/fixtures/host)
   --out-dir <dir>         presets root to write into (default: this package's presets/)
   --preset-id <id>        generated preset id (default: ${DEFAULT_PRESET_ID})
+  --engine-name <spec>    module specifier the engine row names
+                          (default: this package's own name)
   --threshold-ratio <n>   auto-rollover point, fraction of window (default: 0.9)
   --reminder-ratio <n>    one-time handoff reminder point (default: 0.4)
   --reminder-message <t>  reminder text; {percent} is the only placeholder
                           (default: the shipped /handoff-doc reminder)
+  --handoff-dir <dir>     handoff directory, relative to the session cwd
+                          (default: ${DEFAULT_HANDOFF_DIR})
+  --handoff-pattern <g>   handoff file glob inside that directory
+                          (default: ${DEFAULT_HANDOFF_PATTERN})
   --retain-tokens <n>     absolute recent-tail budget (default: unset)
   --retain-ratio <n>      tail budget fraction when --retain-tokens is unset (default: 0.1)
   --handoff-only <bool>   replace the whole prior surface with the handoff document,
@@ -300,36 +464,27 @@ export async function main(argv = process.argv.slice(2)) {
     thresholdRatio: number('threshold-ratio'),
     reminderRatio: number('reminder-ratio'),
     reminderMessage: flags['reminder-message'],
+    handoffDir: flags['handoff-dir'],
+    handoffPattern: flags['handoff-pattern'],
     retainTokens: number('retain-tokens'),
     retainRatio: number('retain-ratio'),
     handoffOnly: boolean('handoff-only'),
     handoffMaxChars: number('handoff-max-chars'),
+    engineName: flags['engine-name'],
   })
   if (flags['retain-tokens'] !== undefined && flags['retain-ratio'] !== undefined) {
     throw new Error('make-web-preset: --retain-tokens and --retain-ratio are exclusive')
-  }
-  const engineEntryAbs = join(packageDir, 'lib', 'index.js')
-  if (!existsSync(engineEntryAbs)) {
-    throw new Error(`make-web-preset: built engine missing at ${engineEntryAbs}; run npm run build first`)
   }
   const source = findSourcePreset(flags['presets-dir'])
   const text = readFileSync(source, 'utf8')
   const outDir = flags['out-dir'] === undefined ? join(packageDir, 'presets') : resolve(flags['out-dir'])
   const dir = join(outDir, presetId)
-  // The engine specifier stays portable across install layouts: relative from
-  // the preset directory to this package's built entry. A preset on another
-  // drive (or otherwise unreachable relatively) cannot name it, so fail loud.
-  const rawEntry = relative(dir, engineEntryAbs).split(sep).join('/')
-  if (isAbsolute(rawEntry) || rawEntry === '') {
-    throw new Error(`make-web-preset: --out-dir ${outDir} cannot relatively reach ${engineEntryAbs}`)
-  }
-  const entry = rawEntry.startsWith('.') ? rawEntry : `./${rawEntry}`
-  const preset = transformPresetText(text, entry, options)
+  const preset = transformPresetText(text, options, presetId)
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'agent.cordis.yml'), preset)
-  writeFileSync(join(dir, 'preset.yml'), renderPresetMeta())
+  const declaration = join(dir, 'declaration.patch.yml')
+  writeFileSync(declaration, preset)
   console.log(`make-web-preset: derived ${presetId} from ${source}`)
-  console.log(`make-web-preset: wrote ${join(dir, 'agent.cordis.yml')}`)
+  console.log(`make-web-preset: wrote ${declaration}`)
 }
 
 const invokedDirectly = process.argv[1] !== undefined

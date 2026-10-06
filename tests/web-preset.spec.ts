@@ -1,9 +1,22 @@
 /**
- * Preset-sync coverage: `scripts/make-web-preset.mjs` regenerates the shipped
- * `standard-rollover` preset from a shipped `standard` composition, fails loud
- * when the shipped shape drifts or flags are invalid, and the committed
- * preset always matches a fresh sync. The bundle patch's preset-root
- * expression is evaluated with the real loader against a fake profile dir.
+ * Preset-format coverage for the running host line.
+ *
+ * `scripts/make-web-preset.mjs` regenerates the shipped `standard-rollover`
+ * preset from the host's OWN shipped `standard` declaration, in the host's
+ * inline `@deepseek-ai/dsh-agent-preset` format, swapping only the compaction
+ * engine row. This suite covers three things the ticket treats as one defect
+ * class, because all three fail silently on the host:
+ *
+ * 1. The generator produces the new format, keeps its configuration flags
+ *    working, and fails loud when the host declaration's shape drifts.
+ * 2. The committed declaration is a fresh generation, and this bundle's patch
+ *    list composes over the REAL host bundle tree with every patch applied:
+ *    an unmatched patch id only WARNS and is skipped, so a nonzero count here
+ *    is exactly the silent no-op the old `agent-presets` target produced.
+ * 3. The generated declaration actually loads through the REAL preset
+ *    registry: booting the real host composition and selecting
+ *    `standard-rollover` resolves that session's compaction service to THIS
+ *    engine. Checking the generated text alone cannot prove that.
  *
  * The script runs as a real subprocess against temp directories, so this
  * suite covers the shipped artifact rather than an import of it.
@@ -12,89 +25,290 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
-import { evaluate } from '@deepseek-ai/cordis-plugin-loader'
+import { afterAll, describe, expect, it } from 'vitest'
+import { createRequire } from 'node:module'
+import type { Context } from '@deepseek-ai/cordis'
+import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
+import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
+import {
+  boot,
+  bundlePatchPaths,
+  composeEntries,
+  createRuntimeResolution,
+  loadOverlayPatches,
+  loadProfileDirectory,
+  PluginPackages,
+} from '@deepseek-ai/dsh-app-boot'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { CompactionEngine } from '@deepseek-ai/dsh-compaction'
+import { SessionId } from '@deepseek-ai/dsh-session'
+// Type-only: resolves `ctx.agentPresets` and `ctx.agents` through their own merges.
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import type {} from '@deepseek-ai/dsh-agent'
 
 const script = fileURLToPath(new URL('../scripts/make-web-preset.mjs', import.meta.url))
 const repoRoot = resolve(dirname(script), '..')
 
-/** Minimal shipped-shape fixture: surrounding rows plus the real compaction group. */
-function standardFixture(): string {
-  return `# fixture standard preset
-- id: persona
-  name: '@deepseek-ai/dsh-persona'
+/** The generated declaration: the shipped artifact under test. */
+const COMMITTED = join(repoRoot, 'presets', 'standard-rollover', 'declaration.patch.yml')
 
-# \`compaction-basic\` reads \`toolResultPrune\` through \`ctx.get\`, so the pruner must
-# share this realm rather than sit outside it.
-- id: compaction
-  name: cordis:group
-  group: true
-  isolate:
-    compaction: true
-    toolResultPruner: true
-  config:
-    - id: compaction-basic
-      name: '@deepseek-ai/dsh-compaction-basic'
+/** The checked-in byte-for-byte copy of the running host's `standard` declaration. */
+const HOST_FIXTURE = join(repoRoot, 'tests', 'fixtures', 'host', 'standard.patch.yml')
 
-    - id: command-compact
-      name: '@deepseek-ai/dsh-command-compact'
+/**
+ * SHA-256 of the running host's `dsh-web-app/presets/standard.patch.yml`
+ * (DSH 0.2.0-rc.2). The committed fixture must stay that exact file: the
+ * generator's anchor is the host's own shape, so a fixture that quietly drifted
+ * would let the committed preset become un-reproducible from the real host.
+ */
+const HOST_DECLARATION_SHA256 = '6cd2f197737fc94a45e487d0bb57869461dd6f392d45f6429b576e75d973eda8'
 
-    - id: tool-result-pruner
-      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
-      config:
-        thresholdChars: 8192
-`
+/** The host declaration's anchor row, as the generator reads it. */
+const ANCHOR_HEAD = "              - id: compaction-basic\n"
+const ANCHOR_ROW = `${ANCHOR_HEAD}                name: '@deepseek-ai/dsh-compaction-basic'\n`
+
+/** Recursively collect every row id in a composed entry list. */
+function rowIds(rows: readonly EntryOptions[]): Set<string> {
+  const found = new Set<string>()
+  const walk = (list: readonly EntryOptions[]): void => {
+    for (const row of list) {
+      if (typeof row.id === 'string') found.add(row.id)
+      if (row.group === true && Array.isArray(row.config)) walk(row.config as EntryOptions[])
+    }
+  }
+  walk(rows)
+  return found
 }
 
-/** Scratch dirs for one run: a presets root holding `standard/` and an out dir. */
-function scratch(fixture: string): { presetsDir: string; outDir: string; cleanup: () => void } {
-  // Temp dirs inside the repo: the sync names the engine relatively, which
-  // cannot cross drives (the script fails loud on that instead).
-  const base = mkdtempSync(join(repoRoot, 'tmp-scratch-'))
+/** Find one row by id anywhere in a composed entry list. */
+function findRow(rows: readonly EntryOptions[], id: string): EntryOptions | undefined {
+  for (const row of rows) {
+    if (row.id === id) return row
+    if (row.group === true && Array.isArray(row.config)) {
+      const nested = findRow(row.config as EntryOptions[], id)
+      if (nested !== undefined) return nested
+    }
+  }
+  return undefined
+}
+
+/** Scratch dirs for one generator run: a declaration dir and an out dir. */
+function scratch(declaration: string): { presetsDir: string; outDir: string; cleanup: () => void } {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-web-preset-'))
   const presetsDir = join(base, 'presets')
   const outDir = join(base, 'out')
-  mkdirSync(join(presetsDir, 'standard'), { recursive: true })
-  writeFileSync(join(presetsDir, 'standard', 'agent.cordis.yml'), fixture)
+  mkdirSync(presetsDir, { recursive: true })
+  writeFileSync(join(presetsDir, 'standard.patch.yml'), declaration)
   return { presetsDir, outDir, cleanup: () => { rmSync(base, { recursive: true, force: true }) } }
 }
 
-/** Run the script, returning stdout; throws (with status/stderr) on failure. */
+/** Run the generator, returning stdout; throws (with status/stderr) on failure. */
 function run(args: readonly string[]): string {
   return execFileSync(process.execPath, [script, ...args], { encoding: 'utf8' })
 }
 
+/** Escape literal text for use inside a RegExp. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** The real host fixture text, the shape the generator anchors on. */
+function hostDeclaration(): string {
+  return readFileSync(HOST_FIXTURE, 'utf8')
+}
+
+/**
+ * The declaration's inline `config.plugins` array, parsed by the host's own
+ * loader dialect rather than by matching generated text.
+ * @param text - declaration text.
+ * @returns the declared child rows.
+ */
+function declarationPlugins(text: string): readonly EntryOptions[] {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-web-preset-parse-'))
+  try {
+    const file = join(dir, 'declaration.patch.yml')
+    writeFileSync(file, text)
+    const inserted = loadOverlayPatches('test', file).flatMap(patch => patch.insert ?? [])
+    const row = inserted.find(candidate => candidate.name === '@deepseek-ai/dsh-agent-preset')
+    if (row === undefined) throw new Error('the declaration carries no @deepseek-ai/dsh-agent-preset row')
+    const plugins = (row.config as { plugins?: unknown } | undefined)?.plugins
+    if (!Array.isArray(plugins)) throw new Error('the declaration row carries no config.plugins array')
+    return plugins as EntryOptions[]
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/**
+ * One row's `config` children inside the declaration's compaction group, read
+ * the way the registry reads them.
+ * @param text - declaration text.
+ * @param id - child row id.
+ * @returns the child row, when declared.
+ */
+function declaredChild(text: string, id: string): EntryOptions | undefined {
+  const compaction = declarationPlugins(text).find(row => row.id === 'compaction')
+  return (compaction?.config as EntryOptions[] | undefined)?.find(row => row.id === id)
+}
+
+/**
+ * The catalog of host bundle patch files this suite composes over.
+ *
+ * CI checks the harness fork out beside this repo and CI's own steps build it;
+ * locally the installed host is the built line. Composing these files needs no
+ * build, so preferring the checkout keeps this suite independent of whether an
+ * installed host happens to exist.
+ * @returns the labels and files, or undefined when neither host source exists.
+ */
+function hostBundlePatches(): { label: string; files: readonly string[] } | undefined {
+  const checkout = resolve(repoRoot, process.env.DSH_CHECKOUT_DIR ?? '../deepseek-harness')
+  const candidates = [
+    { label: 'the harness checkout', dir: join(checkout, 'packages', 'bundle') },
+    {
+      label: 'the installed host',
+      dir: join(homedir(), '.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai'),
+    },
+  ]
+  for (const { label, dir } of candidates) {
+    const base = join(dir, 'dsh-base', 'cordis.patch.yml')
+    const webDir = join(dir, 'dsh-web-app')
+    if (!existsSync(base) || !existsSync(join(webDir, 'cordis.patch.yml'))) continue
+    const manifest = JSON.parse(readFileSync(join(webDir, 'package.json'), 'utf8')) as {
+      dsh: { bundle: { patch: string | string[] } }
+    }
+    return { label, files: [base, ...bundlePatchPaths(webDir, manifest.dsh.bundle)] }
+  }
+  return undefined
+}
+
+/** This bundle's declared patch list, as the boot reads it from `package.json`. */
+function ownPatches(): { files: readonly string[]; patches: PatchOptions[] } {
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as {
+    dsh: { bundle: { patch: string | string[] } }
+  }
+  const files = bundlePatchPaths(repoRoot, manifest.dsh.bundle)
+  return { files, patches: files.flatMap(file => loadOverlayPatches('test', file)) }
+}
+
+/**
+ * An installation anchor whose dependency closure is actually BUILT.
+ *
+ * The real boot imports host plugins from disk, so the anchor must point at a
+ * built DSH installation: this repo's sibling checkout after CI builds it, or
+ * the installed host. Prefer the checkout because CI's `pnpm test` runs before
+ * this package's own `pnpm build`, while the checkout is built earlier.
+ * @returns the absolute path of an installation's `package.json`.
+ * @throws when neither candidate supplies a built closure, because a silently
+ *   chosen unbuilt anchor would turn this suite's strongest test into a no-op.
+ */
+function builtInstallationAnchor(): string {
+  const checkout = resolve(repoRoot, process.env.DSH_CHECKOUT_DIR ?? '../deepseek-harness')
+  const candidates = [
+    join(checkout, 'apps', 'cli', 'package.json'),
+    join(homedir(), '.npm-global/lib/node_modules/@deepseek-ai/dsh', 'package.json'),
+  ]
+  for (const anchor of candidates) {
+    if (!existsSync(anchor)) continue
+    try {
+      const resolved = createRequire(anchor).resolve('@deepseek-ai/dsh-compaction-basic/package.json')
+      if (existsSync(join(dirname(resolved), 'lib', 'index.js'))) return anchor
+    } catch {
+      // An unbuilt or absent closure is the next candidate's turn.
+    }
+  }
+  throw new Error(
+    'no built DSH installation found: build the sibling checkout or install the host, so the real '
+    + 'registry can import the host plugins this test boots',
+  )
+}
+
+/** Cleanup thunks for the expensive boot scenario, run even if its test fails. */
+const bootCleanup: Array<() => void> = []
+afterAll(() => {
+  for (const cleanup of bootCleanup.splice(0)) cleanup()
+})
+
 describe('make-web-preset', () => {
-  it('derives standard-rollover with the engine row and untouched surroundings', () => {
-    const { presetsDir, outDir, cleanup } = scratch(standardFixture())
+  it('derives standard-rollover in the host inline format, with the engine row and untouched surroundings', () => {
+    const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
     try {
       run(['--presets-dir', presetsDir, '--out-dir', outDir, '--retain-tokens', '12000'])
-      const composition = readFileSync(join(outDir, 'standard-rollover', 'agent.cordis.yml'), 'utf8')
-      expect(composition).not.toContain(`name: '@deepseek-ai/dsh-compaction-basic'`)
-      expect(composition).toContain('- id: context-rollover')
-      // Portable relative specifier: the temp out dir sits beside nothing, so
-      // the entry must stay a relative path into this package's lib.
-      expect(composition).toContain(`name: '`)
-      expect(composition).toContain('lib/index.js')
-      expect(composition).toContain('thresholdRatio: 0.9')
-      expect(composition).toContain('retainTokens: 12000')
-      expect(composition).not.toContain('retainRatio')
-      // The preset row owns its model-facing tools and guidance explicitly.
-      expect(composition).toContain(`modelSurface: 'always'`)
-      // Untouched rows survive byte-identical around the swap.
-      expect(composition).toContain(`- id: persona\n  name: '@deepseek-ai/dsh-persona'`)
-      expect(composition).toContain(`- id: command-compact\n      name: '@deepseek-ai/dsh-command-compact'`)
-      const meta = readFileSync(join(outDir, 'standard-rollover', 'preset.yml'), 'utf8')
-      expect(meta).toContain('order: 2')
+      const generated = readFileSync(join(outDir, 'standard-rollover', 'declaration.patch.yml'), 'utf8')
+      // The engine replaces the host's summarizer; the preset id stays put.
+      expect(generated).not.toContain(`name: '@deepseek-ai/dsh-compaction-basic'`)
+      expect(generated).toContain('- id: context-rollover')
+      expect(generated).toContain("name: 'dsh-context-rollover'")
+      // The host's own inline declaration format: one preset row carrying
+      // `config.plugins`, not a `presets/<id>/agent.cordis.yml` directory.
+      const plugins = declarationPlugins(generated)
+      const compaction = plugins.find(row => row.id === 'compaction')
+      expect(compaction?.group).toBe(true)
+      expect(compaction?.isolate).toEqual({ compaction: true, toolResultPruner: true })
+      expect(declaredChild(generated, 'context-rollover')?.name).toBe('dsh-context-rollover')
+      expect(declaredChild(generated, 'context-rollover')?.config).toMatchObject({
+        thresholdRatio: 0.9,
+        reminderThresholdRatio: 0.4,
+        handoffOnly: true,
+        retainTokens: 12000,
+        handoffDir: '.scratch/handoff',
+        handoffPattern: 'HANDOFF-*.md',
+        modelSurface: 'always',
+      })
+      expect(declaredChild(generated, 'context-rollover')?.config).not.toHaveProperty('retainRatio')
+      // The declaration row is restamped, and the host's own rows survive.
+      expect(generated).toContain("    - id: preset-standard-rollover\n      name: '@deepseek-ai/dsh-agent-preset'")
+      expect(generated).toContain('        id: standard-rollover\n')
+      expect(generated).toContain('        order: 2\n')
+      expect(generated).toContain("              - id: command-compact\n                name: '@deepseek-ai/dsh-command-compact'")
     } finally {
       cleanup()
     }
   })
 
-  it('fails loud when the shipped row is absent', () => {
-    const { presetsDir, outDir, cleanup } = scratch('# no compaction here\n- id: persona\n  name: x\n')
+  it('swaps only the anchor row: every other byte of the host declaration survives', () => {
+    const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
+    try {
+      run(['--presets-dir', presetsDir, '--out-dir', outDir])
+      const generated = readFileSync(join(outDir, 'standard-rollover', 'declaration.patch.yml'), 'utf8')
+      // The expected text is the host declaration with EXACTLY the restamps the
+      // generator documents, so any other byte that moved shows up here.
+      const expected = hostDeclaration()
+        .replace('    - id: preset-standard\n', '    - id: preset-standard-rollover\n')
+        .replace('        id: standard\n', '        id: standard-rollover\n')
+        .replace(
+          '        order: 1\n',
+          '        name: "Standard + rollover (experimental)"\n'
+          + '        description: "Full coding agent with model-driven context rollover instead of summarization '
+          + '(generated from the host standard preset). Experimental opt-in; standard remains the default."\n'
+          + '        order: 2\n',
+        )
+      const [head, tail] = expected.split(ANCHOR_ROW)
+      if (head === undefined || tail === undefined) throw new Error('the expected text lost its anchor row')
+      const banner = '              # Generated by dsh-context-rollover'
+      const [generatedHead] = generated.split(banner)
+      expect(generatedHead).toBe(head)
+      // Everything BELOW the replaced row is byte-identical too: the generated
+      // text ends with the expected text's own tail, and the replacement's
+      // length accounts for the whole difference.
+      expect(generated).toMatch(new RegExp(`${tail === undefined ? '' : escapeRegExp(tail)}$`))
+      const replacement = generated.slice(head.length, generated.length - (tail?.length ?? 0))
+      expect(replacement).toContain('- id: context-rollover')
+      expect(replacement).toContain("name: 'dsh-context-rollover'")
+      expect(replacement.split('\n').filter(line => line.trimStart().startsWith('- id:'))).toEqual([
+        '              - id: context-rollover',
+      ])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('fails loud when the anchor row is absent', () => {
+    const { presetsDir, outDir, cleanup } = scratch(hostDeclaration().replaceAll('compaction-basic', 'compaction-renamed'))
     try {
       expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir])).toThrow(/compaction-basic row/)
     } finally {
@@ -102,153 +316,340 @@ describe('make-web-preset', () => {
     }
   })
 
-  it('fails loud when the shipped row gains an unexpected config block', () => {
-    const changed = standardFixture().replace(
-      `    - id: compaction-basic\n      name: '@deepseek-ai/dsh-compaction-basic'\n`,
-      `    - id: compaction-basic\n      name: '@deepseek-ai/dsh-compaction-basic'\n      config:\n        future: true\n`,
+  it('fails loud when the anchor row gains an unexpected block', () => {
+    const changed = hostDeclaration().replace(ANCHOR_ROW, `${ANCHOR_ROW}                config:\n                  future: true\n`)
+    const { presetsDir, outDir, cleanup } = scratch(changed)
+    try {
+      expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir])).toThrow(/unexpected block/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('fails loud when the compaction isolate group drifts', () => {
+    // The engine must publish inside a realm. Without one the registry rejects
+    // the whole mount as a leaked root-realm service, so a changed group has to
+    // stop the sync rather than generate a preset that cannot mount.
+    const changed = hostDeclaration().replace(
+      '            isolate:\n              compaction: true\n              toolResultPruner: true\n',
+      '            isolate:\n              compaction: true\n',
     )
     const { presetsDir, outDir, cleanup } = scratch(changed)
     try {
-      expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir])).toThrow(/unexpected config block/)
+      expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir])).toThrow(/compaction isolate group/)
     } finally {
       cleanup()
     }
   })
 
-  it('rejects out-of-range flags', () => {
-    const { presetsDir, outDir, cleanup } = scratch(standardFixture())
+  it('fails loud when the declaration row, preset id, or order is not the shipped one', () => {
+    const cases = [
+      ['declaration row id', hostDeclaration().replace('- id: preset-standard\n', '- id: preset-renamed\n')],
+      ['declaration preset id', hostDeclaration().replace('        id: standard\n', '        id: renamed\n')],
+      ['declaration order', hostDeclaration().replace('        order: 1\n', '        order: 7\n')],
+    ] as const
+    for (const [label, changed] of cases) {
+      const { presetsDir, outDir, cleanup } = scratch(changed)
+      try {
+        expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir]), label).toThrow(/expected exactly one/)
+      } finally {
+        cleanup()
+      }
+    }
+  })
+
+  it('rejects out-of-range, blank, and contradictory flags', () => {
+    const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
+    const base = ['--presets-dir', presetsDir, '--out-dir', outDir]
     try {
-      expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir, '--threshold-ratio', '2']))
-        .toThrow(/in \(0, 1\]/)
+      expect(() => run([...base, '--threshold-ratio', '2'])).toThrow(/in \(0, 1\]/)
+      expect(() => run([...base, '--reminder-ratio', '0.95'])).toThrow(/must not exceed --threshold-ratio/)
+      expect(() => run([...base, '--reminder-message', '   '])).toThrow(/reminder-message must be a non-empty string/)
+      expect(() => run([...base, '--handoff-dir', '  '])).toThrow(/handoff-dir must be a non-empty string/)
+      expect(() => run([...base, '--handoff-pattern', ''])).toThrow(/handoff-pattern must be a non-empty string/)
+      expect(() => run([...base, '--handoff-only', 'yes'])).toThrow(/--handoff-only must be true or false/)
+      expect(() => run([...base, '--handoff-max-chars', '0'])).toThrow(/handoff-max-chars must be a positive integer/)
+      expect(() => run([...base, '--retain-tokens', '1', '--retain-ratio', '0.5'])).toThrow(/exclusive/)
+      expect(() => run([...base, '--engine-name', '  '])).toThrow(/engine-name must be a non-empty string/)
+      expect(() => run([...base, '--preset-id', 'Not Valid'])).toThrow(/--preset-id must match/)
     } finally {
       cleanup()
     }
   })
 
-  it('defaults the reminder ratio to 0.4 and rejects a blank reminder message', () => {
-    const { presetsDir, outDir, cleanup } = scratch(standardFixture())
+  it('keeps every flag able to express the shipped values, in both handoffOnly directions', () => {
+    const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
+    const base = ['--presets-dir', presetsDir, '--out-dir', outDir]
     try {
-      run(['--presets-dir', presetsDir, '--out-dir', outDir])
-      const composition = readFileSync(join(outDir, 'standard-rollover', 'agent.cordis.yml'), 'utf8')
-      expect(composition).toContain('reminderThresholdRatio: 0.4\n')
-      expect(() => run([
-        '--presets-dir', presetsDir, '--out-dir', outDir, '--reminder-message', '   ',
-      ])).toThrow(/reminder-message must be a non-empty string/)
+      const read = (): unknown => declaredChild(
+        readFileSync(join(outDir, 'standard-rollover', 'declaration.patch.yml'), 'utf8'),
+        'context-rollover',
+      )?.config
+      run(base)
+      expect(read()).toMatchObject({ handoffOnly: true, retainRatio: 0.1, handoffMaxChars: 20000 })
+      run([...base, '--handoff-only', 'false'])
+      expect(read()).toMatchObject({ handoffOnly: false })
+      run([
+        ...base, '--threshold-ratio', '0.8', '--reminder-ratio', '0.3', '--handoff-max-chars', '4096',
+        '--handoff-dir', 'docs/handoff', '--handoff-pattern', 'NOTE-*.md', '--reminder-message', 'custom {percent}',
+        '--retain-tokens', '8192', '--engine-name', 'other-engine',
+      ])
+      expect(read()).toMatchObject({
+        thresholdRatio: 0.8,
+        reminderThresholdRatio: 0.3,
+        handoffMaxChars: 4096,
+        handoffDir: 'docs/handoff',
+        handoffPattern: 'NOTE-*.md',
+        reminderMessage: 'custom {percent}',
+        retainTokens: 8192,
+      })
+      expect(declaredChild(
+        readFileSync(join(outDir, 'standard-rollover', 'declaration.patch.yml'), 'utf8'),
+        'context-rollover',
+      )?.name).toBe('other-engine')
     } finally {
       cleanup()
     }
   })
 
-  it('committed preset matches a fresh sync of the repo standard fixture', () => {
-    // Temp dir inside the repo: the sync names the engine relatively, which
-    // cannot cross drives (the script fails loud on that instead).
-    const outDir = mkdtempSync(join(repoRoot, 'tmp-sync-'))
+  it('committed preset matches a fresh sync of the checked-in host declaration', () => {
+    const outDir = mkdtempSync(join(tmpdir(), 'dsh-web-preset-sync-'))
     try {
-      // The source composition is checked in here rather than read from a
-      // sibling harness checkout: the running host ships its presets as
-      // `.patch.yml` declarations, so no `standard/agent.cordis.yml` exists
-      // to sync from. The fixture carries exactly the shipped `standard`
-      // rows (verified row-for-row against the host's own declaration), so
-      // this still proves the committed preset is a fresh generation.
-      run(['--presets-dir', join(repoRoot, 'tests', 'fixtures'), '--out-dir', outDir])
-      const fresh = readFileSync(join(outDir, 'standard-rollover', 'agent.cordis.yml'), 'utf8')
-      const committed = readFileSync(join(repoRoot, 'presets', 'standard-rollover', 'agent.cordis.yml'), 'utf8')
-      expect(fresh).toBe(committed)
-      const freshMeta = readFileSync(join(outDir, 'standard-rollover', 'preset.yml'), 'utf8')
-      const committedMeta = readFileSync(join(repoRoot, 'presets', 'standard-rollover', 'preset.yml'), 'utf8')
-      expect(freshMeta).toBe(committedMeta)
+      run(['--presets-dir', join(repoRoot, 'tests', 'fixtures', 'host'), '--out-dir', outDir])
+      const fresh = readFileSync(join(outDir, 'standard-rollover', 'declaration.patch.yml'), 'utf8')
+      expect(fresh).toBe(readFileSync(COMMITTED, 'utf8'))
     } finally {
       rmSync(outDir, { recursive: true, force: true })
     }
   })
 
-  it('the shipped preset keeps no tail: handoffOnly is true and no tail budget is set', () => {
-    // The handoff-only contract is the preset's whole point, and it is a
-    // boolean rather than a tiny tail budget: `retainTokens: 0` was measured
-    // to keep the last surface node.
-    const committed = readFileSync(
-      join(repoRoot, 'presets', 'standard-rollover', 'agent.cordis.yml'),
-      'utf8',
-    )
-    expect(committed).toContain('handoffOnly: true')
-    expect(committed).not.toContain('handoffOnly: false')
+  it('the checked-in host fixture is the running host declaration, byte for byte', () => {
+    const source = hostDeclaration()
+    expect(createHash('sha256').update(source).digest('hex')).toBe(HOST_DECLARATION_SHA256)
+    // The generator must have a real anchor to read: the host's own inline
+    // preset row and the compaction group that row owns.
+    expect(source).toContain("    - id: preset-standard\n      name: '@deepseek-ai/dsh-agent-preset'")
+    expect(source).toContain(ANCHOR_ROW)
   })
 
-  it('renders handoffOnly on, and accepts an explicit false, and rejects a non-boolean', () => {
-    const { presetsDir, outDir, cleanup } = scratch(standardFixture())
-    try {
-      run(['--presets-dir', presetsDir, '--out-dir', outDir])
-      const generated = readFileSync(join(outDir, 'standard-rollover', 'agent.cordis.yml'), 'utf8')
-      expect(generated).toContain('handoffOnly: true')
-      // A tail budget can still be requested for a deployment that wants one.
-      run(['--presets-dir', presetsDir, '--out-dir', outDir, '--handoff-only', 'false'])
-      expect(readFileSync(join(outDir, 'standard-rollover', 'agent.cordis.yml'), 'utf8'))
-        .toContain('handoffOnly: false')
-      // A typo must fail loud rather than render a truthy string into YAML.
-      expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir, '--handoff-only', 'yes']))
-        .toThrow(/--handoff-only must be true or false/)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('a copy of the shipped preset keeps the 40% reminder and its message', () => {
+  it('the shipped preset carries the required engine configuration', () => {
     // Equality with a fresh generation would still hold if the generator and
-    // the committed preset both regressed to the old defaults, so the values
-    // the ticket requires are asserted directly on the committed artifact.
-    const committed = readFileSync(
-      join(repoRoot, 'presets', 'standard-rollover', 'agent.cordis.yml'),
-      'utf8',
+    // the committed preset both regressed, so assert the required values on the
+    // committed artifact directly, parsed the way a config loader reads it.
+    const engine = declaredChild(readFileSync(COMMITTED, 'utf8'), 'context-rollover')
+    expect(engine?.config).toMatchObject({
+      thresholdRatio: 0.9,
+      reminderThresholdRatio: 0.4,
+      handoffOnly: true,
+      handoffDir: '.scratch/handoff',
+      handoffPattern: 'HANDOFF-*.md',
+      modelSurface: 'always',
+    })
+    const message = (engine?.config as { reminderMessage?: string } | undefined)?.reminderMessage
+    expect(message).toContain('/handoff-doc')
+    expect(message).toContain('new_context')
+    expect(message).toContain('{percent}')
+  })
+})
+
+describe('bundle patch against the real host tree', () => {
+  it('applies every patch with nothing skipped, and every target row exists', () => {
+    const host = hostBundlePatches()
+    if (host === undefined) throw new Error('no host bundle patches found to compose against')
+    const own = ownPatches()
+    expect(own.files).toContain(COMMITTED)
+    const skipped: string[] = []
+    const rows = composeEntries(
+      [[...host.files.flatMap(file => loadOverlayPatches('test', file)), ...own.patches]],
+      message => skipped.push(message),
     )
-    expect(committed).toContain('reminderThresholdRatio: 0.4\n')
-    expect(committed).toContain('thresholdRatio: 0.9\n')
-    // The message renders as a YAML double-quoted scalar, so parse it back the
-    // way a config loader would rather than matching the rendered line.
-    const line = committed.split('\n').find(candidate => candidate.trimStart().startsWith('reminderMessage: '))
-    if (line === undefined) throw new Error('the preset engine row carries no reminderMessage')
-    const rendered = JSON.parse(line.trimStart().slice('reminderMessage: '.length)) as string
-    expect(rendered).toContain('/handoff-doc')
-    expect(rendered).toContain('new_context')
-    expect(rendered).toContain('{percent}')
+    // This is the whole defect: an unmatched patch id only WARNS and is
+    // skipped, so a nonzero count here is a bundle that installs, boots clean,
+    // and does nothing. The old patch targeted `agent-presets`, which does not
+    // exist on this host line.
+    expect(skipped).toEqual([])
+    const ids = rowIds(rows)
+    for (const patch of own.patches) {
+      if (typeof patch.id !== 'string') continue
+      expect(ids.has(patch.id), `this bundle patches ${patch.id}, which ${host.label} does not define`).toBe(true)
+    }
+    // The preset roster row this host line exposes, and the one it does not.
+    expect(ids.has('agent-preset-registry')).toBe(true)
+    expect(ids.has('agent-presets')).toBe(false)
+    // The generated declaration rides this bundle's patch list, so the preset
+    // row is present in the composed tree the boot would mount.
+    expect(findRow(rows, 'preset-standard-rollover')).toBeDefined()
+    expect(findRow(rows, 'compaction-basic')).toBeDefined()
   })
 
-  it('the repo fixture is the shipped standard shape the generator expects', () => {
-    // The sync's anchor row is the contract between the fixture and the
-    // generator: if either drifts, the sync above fails loud instead of the
-    // committed preset silently becoming un-reproducible.
-    const source = readFileSync(join(repoRoot, 'tests', 'fixtures', 'standard', 'agent.cordis.yml'), 'utf8')
-    expect(source).toContain(
-      `- id: compaction\n  name: cordis:group\n  group: true\n  isolate:\n`
-      + `    compaction: true\n    toolResultPruner: true\n  config:\n`,
-    )
-    expect(source.match(/^ {4}- id: compaction-basic\n {6}name: '@deepseek-ai\/dsh-compaction-basic'$/gm)).toHaveLength(1)
-    // The generated preset is the fixture's own bytes with only the engine row
-    // swapped: everything before the swap must survive untouched.
-    const [sourceHead] = source.split('    - id: compaction-basic')
-    const [committedHead] = readFileSync(
-      join(repoRoot, 'presets', 'standard-rollover', 'agent.cordis.yml'),
-      'utf8',
-    ).split('    # Generated by dsh-context-rollover')
-    expect(committedHead).toBe(sourceHead)
+  it('the roster row this host line exposes accepts only {default, selectedDefault}', () => {
+    // The old patch wrote `roots`/`includeShippedRoot`/`includeUserRoot` into
+    // that row. Those fields do not exist there, and the patch still "applied"
+    // because a patch replaces a row's whole config without validating it, so
+    // reading the real schema is what pins the shape this bundle must not fight.
+    const checkout = resolve(repoRoot, process.env.DSH_CHECKOUT_DIR ?? '../deepseek-harness')
+    const candidates = [
+      join(checkout, 'packages', 'preset', 'agent-preset-registry', 'src', 'index.ts'),
+      join(homedir(), '.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent-preset-registry/lib/index.js'),
+    ]
+    const source = candidates.find(candidate => existsSync(candidate))
+    if (source === undefined) throw new Error('no agent-preset-registry found to read its config schema')
+    const text = readFileSync(source, 'utf8')
+    expect(text).toContain('selectedDefault')
+    expect(text).not.toContain('includeShippedRoot')
+    expect(text).not.toContain('includeUserRoot')
   })
+})
 
-  it('registers the installed presets dir through a profile-relative expression', () => {
-    // The patch keeps its expression on one line; the capture below fails
-    // loud if anyone wraps it, instead of silently testing a stale copy.
-    const patch = readFileSync(join(repoRoot, 'cordis.patch.yml'), 'utf8')
-    expect(patch).toContain('default: standard')
-    expect(patch).toContain('includeShippedRoot: true')
-    expect(patch).toContain('includeUserRoot: true')
-    expect(patch).toContain('trust: system')
-    const line = patch.split('\n').find(candidate => candidate.includes('path: !!js '))
-    if (line === undefined) throw new Error('bundle patch has no !!js preset-root path')
-    const expr = line.slice(line.indexOf('path: !!js ') + 'path: !!js '.length).trim()
-    // baseUrl is the profile directory at boot; the expression must resolve
-    // the installed package's presets dir from it in any install layout.
-    // (Drive-letter URL: fileURLToPath rejects drive-less URLs on Windows.)
-    const base = 'file:///C:/fake-profiles/web/'
-    const resolved = evaluate({ baseUrl: base }, expr)
-    const expected = fileURLToPath(new URL('node_modules/dsh-context-rollover/presets/', base))
-    expect(resolved).toBe(expected)
-  })
+describe('the shipped declaration loads through the real preset registry', () => {
+  it('selecting standard-rollover resolves the session compaction service to THIS engine', async () => {
+    const anchor = builtInstallationAnchor()
+    const work = mkdtempSync(join(tmpdir(), 'dsh-web-preset-boot-'))
+    bootCleanup.push(() => { rmSync(work, { recursive: true, force: true }) })
+
+    // Build the engine straight from the checked-in `src`, into a private
+    // directory, and lay out that directory as a real INSTALL of this package:
+    // its manifest (with its own `dsh.bundle.patch` list), its bundle patch,
+    // and its generated declaration. CI runs `pnpm test` before this package's
+    // own `pnpm build`, so the shared `lib/` this row names at runtime may not
+    // exist yet, and a test must not create it as a side effect.
+    const engineDir = join(work, 'engine')
+    const manifest = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as {
+      name: string
+      dsh: { bundle: { patch: string | string[] } }
+      peerDependencies: Record<string, string>
+      peerDependenciesMeta?: Record<string, unknown>
+    }
+    execFileSync(process.execPath, [
+      join(repoRoot, 'node_modules/typescript/bin/tsc'), '-p', join(repoRoot, 'tsconfig.build.json'),
+      '--outDir', join(engineDir, 'lib'), '--declarationDir', join(engineDir, 'lib/types'),
+    ], { cwd: repoRoot, stdio: 'pipe' })
+    const engineName = manifest.name
+    cpSync(join(repoRoot, 'cordis.patch.yml'), join(engineDir, 'cordis.patch.yml'))
+    cpSync(
+      join(repoRoot, 'presets', 'standard-rollover'),
+      join(engineDir, 'presets', 'standard-rollover'),
+      { recursive: true },
+    )
+    // The manifest carries the real `peerDependencies`. They are not decoration:
+    // the host's linked-root routing reads THE IMPORTING PACKAGE's manifest to
+    // decide that a peer of this plugin resolves from the installation closure
+    // instead of its own directory, so a manifest without them would make the
+    // engine's own imports fail and this test would be measuring the wrong thing.
+    writeFileSync(join(engineDir, 'package.json'), JSON.stringify({
+      name: engineName, version: '0.0.0-test', type: 'module', main: 'lib/index.js',
+      files: ['lib', 'cordis.patch.yml', 'presets'],
+      dsh: manifest.dsh,
+      peerDependencies: manifest.peerDependencies,
+      ...(manifest.peerDependenciesMeta === undefined ? {} : { peerDependenciesMeta: manifest.peerDependenciesMeta }),
+    }))
+    expect(existsSync(join(engineDir, 'lib/index.js'))).toBe(true)
+
+    // A profile shaped like a real deployment's: the shipped bundle tuple plus
+    // this bundle, installed by link exactly as `dsh plugin add` records it.
+    const home = join(work, 'home')
+    const profileDir = join(home, 'profiles', 'spec')
+    mkdirSync(join(profileDir, 'node_modules'), { recursive: true })
+    symlinkSync(engineDir, join(profileDir, 'node_modules', engineName), 'dir')
+    writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify({
+      private: true,
+      dependencies: { [engineName]: `link:${engineDir}` },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', engineName] } },
+    }, null, 2)}\n`)
+
+    const profile = loadProfileDirectory('spec', profileDir, anchor, { userLayer: false })
+    expect(profile.skippedBundles).toEqual([])
+    expect(profile.layers.map(layer => layer.packageName)).toContain(engineName)
+    const resolution = await createRuntimeResolution({ installAnchor: anchor, profile })
+    const patches = profile.layers.flatMap(layer => layer.patches)
+
+    // Host rows with effects outside this process: a bound port, a served asset
+    // tree, file watching, telemetry, the browser roster. Everything that
+    // decides an agent's compaction backend stays real, and the boot's own
+    // startup audit is the assertion that the shipped graph is intact.
+    const overrides: PatchOptions[] = [
+      { id: 'storage-json', config: { root: join(work, 'storages') } },
+      { id: 'session-persistence-jsonl', config: { root: join(work, 'sessions') } },
+      { id: 'webserver', disabled: true },
+      { id: 'hmr', disabled: true },
+      { id: 'web-runtime', disabled: true },
+      { id: 'session-telemetry-otel', disabled: true },
+      { id: 'modules', disabled: true },
+      { id: 'connection', disabled: true },
+      { id: 'session-log-download', disabled: true },
+      { id: 'open-in-app', disabled: true },
+      { id: 'client-hmr', disabled: true },
+      { id: 'directory-picker', disabled: true },
+      // Choosing the deployment default stays the deployment's business; the
+      // shipped preset only has to be selectable.
+      { id: 'agent-preset-registry', config: { default: 'standard' } },
+    ]
+    const rootConfig = join(profileDir, 'cordis.yml')
+    writeFileSync(rootConfig, '[]\n')
+
+    // The engine's notes store and every other `dshHomePath` reader must stay
+    // inside this test, never the developer's own harness home.
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    const skips: string[] = []
+    let ctx: Context | undefined
+    try {
+      ctx = await boot('dsh-web-preset-test', rootConfig, [...patches, ...overrides], async (bootCtx) => {
+        bootCtx.logger.exporter({
+          levels: { default: 2 },
+          export: ({ type, args }) => {
+            if (type === 'warn' || type === 'error') skips.push(args.map(String).join(' '))
+          },
+        })
+        bootCtx.provide('profileContext', {
+          name: 'spec', dir: profileDir, patchPath: join(profileDir, 'cordis.patch.yml'),
+          installAnchor: anchor, home, cwd: work,
+          startedBundles: profile.layers.map(layer => layer.packageName),
+          overlays: [], telemetryDisabledEnv: '1',
+        })
+        await bootCtx.plugin(PluginPackages, { resolution })
+        bootCtx.provide('connection', {
+          fetch: { register: () => () => {} }, rpc: { intercept: () => () => {} },
+        } as never)
+      })
+      const registry = ctx.get('agentPresets')
+      expect(registry).toBeDefined()
+      // A patch this bundle declares that no host row matched appears here as
+      // `patch: entry "..." not found`, while the boot still succeeds.
+      expect(skips.filter(line => line.includes('patch:'))).toEqual([])
+
+      const listed = await registry!.list()
+      expect(listed.map(row => row.id)).toContain('standard-rollover')
+      expect(listed.find(row => row.id === 'standard-rollover')?.broken).toBeUndefined()
+
+      const handle = await ctx.agents.create({
+        sessionId: SessionId('web-preset-resolution'),
+        setup: async (agentCtx: Context) => { await registry!.mount(agentCtx, 'standard-rollover') },
+      })
+      const agent: Agent = handle.agent
+      const service = registry!.serviceFor(agent, 'compaction') as CompactionEngine | undefined
+      expect(service).toBeDefined()
+      // The row RESOLVED and mounted: this engine, not the host's summarizer.
+      expect(service?.constructor.name).toBe('ContextRolloverEngine')
+      expect(service?.constructor.name).not.toBe('BasicCompactionEngine')
+      // The engine's own resolved configuration, read off the mounted instance
+      // rather than off the declaration text: this is the session's live service.
+      expect((service as CompactionEngine & { config: unknown }).config).toMatchObject({
+        thresholdRatio: 0.9,
+        reminderThresholdRatio: 0.4,
+        handoffOnly: true,
+        handoffDir: '.scratch/handoff',
+        handoffPattern: 'HANDOFF-*.md',
+      })
+      // The mounted composition carries this engine's row and no summarizer.
+      const inventory = await registry!.compositionInventory()
+      const rows = inventory.find(row => row.id === 'standard-rollover')?.rows ?? []
+      expect(rows.map(row => row.moduleName)).toContain(engineName)
+      expect(rows.map(row => row.entryId)).not.toContain('compaction-basic')
+    } finally {
+      await ctx?.fiber.dispose()
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+  }, 300_000)
 })
