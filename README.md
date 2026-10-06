@@ -284,6 +284,27 @@ identical, and fails loud when that declaration's shape drifts. See
 on a different host line must do, and why a patch that matches no row is a
 silent no-op rather than an error.
 
+### The 0.90 emergency fallback has no model in the loop
+
+`thresholdRatio` (0.90) fires when the 40% reminder was ignored and the window is
+about to overflow. At that point **no model is available to write anything**, so
+the engine cannot ask for a handoff: it scans `handoffDir` (default
+`.scratch/handoff`, relative to the session working directory) for files matching
+`handoffPattern` (default `HANDOFF-*.md`) and takes the **newest by modification
+time**. So the emergency path lands on the most recently written handoff
+document, not necessarily the one for the current task.
+
+The scan is shrink-aware, and the order matters: the newest candidate that is
+smaller than the span it would replace wins; if no candidate qualifies (none
+exists, all are unreadable, empty, oversized, or too large to shrink the span),
+the engine falls back to the deterministic notes checkpoint so the context is
+still reduced instead of stalling. The sizing decision is made BEFORE the
+compaction lock is taken, so a rejected candidate leaves no failed transaction in
+the log.
+
+If a task's handoff must survive an emergency rollover, keep it as the newest
+file in `handoffDir`, or ignore the 40% reminder at your own risk.
+
 Configuration (cordis.yml `config` on the plugin row):
 
 ```yaml
