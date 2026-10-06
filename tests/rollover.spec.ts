@@ -152,6 +152,82 @@ describe('commitRollover', () => {
     )).rejects.toThrow(/not smaller than the shadowed content/)
   })
 
+  it('re-prices rather than trusting a pinned sizing whose span is not the one committed', async () => {
+    const meter = await bareMeter()
+    const session = closedConversation(4)
+    const nodes = session.surface.nodes
+    const start = nodes[0]
+    const end = nodes[nodes.length - 1]
+    if (start === undefined || end === undefined) throw new Error('expected surface nodes')
+
+    // A pinned sizing is a claim about ONE span and candidate. This one claims a
+    // span of a single node that is not the span being committed, so it must not
+    // be reusable: if the guard trusted it, this replacement (which is far too
+    // large for the span it actually replaces) would commit and silently grow the
+    // context. Re-pricing instead rejects it, which is the safe direction.
+    await expect(commitRollover(
+      { meter },
+      session,
+      start,
+      end,
+      {
+        owner: null,
+        pinnedSizing: {
+          shadowedRouteTokens: 100_000,
+          replacementTokens: 1,
+          fits: true,
+          shadowedSeqs: [nodes[0] as never],
+        },
+        replacement: {
+          kind: 'checkpoint',
+          checkpoint: {
+            reason: 'model-requested',
+            windowNumber: 1,
+            notes: 'note'.repeat(5000),
+            handoff: null,
+          },
+        },
+      },
+    )).rejects.toThrow(/not smaller than the shadowed content/)
+  })
+
+  it('uses an accepted pinned sizing over the exact span it measured', async () => {
+    const meter = await bareMeter()
+    const session = closedConversation(4)
+    const measurement = meter.measure(session)
+    const range = selectRolloverRange(session, measurement, { kind: 'handoff-only' })
+    if (range === null) throw new Error('expected a compactable range')
+
+    const replacement = {
+      kind: 'checkpoint' as const,
+      checkpoint: {
+        reason: 'manual' as const,
+        windowNumber: 1,
+        notes: '- goal: prove the pinned path commits',
+        handoff: null,
+      },
+    }
+    // Price the candidate the way a preflight would, over exactly this span.
+    const { sizeRolloverReplacement } = await import('../src/rollover.ts')
+    const sizing = sizeRolloverReplacement({ meter }, session, range, replacement)
+
+    // The committed replacement is deliberately LARGER than the real span (a long
+    // note), so only the pinned snapshot can let it through. A commit therefore
+    // proves the pinned numbers were used, and this test fails if the plumbing
+    // stops passing them on.
+    const pinned = { ...sizing, shadowedRouteTokens: 10_000_000, replacementTokens: 1, fits: true }
+    const result = await commitRollover({ meter }, session, range.start, range.end, {
+      owner: null,
+      pinnedSizing: pinned,
+      replacement: {
+        kind: 'checkpoint',
+        checkpoint: { ...replacement.checkpoint, notes: 'note'.repeat(5000) },
+      },
+    })
+    expect(result.shadowedSeqs.length).toBeGreaterThan(0)
+    expect(countRollovers(session)).toBe(1)
+  })
+
   it('refuses a second rollover while the compaction lock is open', async () => {
     const meter = await bareMeter()
     const session = closedConversation(4)

@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { createAssistantMessage, createSystemMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createSystemMessage, createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
@@ -160,13 +160,14 @@ describe('the handoffOnly selector', () => {
     expect(selectRolloverRange(session, meter.measure(session), { kind: 'handoff-only' })).toBeNull()
   })
 
-  it('backs the cut up to the nearest earlier balanced cut while a tool call is in flight', async () => {
+  it('defers the rollover while a tool call is in flight, then crosses with nothing old left', async () => {
     const meter = await bareMeter()
     const session = closedConversation(6, 20)
     // An open turn whose assistant tool call has no result yet: the cut after
     // that node is tool-pairing UNBALANCED, so a span ending there would split
-    // the call from its result. This is the one real host constraint, and it is
-    // handled by walking back rather than by retaining a priced tail.
+    // the call from its result. The mode defers instead of walking back: an
+    // earlier cut would leave the material between it and the tail on the fresh
+    // surface, which is the one thing this mode forbids.
     session.append('turn/start', { turn: 7 })
     session.append('step/start', { turn: 7, step: 1 })
     session.append('assistant/message', {
@@ -180,15 +181,31 @@ describe('the handoffOnly selector', () => {
     }, { surfaceOp: 'append' })
 
     const nodes = session.surface.nodes
-    const last = nodes[nodes.length - 1]
-    if (last === undefined) throw new Error('expected a surface tail')
+    const callNode = nodes[nodes.length - 1]
+    if (callNode === undefined) throw new Error('expected a surface tail')
+
+    // No range at all at this pre-step: no rollover, and crucially no
+    // partial-span fallback that would retain the in-flight call.
+    expect(selectRolloverRange(session, meter.measure(session), { kind: 'handoff-only' })).toBeNull()
+
+    // The result arrives, exactly as the host guarantees it will, and the very
+    // next pre-step crosses with the whole prior surface inside the span.
+    session.append('tool/result', {
+      turn: 7,
+      step: 1,
+      message: createToolResultMessage({
+        callId: ToolCallId('t7'),
+        content: [{ type: 'text', text: 'result: t7' }],
+        isError: false,
+      }),
+    }, { surfaceOp: 'append' })
 
     const range = selectRolloverRange(session, meter.measure(session), { kind: 'handoff-only' })
-    if (range === null) throw new Error('expected a compactable range')
-    // The in-flight call is outside the span: the span ends one node earlier.
-    expect(range.end).not.toBe(last)
-    expect(range.end).toBe(nodes[nodes.length - 2])
-    expect(range.shadowedSeqs).not.toContain(last)
+    if (range === null) throw new Error('expected a compactable range once the result landed')
+    // The span now runs through the result: nothing, including the tool call
+    // that was in flight, is left outside it.
+    expect(range.end).toBe(session.surface.nodes[session.surface.nodes.length - 1])
+    expect(range.shadowedSeqs).toContain(callNode)
 
     const documentText = '# Handoff\n\nContinue from the mid-call document.\n'
     await commitRollover(
@@ -208,14 +225,15 @@ describe('the handoffOnly selector', () => {
     )
     expect(countRollovers(session)).toBe(1)
 
-    // The only old material left is that single incomplete call unit; no other
-    // pre-rollover exchange survived.
-    expect(surfaceNodeTypes(session)).toEqual(['user/message', 'assistant/message'])
+    // No old material of ANY kind survives: not the incomplete call unit, and
+    // not any pre-rollover exchange.
+    expect(surfaceNodeTypes(session)).toEqual(['user/message'])
     const texts = session.deriveMessages().map(message => message.content
       .map(block => block.type === 'text' ? block.text : `[${block.type}]`)
       .join(''))
     expect(texts).toContain(documentText)
-    expect(texts.join('\n')).toContain('[tool-call]')
+    expect(texts.join('\n')).not.toContain('[tool-call]')
+    expect(texts.join('\n')).not.toContain('[tool-result]')
     expect(texts.join('\n')).not.toContain('exchange 1')
     expect(texts.join('\n')).not.toContain('exchange 6')
   })
@@ -313,7 +331,7 @@ describe('new_context replaces the whole surface with the handoff document', () 
     expect(countRollovers(session)).toBe(windowBefore + 1)
   })
 
-  it('refuses a handoff that cannot shrink the span, leaving the surface intact and not substituting notes', async () => {
+  it('refuses a handoff that cannot shrink the span in the tool result, leaving the surface intact', async () => {
     const cwd = await scratch('dsh-handoff-only-shrink-')
     const documentPath = join(cwd, 'HANDOFF-too-big.md')
     // Comfortably over the whole small surface's priced size (and under the
@@ -337,6 +355,8 @@ describe('new_context replaces the whole surface with the handoff document', () 
       originalWarn(message)
     }
 
+    // Driven through the real loop, so the refusal is the tool result the model
+    // reads rather than a warning it never sees.
     const adapter = new ScriptedAdapter([
       textResponse('tiny answer one'),
       newContextCall(JSON.stringify({ handoff_path: documentPath })),
@@ -362,16 +382,28 @@ describe('new_context replaces the whole surface with the handoff document', () 
     expect(visible).toContain('small request one')
     expect(visible).not.toContain('## Durable notes')
     expect(visible).not.toContain('prove no notes substitution')
-    expect(visible).not.toContain('HANDOFF-too-big')
-    // The refusal is reported, not swallowed silently...
-    expect(warnings.some(message => message.includes('not smaller than the shadowed content'))).toBe(true)
-    // The refusal names the exact document the model chose, not a generic
-    // "replacement": the model named one file and must be told which one lost.
-    expect(warnings.some(message => message.includes(documentPath))).toBe(true)
-    // ...and the failed attempt still closed its bracket.
-    const ends = sessionEvents(session).filter(event => event.type === 'compaction/end')
-    expect(ends).toHaveLength(1)
-    expect(JSON.stringify(ends[0]?.data)).toContain('not smaller than the shadowed content')
+
+    // The refusal is MODEL-VISIBLE: an error tool result naming the exact
+    // document the model chose and the reason, not a silent success and not a
+    // warning only the operator can read.
+    const refusals = session.surface.nodes
+      .map(seq => sessionEventAt(session, seq))
+      .filter((event): event is SessionEvent<'tool/result'> => event?.type === 'tool/result')
+      .filter(event => event.data.message.isError === true)
+    expect(refusals).toHaveLength(1)
+    const refusalText = JSON.stringify(refusals[0]?.data.message.content)
+    expect(refusalText).toContain('not smaller than the shadowed content')
+    expect(refusalText).toContain(documentPath)
+    expect(refusalText).not.toContain('A new context window will start')
+
+    // A refusal raised before any durable effect: no failed attempt was left in
+    // the log, which is the whole reason the size check runs in the tool.
+    const types = logTypes(session)
+    expect(types).not.toContain('compaction/start')
+    expect(types).not.toContain('compaction/summary')
+    expect(types).not.toContain('compaction/end')
+    // The engine never had to refuse, because the tool never requested it.
+    expect(warnings.some(message => message.includes('context rollover failed'))).toBe(false)
   })
 })
 

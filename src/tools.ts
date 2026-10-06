@@ -16,7 +16,7 @@ import type { ResolvedRolloverConfig } from './config.ts'
 import { readHandoffFileOrThrow } from './handoff.ts'
 import { readHistoryItem, searchHistory } from './history.ts'
 import { NotesStore } from './notes.ts'
-import { countRollovers, rolloverSummarySeqs } from './rollover.ts'
+import { countRollovers, preflightRolloverReplacement, replacementSubject, rolloverSummarySeqs, rolloverTooLargeMessage } from './rollover.ts'
 import type { PendingRollover } from './state.ts'
 
 /** Runtime collaborators the tool bodies need. */
@@ -125,6 +125,38 @@ function newContextTool(deps: RolloverToolDependencies) {
         cwd: session.header.cwd,
         maxChars: deps.config.handoffMaxChars,
       })
+      // Size the candidate here too, for the same reason the read is here. The
+      // engine crosses the boundary later and its shrink guard runs inside a
+      // pre-step listener that turns every failure into `ctx.logger.warn(...)`,
+      // which the model never reads. Answering `accepted: true` for a document
+      // that guard will refuse would tell the model the rollover happened while
+      // its context stayed exactly as it was. Thrown from `execute`, the
+      // refusal becomes the model-visible `tool/result` with `isError: true`.
+      // The engine's own guard stays as the authority for the commit.
+      const preflight = preflightRolloverReplacement(
+        { meter: deps.meter },
+        session,
+        deps.config,
+        {
+          kind: 'handoff-document',
+          windowNumber: countRollovers(session) + 1,
+          text: document.text,
+          path: document.path,
+        },
+      )
+      if (preflight.kind === 'no-span') {
+        throw new Error(
+          'there is nothing to roll over yet: the active context has no replaceable span '
+          + 'beyond its standing instructions, so a new window would not free any space',
+        )
+      }
+      if (!preflight.sizing.fits) {
+        throw new Error(rolloverTooLargeMessage(
+          replacementSubject({ kind: 'handoff-document', path: document.path }),
+          preflight.sizing,
+        )
+          + '; shorten the handoff document and call new_context again')
+      }
       deps.pendingRollovers.set(session.id, {
         handoff: document.text,
         handoffPath: document.path,

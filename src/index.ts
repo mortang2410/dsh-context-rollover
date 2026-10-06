@@ -39,9 +39,10 @@ import {
   PLUGIN_NAME,
   REMINDER_SUMMARY_PREFIX,
   selectRolloverRange,
+  selectionFor,
   sizeRolloverReplacement,
 } from './rollover.ts'
-import type { RolloverRange, RolloverSelection } from './rollover.ts'
+import type { RolloverRange, RolloverSelection, RolloverSizing } from './rollover.ts'
 import { replacementWindowNumber } from './checkpoint.ts'
 import { createRolloverTools } from './tools.ts'
 import type { PendingRollover } from './state.ts'
@@ -227,12 +228,18 @@ export class ContextRolloverEngine extends CompactionEngine {
         try {
           const pending = this.pendingRollovers.get(agent.session.id)
           if (pending !== undefined) {
-            this.pendingRollovers.delete(agent.session.id)
-            await this.performRollover(agent, {
+            // The request is only cleared once it has actually been honoured.
+            // Under `handoff-only` a pre-step whose tail cut is unbalanced
+            // (the model's own `new_context` call has no result yet) selects no
+            // span and defers; clearing the request first would silently drop
+            // the boundary the model asked for, and the next pre-step, which is
+            // the one that can cross, would never try.
+            const result = await this.performRollover(agent, {
               reason: 'model-requested',
               handoff: pendingHandoff(pending),
               handoffPath: pending.handoffPath,
             }, signal)
+            if (result !== null) this.pendingRollovers.delete(agent.session.id)
           } else {
             await this.rollOverOnPressure(agent, turn, signal)
           }
@@ -384,15 +391,24 @@ export class ContextRolloverEngine extends CompactionEngine {
     const session = agent.session
     const range = selectRolloverRange(session, this.ctx.tokenMeter.measure(session), this.selection(session))
     if (range === null) {
+      // A deferral is not a failure and is not logged as one: the surface has
+      // no selectable span at this pre-step, which under `handoff-only` means
+      // the tail cut is still unbalanced and the next pre-step retries.
       this.ctx.logger.info('context rollover skipped: no compactable surface span (context is already minimal)')
       return null
     }
     // The emergency path decides which candidate to write BEFORE the lock is
     // taken, because a refused candidate must leave no failed transaction in
-    // the durable log. Every other path resolves one replacement by
-    // construction and keeps the transaction's own shrink guard as the check.
-    const replacement = request.emergency === true
+    // the durable log. It hands its accepted sizing to the transaction, so the
+    // guard decides with the numbers that were accepted rather than re-pricing
+    // the same span after `compaction/start` is already durable. Every other
+    // path resolves one replacement by construction and keeps the transaction's
+    // own shrink guard as the check.
+    const chosen = request.emergency === true
       ? await this.emergencyReplacement(session, request.reason, range)
+      : null
+    const replacement = request.emergency === true
+      ? chosen?.replacement ?? null
       : await this.replacementFor(session, request)
     if (replacement === null) {
       this.ctx.logger.info(
@@ -406,7 +422,11 @@ export class ContextRolloverEngine extends CompactionEngine {
       session,
       range.start,
       range.end,
-      { owner: 'current-turn', replacement },
+      {
+        owner: 'current-turn',
+        replacement,
+        ...chosen === null ? {} : { pinnedSizing: chosen.sizing },
+      },
     )
     this.ctx.logger.info(
       `context rollover (${request.reason}): window ${windowNumber} started; `
@@ -435,13 +455,14 @@ export class ContextRolloverEngine extends CompactionEngine {
    * @param session - session whose window number is being started.
    * @param reason - the rollover reason, carried into a notes checkpoint.
    * @param range - the selected span every candidate is priced against.
-   * @returns the replacement to commit, or `null` when nothing would shrink.
+   * @returns the replacement to commit with the sizing that accepted it, or
+   *   `null` when nothing would shrink.
    */
   private async emergencyReplacement(
     session: Session,
     reason: RolloverReason,
     range: RolloverRange,
-  ): Promise<RolloverReplacement | null> {
+  ): Promise<{ readonly replacement: RolloverReplacement; readonly sizing: RolloverSizing } | null> {
     const windowNumber = countRollovers(session) + 1
     const cwd = session.header.cwd
     const candidates = await scanHandoffDir({
@@ -481,7 +502,7 @@ export class ContextRolloverEngine extends CompactionEngine {
         )
         continue
       }
-      return replacement
+      return { replacement, sizing }
     }
     const checkpoint: RolloverReplacement = {
       kind: 'checkpoint',
@@ -493,23 +514,23 @@ export class ContextRolloverEngine extends CompactionEngine {
       },
     }
     const sizing = sizeRolloverReplacement({ meter: this.ctx.tokenMeter }, session, range, checkpoint)
-    return sizing.fits ? checkpoint : null
+    return sizing.fits ? { replacement: checkpoint, sizing } : null
   }
 
   /**
    * How this deployment selects the span one rollover replaces.
    *
-   * `handoffOnly` is a distinct mode rather than `retainTokens: 0`: a zero
-   * token budget still keeps the last surface node, and walks further back for
-   * tool pairing, which is exactly the old-session material the handoff-only
-   * contract forbids.
+   * The rule itself lives in `selectionFor` so the engine and the
+   * `new_context` size preflight cannot disagree about which span a document is
+   * priced against. `handoffOnly` is a distinct mode rather than
+   * `retainTokens: 0`: a zero token budget still keeps the last surface node,
+   * and walks further back for tool pairing, which is exactly the old-session
+   * material the handoff-only contract forbids.
    * @param session - session whose configured tail budget is priced.
    * @returns the retention rule for this deployment.
    */
   private selection(session: Session): RolloverSelection {
-    return this.config.handoffOnly
-      ? { kind: 'handoff-only' }
-      : { kind: 'tail', retainTokens: this.resolveTailTokens(session) }
+    return selectionFor(this.config, session)
   }
 
   /**
@@ -567,15 +588,6 @@ export class ContextRolloverEngine extends CompactionEngine {
       if (event.type === 'turn/end') return -1
     }
     return -1
-  }
-
-  /** Resolve the recent-tail token budget for one session. */
-  private resolveTailTokens(session: Session): number {
-    if (this.config.retainTokens !== null) return this.config.retainTokens
-    const contextWindow = session.requestContext()?.contextWindow
-    return contextWindow === undefined
-      ? 4096
-      : Math.floor(contextWindow * this.config.retainRatio)
   }
 
   /** Resolve the notes store for one session. */

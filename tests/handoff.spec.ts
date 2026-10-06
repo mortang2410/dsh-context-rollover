@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { readHandoffFile, readHandoffFileOrThrow, HandoffError } from '../src/handoff.ts'
 import { resolveConfig } from '../src/config.ts'
-import { engineHarness } from './harness.ts'
+import { engineHarness, followup, ScriptedAdapter, textResponse } from './harness.ts'
 
 /** Scratch directories removed after the run, wherever a case creates one. */
 const scratchDirs: string[] = []
@@ -295,6 +295,17 @@ describe('new_context refuses where the model can read it', () => {
     await writeFile(join(dir, '.scratch', 'handoff', 'HANDOFF-topic.md'), documentText, 'utf8')
 
     const { ctx, agent, engine } = await engineHarness('handoff-tool-ok', {}, { cwd: dir })
+    // A real conversation first. `new_context` refuses when the active context has no
+    // replaceable span beyond its standing instructions, because a boundary there would
+    // free nothing and the engine would decline the commit - so accepting the request
+    // would report a rollover that never happens. An empty session is that case, which
+    // the refusal test below covers; this case needs a span to price.
+    const adapter = new ScriptedAdapter(
+      Array.from({ length: 12 }, (_unused, index) => textResponse(`turn ${index} ${'detail '.repeat(60)}`)),
+    )
+    ctx.llm.registerAdapter(['mock'], adapter)
+    for (let turn = 0; turn < 12; turn += 1) await followup(agent, `question ${turn}`)
+
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
       callId: 'h4' as never,

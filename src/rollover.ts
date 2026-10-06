@@ -29,6 +29,7 @@ import { nodeHeuristicTokens, replaceSurfaceOp, sessionEventAt, sessionEvents } 
 import type { Seq } from './compat.ts'
 import { buildReplacementText, replacementWindowNumber } from './checkpoint.ts'
 import type { RolloverReplacement } from './checkpoint.ts'
+import type { ResolvedRolloverConfig } from './config.ts'
 
 /**
  * Cordis plugin name this engine registers under, and the message-source
@@ -97,6 +98,54 @@ export interface RolloverSizing {
   readonly replacementTokens: number
   /** True when the replacement is strictly smaller than the span it replaces. */
   readonly fits: boolean
+  /**
+   * The exact span these numbers were measured over, in current surface order.
+   *
+   * {@link commitRollover} reuses the accepted numbers as the preflight's own
+   * decision, and that reuse is only sound over a span that still contains the
+   * measured one: a span price taken from a larger span must never stand in for
+   * a smaller one. The seqs are what makes that containment checkable.
+   */
+  readonly shadowedSeqs: readonly Seq[]
+}
+
+/**
+ * What one refusal calls the candidate it refused.
+ *
+ * A handoff document names itself: the model chose that exact file, so a
+ * refusal has to say which file was too large rather than leaving the model to
+ * guess which candidate lost. Only `kind` and `path` are read, so a caller that
+ * has not finished composing a full replacement (the `new_context` preflight
+ * reads a document before it has a window number) can still name it.
+ * @param replacement - the replacement being priced, or its kind and path.
+ * @returns the sentence subject for a size refusal.
+ */
+export function replacementSubject(
+  replacement: Pick<RolloverReplacement, 'kind'> & { readonly path?: string },
+): string {
+  return replacement.kind === 'handoff-document' && replacement.path !== undefined
+    ? `handoff document ${replacement.path}`
+    : 'rollover replacement'
+}
+
+/**
+ * The one sentence a size refusal carries, for the tool's preflight and the
+ * transaction's own guard.
+ *
+ * One formatter means the refusal the model reads is the refusal the durable
+ * `compaction/end` carries, so the two can never describe the same refusal
+ * differently.
+ * @param subject - what was refused, phrased as the sentence subject.
+ * @param sizing - the measured span price and replacement price.
+ * @returns one actionable sentence naming the cause.
+ */
+export function rolloverTooLargeMessage(
+  subject: string,
+  sizing: Pick<RolloverSizing, 'replacementTokens' | 'shadowedRouteTokens'>,
+): string {
+  return `the ${subject} is not smaller than the shadowed content `
+    + `(${sizing.replacementTokens} estimated tokens >= ${sizing.shadowedRouteTokens}); `
+    + 'the active context is too small for a useful rollover'
 }
 
 /** Options for one rollover transaction. */
@@ -109,6 +158,20 @@ export interface CommitRolloverOptions {
   readonly sourceCommandId?: CommandId
   /** Optional durability checkpoint after a successfully closed bracket. */
   readonly flush?: () => Promise<void>
+  /**
+   * A preflight's accepted sizing for this exact span and candidate.
+   *
+   * When present, the transaction's shrink guard decides with these numbers
+   * instead of re-pricing the span. `sizeRolloverReplacement` and this guard
+   * would otherwise each call `meter.measure` and `meter.estimateMessage`
+   * separately, with `compaction/start` appended in between, so a
+   * `request/header` landing in that window can change route pricing and make
+   * the guard reject what the preflight accepted. Reusing one snapshot removes
+   * that window. The span is still verified against the surface, and a sizing
+   * whose span is not the one being replaced is refused rather than trusted, so
+   * a stale snapshot cannot outlive its span.
+   */
+  readonly pinnedSizing?: RolloverSizing
 }
 
 /** How one rollover selects the span it replaces. */
@@ -122,11 +185,141 @@ export type RolloverSelection =
   | {
       /**
        * Retain no tail: replace everything but a `system/message` at surface
-       * node 0, backing off only to the nearest earlier tool-pairing balanced
-       * cut. See {@link selectRolloverRange}.
+       * node 0, and only when the cut after the LAST node is tool-pairing
+       * balanced. Otherwise no range is returned for this pre-step (a
+       * deferral). See {@link selectRolloverRange}.
        */
       readonly kind: 'handoff-only'
     }
+
+/**
+ * The recent-tail budget used when a session has no context window to scale by.
+ *
+ * A session without a routed request window cannot compute `retainRatio` of
+ * anything, and retaining nothing would silently turn tail mode into
+ * handoff-only mode, so the same absolute fallback every host line uses is
+ * applied instead.
+ */
+const DEFAULT_TAIL_TOKENS = 4096
+
+/**
+ * How one resolved configuration selects the span a rollover replaces.
+ *
+ * Both the engine and the `new_context` size preflight call this, so the span
+ * the tool prices is the span the engine will replace. Two copies of this rule
+ * would let the preflight approve a document against a span the transaction
+ * never selects.
+ * @param config - the engine's resolved configuration.
+ * @param session - session whose context window prices the tail budget.
+ * @returns the retention rule for this deployment.
+ */
+export function selectionFor(
+  config: ResolvedRolloverConfig,
+  session: Session,
+): RolloverSelection {
+  if (config.handoffOnly) return { kind: 'handoff-only' }
+  if (config.retainTokens !== null) return { kind: 'tail', retainTokens: config.retainTokens }
+  const contextWindow = session.requestContext()?.contextWindow
+  return {
+    kind: 'tail',
+    retainTokens: contextWindow === undefined
+      ? DEFAULT_TAIL_TOKENS
+      : Math.floor(contextWindow * config.retainRatio),
+  }
+}
+
+/**
+ * The first surface position a rollover may replace.
+ *
+ * A `system/message` at surface node 0 is never inside the range: newer hosts
+ * reject rewriting it with anything but a single-node system rewrite. Without
+ * one the range starts at node 0, which keeps this identical to the old
+ * behavior on hosts without a system head.
+ * @param session - session supplying the surface events.
+ * @param surfaceNodes - the current surface positions, in order.
+ * @returns `1` when a `system/message` occupies node 0, else `0`.
+ */
+function firstReplaceableIndex(session: Session, surfaceNodes: readonly Seq[]): number {
+  const first = surfaceNodes[0]
+  if (first === undefined) return 0
+  const head = sessionEventAt(session, first)
+  return head !== undefined && (head.type as string) === 'system/message' ? 1 : 0
+}
+
+/**
+ * The span a handoff-only rollover would replace once any in-flight tool call
+ * has settled: everything after a `system/message` head, through the tail.
+ *
+ * The `new_context` tool runs while the model's own tool call is the surface
+ * tail and has no result yet (the host appends the assistant message and only
+ * then runs the call: `packages/core/agent-loop/src/agent.ts`), so the trailing
+ * cut is unbalanced and {@link selectRolloverRange} correctly defers. The tool
+ * still has to answer the model about SIZE at that moment, so it prices this
+ * prospective span instead.
+ *
+ * Pricing the prospective span is the conservative choice, and deliberately so.
+ * The engine crosses later, on a surface that contains this one plus at least
+ * the landed result, so the engine's span always CONTAINS this span and
+ * therefore prices at least as high. A candidate that fits here (strictly
+ * smaller than a smaller span) therefore fits there too, which is what makes a
+ * tool-time acceptance safe to give. The reverse does not hold, so this can
+ * refuse a candidate the engine would have accepted; that is the acceptable
+ * direction, because a refusal is visible to the model and costs one retry with
+ * a shorter document, while a false acceptance is the silent failure this
+ * preflight exists to remove.
+ * @param session - session supplying authoritative current surface positions.
+ * @returns the prospective inclusive span, or `null` when the surface is only a
+ *   system head (there is nothing to roll over).
+ */
+export function prospectiveHandoffOnlyRange(session: Session): RolloverRange | null {
+  const surfaceNodes = session.surface.nodes
+  const firstIdx = firstReplaceableIndex(session, surfaceNodes)
+  if (surfaceNodes.length <= firstIdx) return null
+  const start = surfaceNodes[firstIdx]
+  const end = surfaceNodes[surfaceNodes.length - 1]
+  if (start === undefined || end === undefined) return null
+  return { start, end, shadowedSeqs: surfaceNodes.slice(firstIdx) }
+}
+
+/**
+ * The answer to "would `new_context` be able to cross with this document?".
+ *
+ * A discriminated result rather than a throw, because the two refusals are
+ * different facts and the caller phrases them differently: no usable span at
+ * all, versus a span that this candidate cannot shrink.
+ */
+export type RolloverPreflight =
+  | { readonly kind: 'no-span' }
+  | { readonly kind: 'sized'; readonly sizing: RolloverSizing }
+
+/**
+ * Size one candidate exactly as the engine's own selection would price it, at a
+ * moment when the engine cannot yet run its selector.
+ *
+ * `handoff-only` prices the prospective span from
+ * {@link prospectiveHandoffOnlyRange}, because the live cut is unbalanced while
+ * the requesting tool call is in flight. Every other mode prices the real
+ * selection, because a retained tail keeps that in-flight call inside the tail
+ * and the cut itself is balanced.
+ * @param dependencies - the conversation meter used for pricing.
+ * @param session - session supplying authoritative current surface positions.
+ * @param config - the engine's resolved configuration, for the retention rule.
+ * @param replacement - the candidate replacement to price.
+ * @returns the sizing, or `{ kind: 'no-span' }` when nothing is selectable.
+ */
+export function preflightRolloverReplacement(
+  dependencies: RolloverDependencies,
+  session: Session,
+  config: ResolvedRolloverConfig,
+  replacement: RolloverReplacement,
+): RolloverPreflight {
+  const selection = selectionFor(config, session)
+  const range = selection.kind === 'handoff-only'
+    ? prospectiveHandoffOnlyRange(session)
+    : selectRolloverRange(session, dependencies.meter.measure(session), selection)
+  if (range === null) return { kind: 'no-span' }
+  return { kind: 'sized', sizing: sizeRolloverReplacement(dependencies, session, range, replacement) }
+}
 
 /**
  * Select the replacement range for a rollover.
@@ -135,20 +328,28 @@ export type RolloverSelection =
  * backward until it does not split an assistant tool-call/result pair.
  *
  * `handoff-only` mode retains no tail at all. The span runs from the first
- * non-`system/message` surface node through the LAST surface node, walking
- * back one node at a time only until the cut after the span end is
- * tool-pairing balanced. On the normal model-requested path the last node is
- * the open turn's own `tool/result`, so that cut is already balanced and the
- * whole prior conversation, including the `new_context` tool call and its
- * result, is inside the span. A step genuinely mid-tool-call has no result
- * yet, so the cut after its tool call is unbalanced and the walk back leaves
- * that incomplete call/result unit outside the span; that is a real host
- * constraint, and the reason this mode walks rather than keeps a priced tail.
+ * non-`system/message` surface node through the LAST surface node, and only
+ * when the cut after that last node is tool-pairing balanced. There is no
+ * fallback cut: an earlier cut would leave the material between it and the tail
+ * on the fresh surface, which is exactly what this mode exists to prevent.
+ *
+ * A step genuinely mid-tool-call has no result yet, so the cut after its tool
+ * call is unbalanced and this returns `null`: the rollover DEFERS to the next
+ * pre-step instead of retaining that incomplete call/result unit. Deferring
+ * cannot lose the rollover, because the host guarantees every started tool call
+ * converges to exactly one durable result: a skipped call gets a synthetic
+ * error result (`packages/core/agent-loop/src/tool-calls.ts`, `appendSkippedToolCall`),
+ * and a call left open by a crash gets one from `interruptedTurnClosers` when
+ * the session is resumed (`packages/core/agent-loop/src/index.ts`, the
+ * `resumeWith` path). So the surface is balanced by the time the next pre-step
+ * runs. The engine additionally keeps a model-requested rollover pending when a
+ * pre-step returns no range, so a deferral is retried rather than dropped.
  * @param session - session supplying authoritative current surface positions.
  * @param measurement - unified pressure and surface measurement from the meter.
  * @param selection - which retention rule to apply.
- * @returns the inclusive positional seq range to replace, or `null` when the
- *   surface has no usable compactable span (nothing would be freed).
+ * @returns the inclusive positional seq range to replace, or `null` when no
+ *   span is selectable at this pre-step: either a deferral for an unbalanced
+ *   tail, or no usable compactable span (nothing would be freed).
  */
 export function selectRolloverRange(
   session: Session,
@@ -164,30 +365,21 @@ export function selectRolloverRange(
     throw new Error('context-rollover: token-meter surface does not match the current session surface')
   }
 
-  const first = surfaceNodes[0]
-  // A `system/message` at surface node 0 is never inside the range: newer
-  // hosts reject rewriting it with anything but a single-node system rewrite.
-  // Without one the range starts at node 0, which keeps this identical to the
-  // old behavior on hosts without a system head.
-  const head = first === undefined ? undefined : sessionEventAt(session, first)
-  const firstIdx = head !== undefined && (head.type as string) === 'system/message' ? 1 : 0
+  const firstIdx = firstReplaceableIndex(session, surfaceNodes)
 
   if (selection.kind === 'handoff-only') {
     if (surfaceNodes.length <= firstIdx) return null
-    let keepFromIdx = surfaceNodes.length
-    while (keepFromIdx > firstIdx) {
-      const candidate = surfaceNodes[keepFromIdx - 1]
-      if (candidate !== undefined && toolPairingBalancedAfter(session, candidate)) break
-      keepFromIdx -= 1
-    }
-    if (keepFromIdx <= firstIdx) return null
+    // No walk back. A cut before the tail would leave old surface material on
+    // the fresh context, so an unbalanced tail defers the rollover instead of
+    // shrinking the span. The next pre-step sees the landed result and crosses.
+    const cutoff = surfaceNodes[surfaceNodes.length - 1]
+    if (cutoff === undefined || !toolPairingBalancedAfter(session, cutoff)) return null
     const start = surfaceNodes[firstIdx]
-    const cutoff = surfaceNodes[keepFromIdx - 1]
-    if (start === undefined || cutoff === undefined) return null
+    if (start === undefined) return null
     return {
       start,
       end: cutoff,
-      shadowedSeqs: surfaceNodes.slice(firstIdx, keepFromIdx),
+      shadowedSeqs: surfaceNodes.slice(firstIdx),
     }
   }
 
@@ -222,18 +414,25 @@ export function selectRolloverRange(
  * Price one candidate replacement against the span it would replace, without
  * writing anything.
  *
- * This is the same comparison {@link commitRollover}'s shrink guard makes, run
- * as a pure read over the selected span and the candidate text. The emergency
- * path needs it *before* it takes the compaction lock: a candidate that is not
- * strictly smaller than the span must be rejected while the context is still
- * untouched, not after `compaction/start` has made the attempt durable. The
- * guard keeps its own copy of the comparison, so a replacement that reaches the
- * transaction is still checked there.
+ * This is the comparison {@link commitRollover}'s shrink guard makes, run as a
+ * pure read over the selected span and the candidate text, on the meter's
+ * current route pricing. Every caller that must decide BEFORE taking the
+ * compaction lock uses it: the `new_context` tool, so a candidate that cannot
+ * shrink the span is refused while the model can still read the reason, and the
+ * emergency path, so a refused candidate leaves no failed transaction behind.
+ *
+ * The returned {@link RolloverSizing} carries the span it measured, and callers
+ * pass that value on to {@link commitRollover} as `pinnedSizing`. The
+ * transaction then reuses these accepted numbers rather than re-pricing the
+ * span, so a `request/header` landing between the preflight and the commit
+ * cannot make the two disagree about the same candidate. The transaction still
+ * verifies that the pinned span is the one it is about to replace, and still
+ * refuses when the numbers say the candidate does not fit.
  * @param dependencies - the conversation meter used for pricing.
  * @param session - session supplying authoritative current surface positions.
  * @param range - the span selected by {@link selectRolloverRange}.
  * @param replacement - the candidate replacement to price.
- * @returns the span price, the replacement price, and whether it fits.
+ * @returns the span price, the replacement price, whether it fits, and the span.
  * @throws when the meter's surface does not match the current session surface.
  */
 export function sizeRolloverReplacement(
@@ -261,6 +460,7 @@ export function sizeRolloverReplacement(
     shadowedRouteTokens,
     replacementTokens,
     fits: replacementTokens < shadowedRouteTokens,
+    shadowedSeqs: selectedNodes.map(node => node.seq),
   }
 }
 
@@ -412,27 +612,34 @@ export async function commitRollover(
       throw new Error('rollover: the selected surface changed before the replacement committed')
     }
     const shadowedTokenCount = selectedNodes.reduce((total, node) => total + nodeHeuristicTokens(node), 0)
-    const shadowedRouteTokenCount = selectedNodes.reduce((total, node) => total + node.tokens, 0)
 
     const replacementText = buildReplacementText(options.replacement)
     const checkpointMessage = createUserMessage({
       content: [{ type: 'text', text: replacementText }],
       source: compactCheckpointSource(compactionId, options.sourceCommandId),
     })
-    const framedTokenCount = dependencies.meter.estimateMessage(checkpointMessage)
+    // The shrink decision uses the preflight's accepted numbers when they
+    // describe exactly this candidate over exactly this span, and re-prices
+    // here otherwise. A pinned snapshot is a claim about one span, so it is
+    // only reusable while the surface still puts that same span in the same
+    // order; anything else (a landed tool result shifting the tail) makes the
+    // claim stale and this falls back to measuring, rather than refusing a
+    // candidate the pinned numbers were never about.
+    const pinned = options.pinnedSizing
+    const pinnedApplies = pinned !== undefined
+      && pinned.shadowedSeqs.length === selection.shadowedSeqs.length
+      && pinned.shadowedSeqs.every((seq, index) => seq === selection.shadowedSeqs[index])
+    const framedTokenCount = pinnedApplies
+      ? pinned.replacementTokens
+      : dependencies.meter.estimateMessage(checkpointMessage)
+    const shadowedRouteTokenCount = pinnedApplies
+      ? pinned.shadowedRouteTokens
+      : selectedNodes.reduce((total, node) => total + node.tokens, 0)
     if (framedTokenCount >= shadowedRouteTokenCount) {
-      // A refused handoff document names itself: the model chose that exact
-      // file, so the refusal has to say which file was too large rather than
-      // leaving it to guess which candidate was rejected.
-      const subject = options.replacement.kind === 'handoff-document'
-        && options.replacement.path !== undefined
-        ? `handoff document ${options.replacement.path}`
-        : 'rollover replacement'
-      throw new Error(
-        `the ${subject} is not smaller than the shadowed content `
-        + `(${framedTokenCount} estimated tokens >= ${shadowedRouteTokenCount}); `
-        + 'the active context is too small for a useful rollover',
-      )
+      throw new Error(rolloverTooLargeMessage(
+        replacementSubject(options.replacement),
+        { replacementTokens: framedTokenCount, shadowedRouteTokens: shadowedRouteTokenCount },
+      ))
     }
 
     const summaryBlocks: ContentBlock[] = [{ type: 'text', text: replacementText }]
