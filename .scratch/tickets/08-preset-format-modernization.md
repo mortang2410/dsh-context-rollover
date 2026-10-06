@@ -42,8 +42,12 @@ Acceptance criteria:
 - [ ] Test: the generated preset contains this engine's row and not `compaction-basic`.
 - [ ] Test: the generator fails loudly when the host declaration's anchor row is absent or gains
       an unexpected block.
-- [ ] The repo's documentation states exactly which host line the shipped preset targets, and what
-      a deployment on a different line must do.
+- [ ] Test: the generated host-format declaration actually loads through the real preset registry,
+      and selecting `standard-rollover` resolves that session's compaction service to THIS engine
+      rather than to `compaction-basic`. Checking the generated text alone does not prove the
+      ticket's outcome; the preset must be shown to register and resolve.
+- [ ] The repo's documentation states exactly which host line the shipped preset targets, and the
+      steps a deployment on a different host line must take.
 
 Note for the implementer: verify each claim above against the installed packages before coding.
 The line numbers are from the `0.2.0-rc.2` installation on this machine and are admitted to drift.

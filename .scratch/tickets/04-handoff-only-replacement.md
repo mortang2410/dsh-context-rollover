@@ -17,11 +17,13 @@ messages, no tool calls, no summaries, no other old-session material reach the f
 - [ ] The replaced span covers the whole surface except a `system/message` at surface node 0.
 - [ ] A new `handoffOnly: true` mode makes the range selector retain no priced tail at all,
       instead of relying on `retainTokens: 0` (which was measured to keep the final surface node
-      and to back off further for tool pairing; see the spec's "Verified defect" note).
-- [ ] In `handoffOnly` mode, no pre-rollover conversational `user/message` or
-      `assistant/message` remains on the surface. The only permitted survivor from the old turn
-      is the `new_context` tool call and its result, which the host requires to keep the cut
-      tool-pairing balanced when the boundary is crossed with a turn open.
+      and to back off further for tool pairing; see the spec's "Verified defect" note). The span
+      runs through the LAST surface node whenever the cut after that node is tool-pairing
+      balanced, walking back only when it is not.
+- [ ] In `handoffOnly` mode, no pre-rollover `user/message`, `assistant/message` or `tool/result`
+      remains on the surface, INCLUDING the `new_context` tool call and its result. Measured: on
+      a 16-node surface whose last node is that turn's `tool/result`, the resulting surface is
+      exactly the `system/message` head plus the replacement handoff message.
 - [ ] The session id is unchanged; no new session is created.
 - [ ] The compaction transaction is a normal one: `compaction/start`, `compaction/summary`,
       replacement `user/message` with source provenance, `compaction/end`.
@@ -32,9 +34,11 @@ messages, no tool calls, no summaries, no other old-session material reach the f
       distinctive content.
 - [ ] Test: every pre-rollover exchange carries a unique sentinel, and after the rollover none
       of those sentinels appears in the derived messages. This is the zero-tail proof.
-- [ ] Test: the only non-fresh node left on the surface is the `new_context` tool call and its
-      result, asserted by node type rather than by absence, so the test states the exact
-      permitted survivor instead of a weaker claim.
+- [ ] Test: no prior `assistant/message` carrying a tool call and no prior `tool/result` remains
+      on the surface after the rollover. Asserted explicitly, because the naive tail selector
+      leaves both behind and a sentinel-only check would not catch the tool-call block.
+- [ ] Test: the surface after a `handoffOnly` rollover is exactly two nodes: the `system/message`
+      head and the replacement handoff message, when no further turn has started.
 - [ ] Test: the `handoffOnly` selector keeps no priced tail. Revert-sensitive: it must fail if
       the mode is removed.
 - [ ] Test: the session id is identical before and after.
@@ -46,7 +50,6 @@ messages, no tool calls, no summaries, no other old-session material reach the f
 - [ ] Test: the derived messages after the rollover still contain the system-prompt head.
 - [ ] Test: the tool reports a refusal and the old context is intact when `handoff_path` is
       missing, empty or unreadable. No `compaction/start` is left behind.
-- [ ] Test: an explicit `new_context` whose handoff cannot shrink the selected span is refused and
-      does NOT silently substitute the notes checkpoint, unlike the emergency path in ticket 05.
-- [ ] Test: a `new_context` call whose handoff is not smaller than the replaced span is refused
-      and the surface is unchanged.
+- [ ] Test: an explicit `new_context` whose handoff cannot shrink the selected span is refused,
+      leaves the surface unchanged, and does NOT silently substitute the notes checkpoint (unlike
+      the emergency path in ticket 05). No `compaction/start` is left behind.

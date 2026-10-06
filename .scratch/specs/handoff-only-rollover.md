@@ -105,11 +105,12 @@ Retarget the rollover so that:
   directory. Only used by the emergency path.
 - New `handoffPattern: string`, default `HANDOFF-*.md`. Only used by the emergency path.
 - New `handoffOnly: boolean`, default `false`. When true the range selector retains no tail at
-  all: the replaced span runs from the first non-system surface node through the last surface
-  node whose trailing cut is tool-pairing balanced.
+  all: the replaced span runs from the first non-system surface node through the LAST surface
+  node, backing off to the nearest earlier node only if the cut after the last node is not
+  tool-pairing balanced.
 - `retainRatio` / `retainTokens` stay as engine capability for deployments that want a tail.
 
-**Verified defect in the first draft of this spec, now corrected.** The draft claimed that
+**Verified defect in the first draft of this spec, now corrected (twice).** The draft claimed that
 setting `retainTokens: 0` yields "no verbatim tail". That is false, and a probe against the real
 code proved it:
 
@@ -129,6 +130,14 @@ code proved it:
 
 Therefore `handoffOnly` is a distinct mode rather than a reuse of `retainTokens: 0`, and the
 zero-tail claim gets its own test (ticket 04) because it is the requirement's central claim.
+
+**Second correction, same area.** An intermediate revision of this spec then claimed that a
+tool-pairing-balanced cut forces the requesting turn's `new_context` tool call and its result to
+survive. A further probe refuted that: on a 16-node surface ending in that turn's `tool/result`,
+`toolPairingBalancedAfter(lastNode)` is `true`, so the span can legally cover the last node, and
+after committing it the surface held exactly two nodes, the `system/message` head and the
+replacement handoff message. The tool call and its result were gone. The exception is removed;
+the only real constraint is the mid-call case described above.
 
 ### Handoff discovery and validation
 
@@ -163,18 +172,21 @@ zero-tail claim gets its own test (ticket 04) because it is the requirement's ce
   rule, read from `packages/core/session/src/surface.ts:494-512`: a replacement covering node 0
   while that node is a `system/message` "must itself be a `system/message` over exactly that
   node"; later system nodes carry no protection.
-- The span still ends at a tool-pairing-balanced cut, because DSH's own invariant and the
-  transaction both require it. Consequence, stated plainly: if a turn is open when the rollover
-  fires and its final step is mid-tool-call, the smallest trailing unit needed to balance the
-  cut stays. In the normal `new_context` case the model calls the tool and the engine crosses
-  the boundary before the next request, so the retained material is that one tool call and its
-  result. This is a host mechanism constraint, not a design choice, and it is the one place
-  where the fresh surface can carry a trace of the turn that requested the rollover. The test in
-  ticket 04 asserts that no pre-rollover *conversation* sentinel survives; a test that demanded
-  zero trailing tool nodes would fail against the host's own invariants.
+- The span ends at a tool-pairing-balanced cut, because DSH's own invariant and the transaction
+  both require it. That constraint costs nothing on the normal path. Measured: on a 16-node
+  surface whose last node is the requesting turn's `tool/result`, `toolPairingBalancedAfter(last)`
+  is true, so a span from the first non-system node through the last node commits and the
+  resulting surface is exactly two nodes: the `system/message` head and the replacement handoff
+  message. The requesting turn's assistant tool-call and its tool/result are both shadowed with
+  everything else.
 - The model-visible context is therefore: the system head (standing instructions) plus the
-  handoff document, plus the turn that carried the `new_context` call, plus the fresh turn's own
-  messages.
+  handoff document, plus the fresh turn's own messages. Nothing from the old conversation
+  survives, including the tool call that requested the rollover.
+- A rollover that fires while a step is genuinely mid-tool-call (no result yet) backs off to the
+  nearest earlier balanced cut and will therefore retain that incomplete call/result unit. That
+  is a real host constraint and the only case where the fresh surface can carry a trace of the
+  old turn; it is not the normal path, and the selector handles it by walking back rather than by
+  retaining a priced tail.
 - Standing instructions from `AGENTS.md` and the project chain are delivered as `user/message`
   surface nodes carrying source kind `agent-instructions`, and they sit inside the replaced span.
   They are expected back because `dsh-agent-instructions` re-injects them: its `agent/pre-step`
@@ -343,13 +355,13 @@ transaction and the shrink guard).
 
 | Ticket | Covers | Blocked by |
 |---|---|---|
-| 01 repair host drift | pre-existing typecheck and test breakage | none |
-| 02 reminder at 40%, configurable | stories 1-4, 15-17 | 01 |
+| 01 repair host drift | story 19 | none |
+| 02 reminder at 40%, configurable | stories 1-4, 15-17, 23 | 01 |
 | 03 handoff resolution | stories 5, 6 | 01 |
-| 04 handoff-only replacement | stories 5-12, 19-21 | 01, 03 |
+| 04 handoff-only replacement | stories 7-11, 20 | 01, 03 |
 | 05 emergency fallback | stories 13, 14 | 04 |
-| 06 no summarizer and guidance | stories 3, 11, 12, 20 | 04 |
-| 07 preset name and docs | stories 17, 18 | 02, 04, 05, 06 |
+| 06 no summarizer and guidance | stories 3, 12, 21, 22 | 04 |
+| 07 preset name and docs | stories 16-18 | 02, 04, 05, 06 |
 | 08 preset format modernization | story 18 and the running-host preset load | 01 |
 
 Every user story 1-23 is named by at least one ticket above. Story 23 (a shared reminder

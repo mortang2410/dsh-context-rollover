@@ -22,6 +22,7 @@ the recorded limitation.
       the emergency fallback.
 - [ ] The README records the emergency fallback's limitation: at 90% no model is in the loop, so
       the handoff file is selected by newest-modified scan in the configured directory.
-- [ ] The README records the preset-declaration incompatibility found against the running host,
-      with the evidence, as a known and separately-scoped limitation.
+- [ ] The README names the host line the shipped preset targets and the steps a deployment on a
+      different host line must take. It no longer describes the running host's preset format as
+      an unresolved limitation, because ticket 08 fixes that.
 - [ ] Verification performed on the delivered artifacts, with the results stated.

@@ -23,6 +23,9 @@ rule; it must not reintroduce a verbatim tail.
       shrink check, else the deterministic notes checkpoint, else no rollover. A readable handoff
       that is NOT smaller than the span must not consume the single emergency attempt while a
       smaller notes checkpoint was available.
+- [ ] The sizing decision happens BEFORE `compaction/start`, so a rejected candidate leaves no
+      failed transaction in the log. Sizing is a pure preflight estimate over the selected span
+      and the candidate text.
 - [ ] When no eligible file exists, the engine falls back to the deterministic notes checkpoint
       so context is still reduced rather than stalling.
 - [ ] The unreadable, empty or oversized cases fall back rather than throwing out of the
@@ -38,4 +41,6 @@ rule; it must not reintroduce a verbatim tail.
 - [ ] Test: a candidate handoff that is not smaller than the selected span causes the notes
       checkpoint to be used instead, and the rollover still commits. Revert-sensitive: it must
       fail if the shrink-aware ordering is removed.
+- [ ] Test: the fallback produces exactly one successful compaction transaction and no
+      `compaction/end` carrying an error, proving the sizing happened before the lock was taken.
 - [ ] Test: two candidate files with different modification times select the newer one.
