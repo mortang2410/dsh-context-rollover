@@ -1,11 +1,14 @@
 /**
  * Engine integration tests over the real agent loop: model-requested rollover
- * through the `new_context` tool, notes/handoff carry-over, one-per-window
- * pressure reminders, and manual rollover behind the compaction command.
+ * through the `new_context` tool, notes carry-over, one-per-window pressure
+ * reminders, and manual rollover behind the compaction command.
  *
  * @module tests/engine.spec
  */
 
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { countRollovers } from '../src/rollover.ts'
 import { NotesStore } from '../src/notes.ts'
@@ -21,17 +24,33 @@ import {
   usageResponse,
 } from './harness.ts'
 
-describe('ContextRolloverEngine', () => {
-  it('rolls over when the model calls new_context mid-turn and continues from notes + tail', async () => {
-    const { ctx, agent, session, notesBase } = await engineHarness('model-requested')
+/** A temp workspace holding one durable handoff document. */
+async function workspaceWithHandoff(name: string, text: string): Promise<{ cwd: string; path: string }> {
+  const cwd = await mkdtemp(join(tmpdir(), 'dsh-engine-handoff-'))
+  await writeFile(join(cwd, name), text, 'utf8')
+  return { cwd, path: join(cwd, name) }
+}
 
-    // Seed durable notes as if the model had saved its research.
+describe('ContextRolloverEngine', () => {
+  it('rolls over when the model calls new_context mid-turn and continues from the handoff document', async () => {
+    const { cwd, path } = await workspaceWithHandoff(
+      'HANDOFF-topic.md',
+      '# Handoff\n\nImplement the notes next steps.\n',
+    )
+    // Deliberately NOT `handoffOnly`: the document replacement composes the
+    // same way in either retention mode, and this case keeps the tail mode
+    // covered so a deployment that opts out of handoffOnly still lands on the
+    // document it named.
+    const { ctx, agent, session, notesBase } = await engineHarness('model-requested', {}, { cwd })
+
+    // Seed durable notes as if the model had saved its research. They are no
+    // longer part of the continuation context: the handoff document is.
     const store = new NotesStore(NotesStore.directoryFor(session.id, notesBase))
     await store.write('state.md', 'goal: prove model-driven rollover\nnext: implement')
 
     const adapter = new ScriptedAdapter([
       ...Array.from({ length: 20 }, (_unused, index) => textResponse(`finding ${index} details`)),
-      newContextCall('{"handoff":"Implement the notes next steps."}'),
+      newContextCall(JSON.stringify({ handoff_path: path })),
       textResponse('implementing now'),
     ])
     ctx.llm.registerAdapter(['mock'], adapter)
@@ -40,22 +59,15 @@ describe('ContextRolloverEngine', () => {
     await followup(agent, 'Research is done; roll over and implement.')
 
     // The rollover committed exactly once and the fresh window carries the
-    // notes and the handoff.
+    // handoff document's own content.
     expect(countRollovers(session)).toBe(1)
     const texts = derivedTexts(session).join('\n')
-    expect(texts).toContain('<context-rollover checkpoint>')
-    expect(texts).toContain('prove model-driven rollover')
     expect(texts).toContain('Implement the notes next steps.')
-    expect(texts).toContain('reason: model-requested')
-    // The new_context tool result stayed in the recent tail, next to the
-    // post-rollover answer.
-    const tailResultSeq = session.surface.nodes
-      .map(seq => session.eventAt(seq))
-      .filter(event => event?.type === 'tool/result')
-      .map(event => event?.seq)
-      .pop()
-    const tailResult = tailResultSeq === undefined ? undefined : session.eventAt(tailResultSeq)
-    expect(JSON.stringify(tailResult?.data)).toContain('A new context window will start')
+    // The model-visible replacement is the document itself: no checkpoint
+    // wrapper, no notes section and no narration.
+    expect(texts).not.toContain('<context-rollover checkpoint>')
+    expect(texts).not.toContain('reason: model-requested')
+    expect(texts).not.toContain('prove model-driven rollover')
     // The assistant's post-rollover answer arrived on the fresh window.
     expect(texts).toContain('implementing now')
   })

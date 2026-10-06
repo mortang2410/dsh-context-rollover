@@ -32,7 +32,7 @@ describe('selectRolloverRange', () => {
 
     // A tail budget that would land inside turn 2's tool pair must back off
     // to the balanced boundary before the pair starts.
-    const range = selectRolloverRange(session, measurement, 0)
+    const range = selectRolloverRange(session, measurement, { kind: 'tail', retainTokens: 0 })
     expect(range).not.toBeNull()
     if (range === null) return
     expect(range.start).toBe(session.surface.nodes[0])
@@ -48,7 +48,7 @@ describe('selectRolloverRange', () => {
     const total = measurement.nodes.reduce((sum, node) => sum + node.tokens, 0)
     // The retention budget covers everything past the head: no tail to
     // preserve means no compactable span (mirrors the shipped backend).
-    expect(selectRolloverRange(session, measurement, total + 1)).toBeNull()
+    expect(selectRolloverRange(session, measurement, { kind: 'tail', retainTokens: total + 1 })).toBeNull()
   })
 
   it('never includes a system/message head node in the range', async () => {
@@ -62,7 +62,7 @@ describe('selectRolloverRange', () => {
     appendExchange(session, 1, 'first')
     appendExchange(session, 2, 'second')
     const measurement = meter.measure(session)
-    const range = selectRolloverRange(session, measurement, 0)
+    const range = selectRolloverRange(session, measurement, { kind: 'tail', retainTokens: 0 })
     expect(range).not.toBeNull()
     if (range === null) return
     // Newer hosts reject rewriting node 0 while it holds the system prompt.
@@ -79,7 +79,7 @@ describe('commitRollover', () => {
     const session = closedConversation(4, 10)
     const beforeCount = session.snapshotEvents().length
     const measurement = meter.measure(session)
-    const range = selectRolloverRange(session, measurement, 0)
+    const range = selectRolloverRange(session, measurement, { kind: 'tail', retainTokens: 0 })
     if (range === null) throw new Error('expected a compactable range')
 
     const result = await commitRollover(
@@ -89,11 +89,14 @@ describe('commitRollover', () => {
       range.end,
       {
         owner: null,
-        checkpoint: {
-          reason: 'model-requested',
-          windowNumber: 1,
-          notes: '- goal: prove the rollover\n- next: run tests',
-          handoff: 'Continue from the notes.',
+        replacement: {
+          kind: 'checkpoint',
+          checkpoint: {
+            reason: 'model-requested',
+            windowNumber: 1,
+            notes: '- goal: prove the rollover\n- next: run tests',
+            handoff: 'Continue from the notes.',
+          },
         },
       },
     )
@@ -136,11 +139,14 @@ describe('commitRollover', () => {
       end,
       {
         owner: null,
-        checkpoint: {
-          reason: 'model-requested',
-          windowNumber: 1,
-          notes: 'note'.repeat(5000),
-          handoff: null,
+        replacement: {
+          kind: 'checkpoint',
+          checkpoint: {
+            reason: 'model-requested',
+            windowNumber: 1,
+            notes: 'note'.repeat(5000),
+            handoff: null,
+          },
         },
       },
     )).rejects.toThrow(/not smaller than the shadowed content/)
@@ -161,18 +167,21 @@ describe('commitRollover', () => {
       end,
       {
         owner: null,
-        checkpoint: {
-          reason: 'model-requested',
-          windowNumber: 1,
-          notes: 'note'.repeat(5000),
-          handoff: null,
+        replacement: {
+          kind: 'checkpoint',
+          checkpoint: {
+            reason: 'model-requested',
+            windowNumber: 1,
+            notes: 'note'.repeat(5000),
+            handoff: null,
+          },
         },
       },
     )).rejects.toThrow()
     // The failed attempt closed its bracket with an error, so the session is
     // not deadlocked: a valid rollover still succeeds.
     const measurement = meter.measure(session)
-    const range = selectRolloverRange(session, measurement, 0)
+    const range = selectRolloverRange(session, measurement, { kind: 'tail', retainTokens: 0 })
     if (range === null) throw new Error('expected a compactable range')
     await expect(commitRollover(
       { meter },
@@ -181,11 +190,14 @@ describe('commitRollover', () => {
       range.end,
       {
         owner: null,
-        checkpoint: {
-          reason: 'manual',
-          windowNumber: 1,
-          notes: null,
-          handoff: null,
+        replacement: {
+          kind: 'checkpoint',
+          checkpoint: {
+            reason: 'manual',
+            windowNumber: 1,
+            notes: null,
+            handoff: null,
+          },
         },
       },
     )).resolves.toBeDefined()

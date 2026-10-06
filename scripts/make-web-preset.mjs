@@ -17,6 +17,7 @@
  *     [--preset-id <id>] [--threshold-ratio <n>] [--reminder-ratio <n>]
  *     [--reminder-message <text>]
  *     [--retain-tokens <n> | --retain-ratio <n>] [--handoff-max-chars <n>]
+ *     [--handoff-only <true|false>]
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -117,10 +118,27 @@ export function resolveOptions(config) {
   if (retainTokens === null && (!Number.isFinite(retainRatio) || retainRatio <= 0 || retainRatio > 1)) {
     throw new Error(`make-web-preset: --retain-ratio must be in (0, 1], got ${String(retainRatio)}`)
   }
+  // The handoff-only mode replaces `retainTokens: 0`, which was measured to
+  // keep a tail. It is a boolean, and a flag string that is neither `true` nor
+  // `false` is a typo rather than a truthy value. Defaults ON: this is the
+  // shipped preset's contract, so the generated artifact keeps no tail unless a
+  // caller asks for one explicitly.
+  const handoffOnly = config.handoffOnly ?? true
+  if (typeof handoffOnly !== 'boolean') {
+    throw new Error(`make-web-preset: --handoff-only must be true or false, got ${JSON.stringify(handoffOnly)}`)
+  }
   if (!Number.isSafeInteger(handoffMaxChars) || handoffMaxChars <= 0) {
     throw new Error(`make-web-preset: --handoff-max-chars must be a positive integer, got ${String(handoffMaxChars)}`)
   }
-  return { thresholdRatio, reminderRatio, reminderMessage, retainTokens, retainRatio, handoffMaxChars }
+  return {
+    thresholdRatio,
+    reminderRatio,
+    reminderMessage,
+    retainTokens,
+    retainRatio,
+    handoffOnly,
+    handoffMaxChars,
+  }
 }
 
 /**
@@ -156,6 +174,7 @@ export function renderEngineRow(engineEntry, options) {
     + `        thresholdRatio: ${options.thresholdRatio}\n`
     + `        reminderThresholdRatio: ${options.reminderRatio}\n`
     + `        reminderMessage: ${yamlString(options.reminderMessage)}\n`
+    + `        handoffOnly: ${options.handoffOnly}\n`
     + `${tail}\n`
     + `        handoffMaxChars: ${options.handoffMaxChars}\n`
     + `        modelSurface: 'always'`
@@ -243,6 +262,8 @@ Options:
                           (default: the shipped /handoff-doc reminder)
   --retain-tokens <n>     absolute recent-tail budget (default: unset)
   --retain-ratio <n>      tail budget fraction when --retain-tokens is unset (default: 0.1)
+  --handoff-only <bool>   replace the whole prior surface with the handoff document,
+                          keeping no tail (default: true; pass false to keep a tail)
   --handoff-max-chars <n> max handoff/notes text (default: 20000)`)
 }
 
@@ -267,12 +288,21 @@ export async function main(argv = process.argv.slice(2)) {
     if (!Number.isFinite(value)) throw new Error(`make-web-preset: --${name} must be a number, got ${raw}`)
     return value
   }
+  const boolean = (name) => {
+    const raw = flags[name]
+    if (raw === undefined) return undefined
+    if (raw !== 'true' && raw !== 'false') {
+      throw new Error(`make-web-preset: --${name} must be true or false, got ${raw}`)
+    }
+    return raw === 'true'
+  }
   const options = resolveOptions({
     thresholdRatio: number('threshold-ratio'),
     reminderRatio: number('reminder-ratio'),
     reminderMessage: flags['reminder-message'],
     retainTokens: number('retain-tokens'),
     retainRatio: number('retain-ratio'),
+    handoffOnly: boolean('handoff-only'),
     handoffMaxChars: number('handoff-max-chars'),
   })
   if (flags['retain-tokens'] !== undefined && flags['retain-ratio'] !== undefined) {

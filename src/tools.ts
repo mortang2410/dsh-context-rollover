@@ -60,23 +60,22 @@ function newContextTool(deps: RolloverToolDependencies) {
   return defineTool({
     name: 'new_context',
     description:
-      'Start a new context window at the next safe boundary. Does not clear, reset, or otherwise affect '
-      + 'environment state. Earlier conversation leaves the active context; durable notes, your handoff, '
-      + 'and a recent verbatim conversation tail carry over, and full history stays recoverable via history.',
+      'Start a new context window at the next safe boundary, continuing from a durable handoff document. '
+      + 'Does not clear, reset, or otherwise affect environment state. The handoff document you name becomes '
+      + 'the entire continuation context: earlier conversation, including this tool call and its result, '
+      + 'leaves the active context with nothing carried over. Write the document first (for example with '
+      + '`/handoff-doc`) and make it fully sufficient for a reader with zero context. Only the document '
+      + 'crosses the boundary; full history stays recoverable via the history tool.',
     parameters: {
       handoff_path: {
         type: 'string',
+        required: true,
         description:
-          'Path of the durable handoff document this window should continue from: an absolute path, '
-          + 'or one relative to the session working directory. Read at the moment you call this tool, '
-          + 'so a missing, unreadable, empty or oversized document is refused here instead of leaving '
-          + 'you with a context that silently never rolled over.',
-      },
-      handoff: {
-        type: 'string',
-        description:
-          'Short handoff for the next window: current state, immediate next steps, and anything the '
-          + 'recent conversation tail cannot show. Keep it concise; save larger material to notes first.',
+          'Path of the durable handoff document the new window continues from: an absolute path, or one '
+          + 'relative to the session working directory. Run `/handoff-doc` first and pass the file it wrote '
+          + '(its contract saves under `.scratch/handoff/HANDOFF-<topic-or-date>.md`). The file is read at the '
+          + 'moment you call this tool, so a missing, unreadable, empty or oversized document is refused here '
+          + 'instead of leaving you with a context that silently never rolled over.',
       },
     },
     output: {
@@ -109,37 +108,27 @@ function newContextTool(deps: RolloverToolDependencies) {
         return { accepted: false }
       }
       const handoffPath = args.handoff_path
-      if (handoffPath !== undefined && args.handoff !== undefined) {
+      if (handoffPath.trim().length === 0) {
         throw new Error(
-          'pass either handoff_path (a durable handoff document) or handoff (a short inline string), not both.',
+          'handoff_path is required: pass the path of the durable handoff document this window continues '
+          + 'from (run `/handoff-doc` first if it does not exist yet).',
         )
       }
-      if (handoffPath !== undefined) {
-        // Read here, inside this tool's own `execute`. The engine crosses the
-        // boundary later, in an `agent/pre-step` listener that converts every
-        // failure into `ctx.logger.warn(... "continuing the turn")` — a warning
-        // the model never sees. Deferring the read to that point would let the
-        // model believe the rollover happened while its context stayed put.
-        // Thrown from here, the refusal becomes the tool result the model reads.
-        const document = await readHandoffFileOrThrow({
-          path: handoffPath,
-          cwd: session.header.cwd,
-          maxChars: deps.config.handoffMaxChars,
-        })
-        deps.pendingRollovers.set(session.id, {
-          handoff: document.text,
-          handoffPath: document.path,
-        })
-        return { accepted: true }
-      }
-      const handoff = args.handoff ?? null
-      if (handoff !== null && handoff.length > deps.config.handoffMaxChars) {
-        throw new Error(
-          `handoff is ${handoff.length} characters; the maximum is ${deps.config.handoffMaxChars}. `
-          + 'Save larger material to notes and shorten the handoff.',
-        )
-      }
-      deps.pendingRollovers.set(session.id, { handoff })
+      // Read here, inside this tool's own `execute`. The engine crosses the
+      // boundary later, in an `agent/pre-step` listener that converts every
+      // failure into `ctx.logger.warn(... "continuing the turn")` — a warning
+      // the model never sees. Deferring the read to that point would let the
+      // model believe the rollover happened while its context stayed put.
+      // Thrown from here, the refusal becomes the tool result the model reads.
+      const document = await readHandoffFileOrThrow({
+        path: handoffPath,
+        cwd: session.header.cwd,
+        maxChars: deps.config.handoffMaxChars,
+      })
+      deps.pendingRollovers.set(session.id, {
+        handoff: document.text,
+        handoffPath: document.path,
+      })
       return { accepted: true }
     },
   })

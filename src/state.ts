@@ -8,16 +8,17 @@
 /** A pending model-requested rollover awaiting a safe lifecycle point. */
 export interface PendingRollover {
   /**
-   * The handoff text the next window starts from: the already-read document
-   * text when the model named a file, or the model's own short string when it
-   * passed one directly. The read happens in the `new_context` tool's own
-   * `execute`, because the engine's pre-step listener turns every failure into
-   * a warning the model never sees.
+   * The already-read handoff document text the next window starts from.
+   *
+   * The read happens in the `new_context` tool's own `execute`, because the
+   * engine's pre-step listener turns every failure into a warning the model
+   * never sees. The engine never re-reads or re-resolves the path: the model
+   * named one file, and that exact file's bytes are what crosses the boundary.
    */
-  readonly handoff: string | null
+  readonly handoff: string
   /**
-   * The path the text was read from, when the model named a file. Diagnostics
-   * only: the engine never re-reads it.
+   * The absolute path the text was read from. Diagnostics only: the engine
+   * never re-reads it.
    */
-  readonly handoffPath?: string
+  readonly handoffPath: string
 }

@@ -27,7 +27,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { Seq } from './compat.ts'
 import { renderReminderMessage, resolveConfig } from './config.ts'
 import type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
-import type { RolloverReason } from './checkpoint.ts'
+import type { RolloverReason, RolloverReplacement } from './checkpoint.ts'
 import { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
 import { NotesStore } from './notes.ts'
 import { sessionEventAt } from './compat.ts'
@@ -39,6 +39,8 @@ import {
   REMINDER_SUMMARY_PREFIX,
   selectRolloverRange,
 } from './rollover.ts'
+import type { RolloverSelection } from './rollover.ts'
+import { replacementWindowNumber } from './checkpoint.ts'
 import { createRolloverTools } from './tools.ts'
 import type { PendingRollover } from './state.ts'
 
@@ -78,16 +80,15 @@ function concreteCompaction(engine: CompactionEngine): CompactionEngine {
  * invariant asserted.
  *
  * `new_context` already read and validated the document inside its own
- * `execute`, so a pending request carrying a path must carry non-empty text.
- * A violation here is an engine bug, not a user mistake, which is why it is an
- * assertion rather than another refusal the model has to read: the pre-step
- * listener logs it as a warning, and the old context correctly stays put.
+ * `execute`, so a pending request always carries non-empty text. A violation
+ * here is an engine bug, not a user mistake, which is why it is an assertion
+ * rather than a refusal the model has to read: the pre-step listener logs it as
+ * a warning, and the old context correctly stays put.
  * @param pending - the model's recorded rollover request.
- * @returns the handoff text to commit, or `null` when none was supplied.
+ * @returns the handoff text to commit.
  */
-function pendingHandoff(pending: PendingRollover): string | null {
-  if (pending.handoffPath === undefined) return pending.handoff
-  if (pending.handoff === null || pending.handoff.trim().length === 0) {
+function pendingHandoff(pending: PendingRollover): string {
+  if (pending.handoff.trim().length === 0) {
     throw new Error(
       `context-rollover: internal invariant violated: the rollover read ${pending.handoffPath} but `
       + 'recorded no handoff text',
@@ -104,7 +105,8 @@ export {
   renderReminderMessage,
   resolveConfig,
 } from './config.ts'
-export { buildCheckpointText } from './checkpoint.ts'
+export { buildCheckpointText, buildReplacementText, replacementWindowNumber } from './checkpoint.ts'
+export type { CheckpointInput, RolloverReason, RolloverReplacement } from './checkpoint.ts'
 export {
   HandoffError,
   readHandoffFile,
@@ -126,6 +128,7 @@ export {
   selectRolloverRange,
   ROLLOVER_PROVIDER,
 } from './rollover.ts'
+export type { RolloverSelection } from './rollover.ts'
 export { createRolloverTools } from './tools.ts'
 export { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
 
@@ -144,6 +147,7 @@ export class ContextRolloverEngine extends CompactionEngine {
     reminderMessage: z.string(),
     retainRatio: z.number(),
     retainTokens: z.number().step(1).min(0),
+    handoffOnly: z.boolean(),
     handoffMaxChars: z.number().step(1).min(0),
     notesEnabled: z.boolean(),
     historyEnabled: z.boolean(),
@@ -219,6 +223,7 @@ export class ContextRolloverEngine extends CompactionEngine {
             await this.performRollover(agent, {
               reason: 'model-requested',
               handoff: pendingHandoff(pending),
+              handoffPath: pending.handoffPath,
             }, signal)
           } else {
             await this.rollOverOnPressure(agent, turn, signal)
@@ -246,6 +251,7 @@ export class ContextRolloverEngine extends CompactionEngine {
         await this.performRollover(agent, {
           reason: 'model-requested',
           handoff: pendingHandoff(pending),
+          handoffPath: pending.handoffPath,
         }, signal)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
@@ -341,50 +347,99 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * Perform one rollover: select the replacement range, resolve notes and the
-   * checkpoint inputs for the reason, and commit the compaction transaction.
+   * Perform one rollover: select the replacement range, resolve the
+   * replacement content for the reason, and commit the compaction transaction.
    * @param agent - agent whose session surface is rolled over.
-   * @param request - rollover reason and the model's handoff, when any.
+   * @param request - rollover reason and the already-read handoff document text,
+   *   when the model requested this rollover.
    * @param signal - live turn cancellation signal.
    * @returns the compaction result, or `null` when no useful range exists.
    */
   private async performRollover(
     agent: Agent,
-    request: { reason: RolloverReason; handoff: string | null },
+    request: { reason: RolloverReason; handoff: string | null; handoffPath?: string },
     signal: AbortSignal,
   ): Promise<CompactionResult | null> {
     signal.throwIfAborted()
     const session = agent.session
-    const retainTokens = this.resolveRetainTokens(session)
-    const range = selectRolloverRange(session, this.ctx.tokenMeter.measure(session), retainTokens)
+    const range = selectRolloverRange(session, this.ctx.tokenMeter.measure(session), this.selection(session))
     if (range === null) {
       this.ctx.logger.info('context rollover skipped: no compactable surface span (context is already minimal)')
       return null
     }
-    const notes = this.config.notesEnabled
-      ? await this.notesStore(session).renderAll(this.config.handoffMaxChars)
-      : null
-    const windowNumber = countRollovers(session) + 1
+    const replacement = await this.replacementFor(session, request)
+    const windowNumber = replacementWindowNumber(replacement)
     const result = await commitRollover(
       { meter: this.ctx.tokenMeter },
       session,
       range.start,
       range.end,
-      {
-        owner: 'current-turn',
-        checkpoint: {
-          reason: request.reason,
-          windowNumber,
-          notes,
-          handoff: request.handoff,
-        },
-      },
+      { owner: 'current-turn', replacement },
     )
     this.ctx.logger.info(
       `context rollover (${request.reason}): window ${windowNumber} started; `
       + `shadowed ${result.shadowedSeqs.length} surface nodes (~${result.shadowedTokenCount} tokens)`,
     )
     return result
+  }
+
+  /**
+   * How this deployment selects the span one rollover replaces.
+   *
+   * `handoffOnly` is a distinct mode rather than `retainTokens: 0`: a zero
+   * token budget still keeps the last surface node, and walks further back for
+   * tool pairing, which is exactly the old-session material the handoff-only
+   * contract forbids.
+   * @param session - session whose configured tail budget is priced.
+   * @returns the retention rule for this deployment.
+   */
+  private selection(session: Session): RolloverSelection {
+    return this.config.handoffOnly
+      ? { kind: 'handoff-only' }
+      : { kind: 'tail', retainTokens: this.resolveTailTokens(session) }
+  }
+
+  /**
+   * The replacement content one rollover writes.
+   *
+   * The model names one durable handoff document, and that document's bytes
+   * become the entire continuation context: no narration, no notes section and
+   * no wrapper is added around it. The engine-driven paths (pressure,
+   * overflow, manual) have no model in the loop and no document to read, so
+   * they keep the deterministic notes checkpoint; ticket 05 teaches the
+   * pressure path to prefer a scanned handoff document.
+   * @param session - session whose window number is being started.
+   * @param request - rollover reason and the handoff document text, when any.
+   * @returns the replacement to commit.
+   */
+  private async replacementFor(
+    session: Session,
+    request: { reason: RolloverReason; handoff: string | null; handoffPath?: string },
+  ): Promise<RolloverReplacement> {
+    const windowNumber = countRollovers(session) + 1
+    if (request.handoff !== null) {
+      return {
+        kind: 'handoff-document',
+        windowNumber,
+        text: request.handoff,
+        ...request.handoffPath === undefined ? {} : { path: request.handoffPath },
+      }
+    }
+    return {
+      kind: 'checkpoint',
+      checkpoint: {
+        reason: request.reason,
+        windowNumber,
+        notes: await this.renderNotes(session),
+        handoff: null,
+      },
+    }
+  }
+
+  /** Render the durable notes snapshot, or `null` when notes are disabled. */
+  private async renderNotes(session: Session): Promise<string | null> {
+    if (!this.config.notesEnabled) return null
+    return this.notesStore(session).renderAll(this.config.handoffMaxChars)
   }
 
   /**
@@ -402,7 +457,7 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /** Resolve the recent-tail token budget for one session. */
-  private resolveRetainTokens(session: Session): number {
+  private resolveTailTokens(session: Session): number {
     if (this.config.retainTokens !== null) return this.config.retainTokens
     const contextWindow = session.requestContext()?.contextWindow
     return contextWindow === undefined
@@ -457,7 +512,9 @@ export class ContextRolloverEngine extends CompactionEngine {
 
   /**
    * Manual rollover behind the `/compact` command: the same deterministic
-   * checkpoint and recent tail, run exclusively on an idle agent.
+   * notes checkpoint and the same retention rule as every other path, run
+   * exclusively on an idle agent. No model is in the loop, so no handoff
+   * document is named: this path composes notes.
    * @param agent - idle agent whose next-turn admission this call reserves.
    * @param signal - cancellation scoped to this rollover request.
    * @param sourceCommandId - initiating command identity for presentation.
@@ -478,12 +535,9 @@ export class ContextRolloverEngine extends CompactionEngine {
       const range = selectRolloverRange(
         session,
         this.ctx.tokenMeter.measure(session),
-        this.resolveRetainTokens(session),
+        this.selection(session),
       )
       if (range === null) return null
-      const notes = this.config.notesEnabled
-        ? await this.notesStore(session).renderAll(this.config.handoffMaxChars)
-        : null
       const windowNumber = countRollovers(session) + 1
       return commitRollover(
         { meter: this.ctx.tokenMeter },
@@ -493,11 +547,14 @@ export class ContextRolloverEngine extends CompactionEngine {
         {
           owner: null,
           ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
-          checkpoint: {
-            reason: 'manual',
-            windowNumber,
-            notes,
-            handoff: null,
+          replacement: {
+            kind: 'checkpoint',
+            checkpoint: {
+              reason: 'manual',
+              windowNumber,
+              notes: await this.renderNotes(session),
+              handoff: null,
+            },
           },
           flush: async () => {
             await this.ctx.sessions.flush(session)
@@ -510,6 +567,8 @@ export class ContextRolloverEngine extends CompactionEngine {
 
   /**
    * Replace one inclusive surface-position span with a rollover checkpoint.
+   * The caller names the span, so the retention rule does not apply; no model
+   * is in the loop, so this path composes notes.
    * @param start - inclusive first surface-node seq.
    * @param end - inclusive last surface-node seq.
    * @param agent - owner of the target session.
@@ -527,9 +586,6 @@ export class ContextRolloverEngine extends CompactionEngine {
       throw new Error('context rollover refused: session compaction is owned by its agent preset')
     }
     const session = agent.session
-    const notes = this.config.notesEnabled
-      ? await this.notesStore(session).renderAll(this.config.handoffMaxChars)
-      : null
     const windowNumber = countRollovers(session) + 1
     return commitRollover(
       { meter: this.ctx.tokenMeter },
@@ -538,11 +594,14 @@ export class ContextRolloverEngine extends CompactionEngine {
       end,
       {
         owner: 'current-turn',
-        checkpoint: {
-          reason: 'manual',
-          windowNumber,
-          notes,
-          handoff: null,
+        replacement: {
+          kind: 'checkpoint',
+          checkpoint: {
+            reason: 'manual',
+            windowNumber,
+            notes: await this.renderNotes(session),
+            handoff: null,
+          },
         },
       },
     )

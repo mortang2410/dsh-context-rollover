@@ -16,14 +16,17 @@ tool.
 - Keep goal, verified progress, important decisions, constraints, files
   involved, known failures, and next steps in notes. Update notes as facts
   change; explicitly mark unverified hypotheses as hypotheses.
-- You may call new_context at a natural task boundary when carrying the
-  exploratory working context forward would only add noise — for example after
-  finishing research before starting implementation, or after a major phase
-  before verification. Before rolling over, save what the next context actually
-  needs to notes and pass a short handoff.
-- After a rollover, continue primarily from your notes, the recent conversation,
-  and live repository state. Do not reconstruct the previous context from
-  history; use history only to recover a specific missing detail.
+- When a reminder tells you the context is filling, run \`/handoff-doc\` to write
+  or update the durable handoff document, and make that document fully
+  sufficient for a fresh context to continue the work. Then call
+  \`new_context\` with the path of that document as its \`handoff_path\` argument.
+- The handoff document is the entire continuation context: after the rollover
+  your active context is the standing instructions plus that document. Nothing
+  else from the earlier conversation carries over, so anything the next context
+  needs must be in the document.
+- After a rollover, continue from the handoff document and live repository
+  state. The earlier conversation is never injected automatically; use history
+  only to recover one specific missing detail.
 - get_context_remaining is a tool you invoke with no arguments; it returns the
   measured numbers. When you need to know how much context is left — or when
   you are asked about it — call it and report the numbers it returned. The

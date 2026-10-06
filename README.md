@@ -6,7 +6,7 @@ working context window and continue in a fresh one while preserving durable
 state — with **no summarization**.
 
 ```text
-fresh working context + durable model-managed notes + small recent raw tail + recoverable full history
+fresh working context = standing instructions + the durable handoff document you wrote; nothing else
 ```
 
 Inspired by the context-management architecture in `openai/codex` (the
@@ -39,10 +39,16 @@ must additionally live in the session's agent preset — see
 [Web profiles](#web-profiles-preset-sessions) below. A rollover is a real DSH
 compaction: `compaction/start` → `compaction/summary` → one replacement
 `user/message` with full source provenance → `compaction/end` — but the
-"summary" is a **deterministic checkpoint** (durable notes plus an optional
-handoff), never an LLM call. Raw session events stay persisted; a
-token-budgeted recent tail stays verbatim on the surface; `deriveMessages()`
+"summary" is the **handoff document's own bytes**, never an LLM call. Raw
+session events stay persisted and the session id is unchanged; `deriveMessages()`
 rebuilds automatically.
+
+After a rollover the model-visible context is the standing system/developer
+instructions plus the handoff document. **No recent tail, no prior messages and
+no tool calls carry over** — including the `new_context` call that requested the
+boundary, and including the workspace `AGENTS.md` chain, which
+`dsh-agent-instructions` re-injects from disk because the surface no longer
+carries it.
 
 Responsibilities stay split (the Codex lesson):
 
@@ -58,9 +64,14 @@ Responsibilities stay split (the Codex lesson):
 
 ### Model-facing tools
 
-- **`new_context({ handoff? })`** — request a context boundary at the next safe
-  point. The handoff (bounded) becomes part of the new window's checkpoint. The
-  boundary is crossed at a safe lifecycle point, never mid-tool-batch.
+- **`new_context({ handoff_path })`** — request a context boundary at the next
+  safe point. `handoff_path` is **required**: the durable handoff document the
+  new window continues from, absolute or relative to the session working
+  directory. It is read inside the tool, so a missing, unreadable, empty or
+  oversized document is refused as the tool result the model reads instead of a
+  boundary that silently never happens. The document's bytes become the entire
+  new context. The boundary is crossed at a safe lifecycle point, never
+  mid-tool-batch.
 - **`get_context_remaining()`** — honest headroom: tokens left before the hard
   window and before the automatic rollover, or "not measured yet".
 - **`notes`** — `list | read | write | append | search` over per-session
@@ -71,22 +82,37 @@ Responsibilities stay split (the Codex lesson):
 
 ### Rollover paths
 
-1. **Model-driven** (preferred): the model saves notes, calls `new_context`
-   with a short handoff at a phase boundary (research → implementation, etc.).
-2. **Pressure** (safety net): above `thresholdRatio` of the window the engine
-   rolls over automatically with durable notes and the recent verbatim tail.
-   Below that, a **one-per-window** checkpoint reminder suggests saving notes
-   and rolling over.
+1. **Model-driven** (the intended path): the model runs `/handoff-doc`, writes
+   the durable document, and calls `new_context({ handoff_path })` with its
+   path. The document replaces the whole prior surface under the
+   `handoffOnly` rule.
+2. **Pressure** (safety net): above `thresholdRatio` (0.90) the engine rolls
+   over automatically. Below that, at `reminderThresholdRatio` (0.40), a
+   **one-per-window** reminder tells the model to run `/handoff-doc` and then
+   call `new_context`.
 3. **Overflow**: a provider-confirmed `CONTEXT_WINDOW_EXCEEDED` forces a
-   rollover with the same notes + tail checkpoint and retries the request.
-4. **Manual**: `/compact` keeps working — it performs the same standalone
-   notes + tail rollover on an idle agent.
+   rollover and retries the request.
+4. **Manual**: `/compact` keeps working on an idle agent.
 
-Only the model-driven path carries a **handoff**. The engine never writes one
-for pressure, overflow, or manual rollovers: producing a handoff itself would
-mean either an LLM summarization call or copying older user messages into the
-fresh window, and the second option revives stale requests. Those paths
-preserve intent through notes and the recent verbatim tail instead.
+Under `handoffOnly` (what the shipped preset sets) every path replaces the span
+from the first non-system surface node through the **last** surface node, so no
+priced tail survives. `retainTokens: 0` is deliberately NOT how that is
+expressed: a zero token budget still retains the last node and the tool-pairing
+walk keeps more, which is exactly the old material the handoff-only rule exists
+to drop. `retainRatio` / `retainTokens` remain available for a deployment that
+wants a verbatim tail (`handoffOnly: false`).
+
+The **only** case where old material can survive is a rollover that fires while
+a step is genuinely mid-tool-call with no result yet: the host requires a
+tool-pairing balanced cut, so the selector backs up to the nearest earlier
+balanced cut and that incomplete call/result unit stays on the surface. That is
+a host constraint, not a retained tail.
+
+The engine-driven paths (pressure, overflow, manual) have no model in the loop
+and therefore no document to read; they still compose the deterministic notes
+checkpoint. Ticket 05 teaches the pressure path to prefer a scanned handoff
+document; `handoffDir` and `handoffPattern` are already validated configuration
+keys that nothing reads yet.
 
 ## What this plugin touches
 
@@ -208,11 +234,14 @@ Configuration (cordis.yml `config` on the plugin row):
     - id: context-rollover
       name: dsh-context-rollover
       config:
-        thresholdRatio: 0.9          # automatic rollover point (fraction of window)
-        reminderThresholdRatio: 0.75 # one-time checkpoint reminder point
-        retainRatio: 0.1             # recent verbatim tail (fraction of window)
+        thresholdRatio: 0.9          # emergency rollover point (fraction of window)
+        reminderThresholdRatio: 0.4  # one-time /handoff-doc reminder point
+        handoffOnly: true            # no tail: the handoff document replaces the surface
+        retainRatio: 0.1             # recent verbatim tail when handoffOnly is false
         retainTokens: null           # absolute tail budget; overrides retainRatio
-        handoffMaxChars: 20000
+        handoffMaxChars: 20000       # max accepted handoff document size
+        handoffDir: .scratch/handoff # emergency scan root (ticket 05; nothing reads it yet)
+        handoffPattern: 'HANDOFF-*.md'
         notesEnabled: true
         historyEnabled: true
         notesDir: null               # base dir override; default <dsh home>/notes
@@ -300,18 +329,20 @@ pnpm test        # surface, notes, history, engine integration, tool rendering
 pnpm typecheck
 ```
 
-Tests mount the real session store, token meter, tool runtime, agent loop, and
-**the compaction invariant companions**, so every committed rollover is
-validated against DSH's own invariants. The integration test proves the
-semantic experiment end to end: the model researches, calls `new_context`
-mid-turn, and the fresh window carries notes + handoff + recent tail while the
-turn continues.
+Tests mount the real session store, token meter, tool runtime, agent loop,
+`dsh-agent-instructions` with a real local filesystem, and **the compaction
+invariant companions**, so every committed rollover is validated against DSH's
+own invariants. `tests/handoff-only.spec.ts` proves the central claim end to
+end: the model researches, calls `new_context` mid-turn with a handoff path, and
+the surface at the transaction's own `compaction/end` is exactly the
+`system/message` head plus the replacement document — asserted by node type, and
+on the recorded adapter request for the first post-rollover model call.
 
 ## Scope and limits
 
-- A rollover checkpoint contains durable notes, the model's handoff when it
-  supplied one, and the retained verbatim tail that sits outside the
-  checkpoint. No older user prompts are copied into it.
+- Under `handoffOnly` a rollover replacement contains the handoff document and
+  nothing else: no notes, no narration, no older user prompts and no tail. The
+  notes checkpoint still exists and is what the engine-driven paths compose.
 - Notes survive context rollovers within a session; no cross-session sync,
   embeddings, or cloud storage.
 - Notes are files, not session events: `Session.append` cannot mark a plugin's

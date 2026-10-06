@@ -31,8 +31,60 @@ function checkpointText(text: string): string {
 }
 
 /**
+ * What one rollover writes in place of the replaced span.
+ *
+ * Two compositions exist because there are two continuation contracts, and
+ * they are not interchangeable. The notes checkpoint surrounds the state it
+ * carries with engine-authored narration and section headings. A handoff
+ * document is a complete continuation contract written for a cold reader, so
+ * its bytes must reach the fresh context unchanged, with nothing prepended,
+ * appended or wrapped.
+ */
+export type RolloverReplacement =
+  | {
+      /** Deterministic checkpoint: narration, durable notes, optional short handoff. */
+      readonly kind: 'checkpoint'
+      readonly checkpoint: CheckpointInput
+    }
+  | {
+      /** The handoff document itself, byte for byte, as the whole replacement. */
+      readonly kind: 'handoff-document'
+      /** 1-based number of the window the rollover starts (summary metadata). */
+      readonly windowNumber: number
+      /** The document text exactly as it was read from disk. */
+      readonly text: string
+      /** Path the text was read from; named by a refusal or a diagnostic. */
+      readonly path?: string
+    }
+
+/**
+ * The window number a rollover starts, whichever composition it uses.
+ * @param replacement - the replacement the caller selected.
+ * @returns the 1-based window number.
+ */
+export function replacementWindowNumber(replacement: RolloverReplacement): number {
+  return replacement.kind === 'checkpoint'
+    ? replacement.checkpoint.windowNumber
+    : replacement.windowNumber
+}
+
+/**
+ * Compose the replacement content for one rollover.
+ * @param replacement - the composition the caller selected for this rollover.
+ * @returns the exact text of the replacement user message.
+ */
+export function buildReplacementText(replacement: RolloverReplacement): string {
+  return replacement.kind === 'checkpoint'
+    ? buildCheckpointText(replacement.checkpoint)
+    : replacement.text
+}
+
+/**
  * Compose the replacement checkpoint blocks. Content is deterministic for a
  * given input, so the shrink guard's pricing is reproducible.
+ *
+ * This is the notes composition the emergency fallback keeps using. It is NOT
+ * the handoff composition: see {@link buildReplacementText}.
  * @param input - the rollover's reason, window number, and retained state.
  * @returns the checkpoint content for the replacement user message.
  */

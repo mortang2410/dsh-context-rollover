@@ -27,7 +27,7 @@ async function bareMeter(): Promise<TokenMeter> {
 /** Commit a full-surface rollover (standalone bracket) and return its result. */
 async function rollEverything(session: Session, windowNumber: number): Promise<void> {
   const meter = await bareMeter()
-  const range = selectRolloverRange(session, meter.measure(session), 0)
+  const range = selectRolloverRange(session, meter.measure(session), { kind: 'tail', retainTokens: 0 })
   if (range === null) throw new Error('expected a compactable range')
   await commitRollover(
     { meter },
@@ -36,11 +36,14 @@ async function rollEverything(session: Session, windowNumber: number): Promise<v
     range.end,
     {
       owner: null,
-      checkpoint: {
-        reason: 'manual',
-        windowNumber,
-        notes: null,
-        handoff: null,
+      replacement: {
+        kind: 'checkpoint',
+        checkpoint: {
+          reason: 'manual',
+          windowNumber,
+          notes: null,
+          handoff: null,
+        },
       },
     },
   )

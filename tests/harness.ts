@@ -28,6 +28,7 @@ import type {
   Message,
   RequestMessage,
   StreamChunk,
+  ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
@@ -42,11 +43,35 @@ export type StreamScript = readonly StreamChunk[][]
 /** The context window the mock adapters advertise. */
 export const CONTEXT_WINDOW = 100_000
 
+/**
+ * One request exactly as the loop handed it to an adapter: the derived
+ * conversation, plus the tool catalogue the loop assembled for that request.
+ *
+ * `requests` alone cannot prove what a request advertised, because the
+ * catalogue rides `GenerateOptions.tools` and not the message list.
+ */
+export interface RecordedRequest {
+  readonly messages: RequestMessage[]
+  readonly tools: readonly ToolSchema[]
+}
+
+/** Record one request's messages and tool catalogue into both sinks. */
+function record(
+  options: GenerateOptions,
+  messages: RequestMessage[][],
+  requests: RecordedRequest[],
+): void {
+  messages.push([...options.messages])
+  requests.push({ messages: [...options.messages], tools: options.tools ?? [] })
+}
+
 /** One text answer per request, with a large advertised context window. */
 export class TextAdapter extends LlmAdapter {
   // Exactly what the loop handed the adapter: `GenerateOptions.messages` is
   // `RequestMessage[]`, which is a superset of the persisted `Message`.
   readonly requests: RequestMessage[][] = []
+  /** The same requests with the tool catalogue each one advertised. */
+  readonly recorded: RecordedRequest[] = []
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return Promise.resolve({
@@ -58,7 +83,7 @@ export class TextAdapter extends LlmAdapter {
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    this.requests.push([...options.messages])
+    record(options, this.requests, this.recorded)
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: 'answer' } }
     yield { type: 'finish', reason: { kind: 'stop' } }
@@ -71,6 +96,8 @@ export class TextAdapter extends LlmAdapter {
  */
 export class ScriptedAdapter extends LlmAdapter {
   readonly requests: RequestMessage[][] = []
+  /** The same requests with the tool catalogue each one advertised. */
+  readonly recorded: RecordedRequest[] = []
 
   constructor(private readonly script: StreamScript) {
     super()
@@ -86,7 +113,7 @@ export class ScriptedAdapter extends LlmAdapter {
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    this.requests.push([...options.messages])
+    record(options, this.requests, this.recorded)
     const entry = this.script[Math.min(this.requests.length - 1, this.script.length - 1)]
     if (entry === undefined) throw new Error('scripted adapter ran out of entries')
     for (const chunk of entry) yield chunk
@@ -226,6 +253,8 @@ const cleanup: Array<() => Promise<void>> = []
 
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import * as AgentInstructions from '@deepseek-ai/dsh-agent-instructions'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ContextRolloverEngine } from '../src/index.ts'
 import { isPressureReminder } from '../src/rollover.ts'
@@ -246,19 +275,43 @@ export interface EngineHarness {
   readonly notesBase: string
 }
 
+/** Mount options that only the suites needing a real workspace ask for. */
+export interface EngineHarnessMount {
+  /**
+   * Mount a real local filesystem (`ctx.fs`) and `dsh-agent-instructions`, so
+   * workspace instruction files (`AGENTS.md`) load from `cwd` and are
+   * re-injected after a rollover shadows them.
+   *
+   * Opt-in on purpose: mounting these changes the surface of every session in
+   * the suite (an extra `agent-instructions` node), which suites that count
+   * nodes must not silently inherit.
+   */
+  readonly workspaceInstructions?: boolean
+}
+
 /**
  * Mount one engine over the standard test stack with a temp notes base.
  * @param id - session id for the created agent.
  * @param config - engine configuration overrides.
  * @param meta - session creation metadata; pass `cwd` to give the session a
  *   real working directory (relative handoff paths resolve against it).
+ * @param mount - opt-in extra mounts; see {@link EngineHarnessMount}.
  */
 export async function engineHarness(
   id: string,
   config: Partial<RolloverConfig> = {},
   meta: Pick<SessionHeader, 'cwd'> = {},
+  mount: EngineHarnessMount = {},
 ): Promise<EngineHarness> {
   const ctx = await mountTestContext()
+  if (mount.workspaceInstructions === true) {
+    // Order matters: `agent-instructions` reads the workspace through the
+    // optional `ctx.fs` provider and returns early when it is absent, so the
+    // filesystem must already be mounted when the instruction plugin loads.
+    await ctx.plugin(LocalFileSystem, {})
+    if (ctx.get('fs') === undefined) throw new Error('expected ctx.fs after mounting the local filesystem')
+    await ctx.plugin(AgentInstructions, { maxBytes: 65536 })
+  }
   const notesBase = await tempNotesDir()
   const engine = new ContextRolloverEngine(ctx, { notesDir: notesBase, retainTokens: 40, ...config })
   const agent = await ctx.agentLoop.create(SessionId(id), { provider: MODEL, model: MODEL }, meta)

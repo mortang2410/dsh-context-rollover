@@ -2,10 +2,10 @@
  * The rollover surface transaction. A rollover is a genuine DSH compaction:
  * the same `compaction/start` lock, `compaction/summary` record, replacement
  * `user/message` with full source provenance, and `compaction/end` close as
- * `dsh-compaction-basic` — but the summary is a deterministic checkpoint
- * (notes plus an optional handoff), never an LLM call. Raw events stay
- * persisted; a recent verbatim tail stays on the surface outside the
- * replacement.
+ * `dsh-compaction-basic` — but the replacement is either the durable handoff
+ * document's own bytes or a deterministic notes checkpoint, never an LLM call.
+ * Raw events stay persisted; under `handoffOnly` no part of the old
+ * conversation stays on the surface either.
  *
  * @module dsh-context-rollover/rollover
  */
@@ -27,8 +27,8 @@ import type { TokenMeasurement } from '@deepseek-ai/dsh-token-meter'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { nodeHeuristicTokens, replaceSurfaceOp, sessionEventAt, sessionEvents } from './compat.ts'
 import type { Seq } from './compat.ts'
-import { buildCheckpointText } from './checkpoint.ts'
-import type { CheckpointInput, RolloverReason } from './checkpoint.ts'
+import { buildReplacementText, replacementWindowNumber } from './checkpoint.ts'
+import type { RolloverReplacement } from './checkpoint.ts'
 
 /**
  * Cordis plugin name this engine registers under, and the message-source
@@ -80,31 +80,57 @@ interface SurfaceSelection {
 export interface CommitRolloverOptions {
   /** `current-turn` derives the open turn's number; `null` writes a standalone bracket. */
   readonly owner: 'current-turn' | null
-  /** Checkpoint inputs the engine already resolved (notes, handoff, recovery). */
-  readonly checkpoint: Omit<CheckpointInput, 'reason' | 'windowNumber'> & {
-    readonly reason: RolloverReason
-    readonly windowNumber: number
-  }
+  /** What the replaced span becomes: a notes checkpoint, or the handoff document. */
+  readonly replacement: RolloverReplacement
   /** Manual command that initiated this rollover, when present. */
   readonly sourceCommandId?: CommandId
   /** Optional durability checkpoint after a successfully closed bracket. */
   readonly flush?: () => Promise<void>
 }
 
+/** How one rollover selects the span it replaces. */
+export type RolloverSelection =
+  | {
+      /** Retain a token-budgeted recent verbatim tail. */
+      readonly kind: 'tail'
+      /** Minimum recent tail budget retained verbatim. */
+      readonly retainTokens: number
+    }
+  | {
+      /**
+       * Retain no tail: replace everything but a `system/message` at surface
+       * node 0, backing off only to the nearest earlier tool-pairing balanced
+       * cut. See {@link selectRolloverRange}.
+       */
+      readonly kind: 'handoff-only'
+    }
+
 /**
- * Select the replacement range for a rollover: everything except a token-
- * budgeted recent tail, with the cut moved backward until it does not split
- * an assistant tool-call/result pair.
+ * Select the replacement range for a rollover.
+ *
+ * `tail` mode keeps a token-budgeted recent slice verbatim and moves the cut
+ * backward until it does not split an assistant tool-call/result pair.
+ *
+ * `handoff-only` mode retains no tail at all. The span runs from the first
+ * non-`system/message` surface node through the LAST surface node, walking
+ * back one node at a time only until the cut after the span end is
+ * tool-pairing balanced. On the normal model-requested path the last node is
+ * the open turn's own `tool/result`, so that cut is already balanced and the
+ * whole prior conversation, including the `new_context` tool call and its
+ * result, is inside the span. A step genuinely mid-tool-call has no result
+ * yet, so the cut after its tool call is unbalanced and the walk back leaves
+ * that incomplete call/result unit outside the span; that is a real host
+ * constraint, and the reason this mode walks rather than keeps a priced tail.
  * @param session - session supplying authoritative current surface positions.
  * @param measurement - unified pressure and surface measurement from the meter.
- * @param retainTokens - minimum recent tail budget retained verbatim.
+ * @param selection - which retention rule to apply.
  * @returns the inclusive positional seq range to replace, or `null` when the
  *   surface has no usable compactable span (nothing would be freed).
  */
 export function selectRolloverRange(
   session: Session,
   measurement: TokenMeasurement,
-  retainTokens: number,
+  selection: RolloverSelection,
 ): { start: Seq; end: Seq; shadowedSeqs: readonly Seq[] } | null {
   const pricedNodes = measurement.nodes
   if (pricedNodes.length === 0) return null
@@ -115,13 +141,6 @@ export function selectRolloverRange(
     throw new Error('context-rollover: token-meter surface does not match the current session surface')
   }
 
-  let accumulated = 0
-  let keepFromIdx: number | undefined
-  for (let index = pricedNodes.length - 1; index >= 0; index -= 1) {
-    accumulated += pricedNodes[index]?.tokens ?? 0
-    keepFromIdx = index
-    if (accumulated >= retainTokens) break
-  }
   const first = surfaceNodes[0]
   // A `system/message` at surface node 0 is never inside the range: newer
   // hosts reject rewriting it with anything but a single-node system rewrite.
@@ -129,6 +148,34 @@ export function selectRolloverRange(
   // old behavior on hosts without a system head.
   const head = first === undefined ? undefined : sessionEventAt(session, first)
   const firstIdx = head !== undefined && (head.type as string) === 'system/message' ? 1 : 0
+
+  if (selection.kind === 'handoff-only') {
+    if (surfaceNodes.length <= firstIdx) return null
+    let keepFromIdx = surfaceNodes.length
+    while (keepFromIdx > firstIdx) {
+      const candidate = surfaceNodes[keepFromIdx - 1]
+      if (candidate !== undefined && toolPairingBalancedAfter(session, candidate)) break
+      keepFromIdx -= 1
+    }
+    if (keepFromIdx <= firstIdx) return null
+    const start = surfaceNodes[firstIdx]
+    const cutoff = surfaceNodes[keepFromIdx - 1]
+    if (start === undefined || cutoff === undefined) return null
+    return {
+      start,
+      end: cutoff,
+      shadowedSeqs: surfaceNodes.slice(firstIdx, keepFromIdx),
+    }
+  }
+
+  const retainTokens = selection.retainTokens
+  let accumulated = 0
+  let keepFromIdx: number | undefined
+  for (let index = pricedNodes.length - 1; index >= 0; index -= 1) {
+    accumulated += pricedNodes[index]?.tokens ?? 0
+    keepFromIdx = index
+    if (accumulated >= retainTokens) break
+  }
   if (keepFromIdx === undefined || keepFromIdx <= firstIdx) return null
 
   while (keepFromIdx > firstIdx) {
@@ -218,14 +265,14 @@ function inspectEntryState(session: Session): RolloverEntryState {
 /**
  * Commit one rollover over a validated span. The compaction lock, shrink
  * guard, provenance coverage, and bracket pairing follow the shared compaction
- * protocol; the summary content is built synchronously from the caller's
- * checkpoint inputs, so the whole body commits without yielding between the
+ * protocol; the replacement content is built synchronously from the caller's
+ * resolved replacement, so the whole body commits without yielding between the
  * lock and the replacement.
  * @param dependencies - the conversation meter used for pricing.
  * @param session - session whose surface is mutated.
  * @param start - inclusive first surface-node seq of the replaced span.
  * @param end - inclusive last surface-node seq of the replaced span.
- * @param options - bracket owner, checkpoint inputs, flush, and command provenance.
+ * @param options - bracket owner, replacement content, flush, and command provenance.
  * @returns the durable compaction result.
  */
 export async function commitRollover(
@@ -280,21 +327,28 @@ export async function commitRollover(
     const shadowedTokenCount = selectedNodes.reduce((total, node) => total + nodeHeuristicTokens(node), 0)
     const shadowedRouteTokenCount = selectedNodes.reduce((total, node) => total + node.tokens, 0)
 
-    const checkpointText = buildCheckpointText(options.checkpoint)
+    const replacementText = buildReplacementText(options.replacement)
     const checkpointMessage = createUserMessage({
-      content: [{ type: 'text', text: checkpointText }],
+      content: [{ type: 'text', text: replacementText }],
       source: compactCheckpointSource(compactionId, options.sourceCommandId),
     })
     const framedTokenCount = dependencies.meter.estimateMessage(checkpointMessage)
     if (framedTokenCount >= shadowedRouteTokenCount) {
+      // A refused handoff document names itself: the model chose that exact
+      // file, so the refusal has to say which file was too large rather than
+      // leaving it to guess which candidate was rejected.
+      const subject = options.replacement.kind === 'handoff-document'
+        && options.replacement.path !== undefined
+        ? `handoff document ${options.replacement.path}`
+        : 'rollover replacement'
       throw new Error(
-        `rollover checkpoint is not smaller than the shadowed content `
+        `the ${subject} is not smaller than the shadowed content `
         + `(${framedTokenCount} estimated tokens >= ${shadowedRouteTokenCount}); `
         + 'the active context is too small for a useful rollover',
       )
     }
 
-    const summaryBlocks: ContentBlock[] = [{ type: 'text', text: checkpointText }]
+    const summaryBlocks: ContentBlock[] = [{ type: 'text', text: replacementText }]
     const summaryEvent = session.append('compaction/summary', {
       compactionId,
       ...options.sourceCommandId === undefined ? {} : { sourceCommandId: options.sourceCommandId },
@@ -303,7 +357,7 @@ export async function commitRollover(
       shadowedSeqs: [...selection.shadowedSeqs],
       shadowedTokenCount,
       provider: ROLLOVER_PROVIDER,
-      model: `deterministic/window-${options.checkpoint.windowNumber}`,
+      model: `deterministic/window-${replacementWindowNumber(options.replacement)}`,
     })
     session.append('user/message', checkpointMessage, {
       // The op shape is host-versioned (see replaceSurfaceOp); the cast is

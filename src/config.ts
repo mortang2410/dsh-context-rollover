@@ -71,7 +71,19 @@ export interface RolloverConfig {
    * Absolute recent-tail budget in tokens; overrides `retainRatio` when set.
    */
   retainTokens?: number
-  /** Maximum accepted handoff text size in characters. Defaults to `20000`. */
+  /**
+   * Replace the whole prior surface with the handoff document, keeping no
+   * priced recent tail at all. Defaults to `false`.
+   *
+   * This is deliberately NOT `retainTokens: 0`: a zero budget still retains the
+   * last surface node (and walks further back for tool pairing), which is
+   * exactly the old-session material this mode exists to drop. When true the
+   * replaced span runs from the first non-`system/message` node through the
+   * last surface node, backing off only to the nearest earlier tool-pairing
+   * balanced cut.
+   */
+  handoffOnly?: boolean
+  /** Maximum accepted handoff document size in characters. Defaults to `20000`. */
   handoffMaxChars?: number
   /** Mount the `notes` tool and render notes into rollover checkpoints. */
   notesEnabled?: boolean
@@ -102,6 +114,7 @@ export const Config: z<RolloverConfig> = z.object({
   reminderMessage: z.string(),
   retainRatio: z.number(),
   retainTokens: z.number().step(1).min(0),
+  handoffOnly: z.boolean(),
   handoffMaxChars: z.number().step(1).min(0),
   notesEnabled: z.boolean(),
   historyEnabled: z.boolean(),
@@ -119,6 +132,8 @@ export interface ResolvedRolloverConfig {
   readonly retainRatio: number
   /** `null` keeps the ratio-based tail budget. */
   readonly retainTokens: number | null
+  /** Replace the whole prior surface with the handoff document; keep no tail. */
+  readonly handoffOnly: boolean
   readonly handoffMaxChars: number
   readonly notesEnabled: boolean
   readonly historyEnabled: boolean
@@ -171,6 +186,10 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
   if (retainTokens !== null && (!Number.isSafeInteger(retainTokens) || retainTokens < 0)) {
     throw new TypeError(`context-rollover: retainTokens must be a non-negative integer, got ${String(retainTokens)}`)
   }
+  const handoffOnly = config.handoffOnly ?? false
+  if (typeof handoffOnly !== 'boolean') {
+    throw new TypeError(`context-rollover: handoffOnly must be a boolean, got ${String(handoffOnly)}`)
+  }
   const handoffMaxChars = config.handoffMaxChars ?? 20000
   if (!Number.isSafeInteger(handoffMaxChars) || handoffMaxChars <= 0) {
     throw new TypeError(`context-rollover: handoffMaxChars must be a positive integer, got ${String(handoffMaxChars)}`)
@@ -187,6 +206,7 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
     reminderMessage,
     retainRatio,
     retainTokens,
+    handoffOnly,
     handoffMaxChars,
     notesEnabled: config.notesEnabled ?? true,
     historyEnabled: config.historyEnabled ?? true,

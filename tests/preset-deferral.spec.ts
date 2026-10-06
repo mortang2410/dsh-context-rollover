@@ -74,7 +74,7 @@ describe('preset ownership', () => {
     const { ctx, agent, session } = await engineHarness('defer-honest')
     provideRoster(ctx, {} as CompactionEngine)
     const adapter = new ScriptedAdapter([
-      newContextCall('{"handoff":"Continue the work."}'),
+      newContextCall('{"handoff_path":"HANDOFF-deferred.md"}'),
       textResponse('noted'),
     ])
     ctx.llm.registerAdapter(['mock'], adapter)
@@ -82,15 +82,20 @@ describe('preset ownership', () => {
     await followup(agent, 'Roll over, please.')
 
     // Nothing was recorded and nothing committed; the model-visible result
-    // points at the preset that actually rolls over.
+    // points at the preset that actually rolls over. The ownership gate runs
+    // before any file is read, so the named path need not exist: a deferring
+    // session must not be refused for a handoff the preset engine never uses.
     expect(countRollovers(session)).toBe(0)
+    expect(session.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
     const tailResultSeq = session.surface.nodes
       .map(seq => session.eventAt(seq))
       .filter(event => event?.type === 'tool/result')
       .map(event => event?.seq)
       .pop()
     const tailResult = tailResultSeq === undefined ? undefined : session.eventAt(tailResultSeq)
-    expect(JSON.stringify(tailResult?.data)).toContain('agent preset')
+    const resultText = JSON.stringify(tailResult?.data)
+    expect(resultText).toContain('agent preset')
+    expect(resultText).not.toContain('no handoff document')
   })
 
   it('registers no global tools where a preset roster exists', async () => {

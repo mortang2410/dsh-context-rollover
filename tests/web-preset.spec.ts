@@ -162,6 +162,36 @@ describe('make-web-preset', () => {
     }
   })
 
+  it('the shipped preset keeps no tail: handoffOnly is true and no tail budget is set', () => {
+    // The handoff-only contract is the preset's whole point, and it is a
+    // boolean rather than a tiny tail budget: `retainTokens: 0` was measured
+    // to keep the last surface node.
+    const committed = readFileSync(
+      join(repoRoot, 'presets', 'standard-rollover', 'agent.cordis.yml'),
+      'utf8',
+    )
+    expect(committed).toContain('handoffOnly: true')
+    expect(committed).not.toContain('handoffOnly: false')
+  })
+
+  it('renders handoffOnly on, and accepts an explicit false, and rejects a non-boolean', () => {
+    const { presetsDir, outDir, cleanup } = scratch(standardFixture())
+    try {
+      run(['--presets-dir', presetsDir, '--out-dir', outDir])
+      const generated = readFileSync(join(outDir, 'standard-rollover', 'agent.cordis.yml'), 'utf8')
+      expect(generated).toContain('handoffOnly: true')
+      // A tail budget can still be requested for a deployment that wants one.
+      run(['--presets-dir', presetsDir, '--out-dir', outDir, '--handoff-only', 'false'])
+      expect(readFileSync(join(outDir, 'standard-rollover', 'agent.cordis.yml'), 'utf8'))
+        .toContain('handoffOnly: false')
+      // A typo must fail loud rather than render a truthy string into YAML.
+      expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir, '--handoff-only', 'yes']))
+        .toThrow(/--handoff-only must be true or false/)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('a copy of the shipped preset keeps the 40% reminder and its message', () => {
     // Equality with a fresh generation would still hold if the generator and
     // the committed preset both regressed to the old defaults, so the values

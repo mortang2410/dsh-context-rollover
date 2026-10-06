@@ -39,7 +39,7 @@ describe('pre-step range selection', () => {
     }), { surfaceOp: 'append' })
 
     const nodes = session.surface.nodes
-    const range = selectRolloverRange(session, ctx.tokenMeter.measure(session), 0)
+    const range = selectRolloverRange(session, ctx.tokenMeter.measure(session), { kind: 'tail', retainTokens: 0 })
     expect(range).not.toBeNull()
     if (range === null) return
     expect(range.start).toBe(nodes[1])

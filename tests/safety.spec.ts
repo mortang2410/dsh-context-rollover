@@ -172,10 +172,11 @@ describe('rollover at the turn-stop boundary', () => {
     session.append('step/end', { turn: 7, step: 1 })
     // Turn 7 stays open: this is the stop boundary under test.
     const fakeAgent = { session, options: {} } as Agent
+    const stopHandoff = '# Handoff\n\nStop here and continue from this document.\n'
     const pending = (engine as unknown as {
-      pendingRollovers: Map<string, { handoff: string | null }>
+      pendingRollovers: Map<string, { handoff: string; handoffPath: string }>
     }).pendingRollovers
-    pending.set(session.id, { handoff: 'stop here' })
+    pending.set(session.id, { handoff: stopHandoff, handoffPath: '/workspace/HANDOFF-stop.md' })
 
     // Dispatch through the real agent fiber as the scope carrier, the way
     // the agent loop itself serially dispatches the stop boundary.
@@ -197,8 +198,9 @@ describe('rollover at the turn-stop boundary', () => {
       )
     }
     const texts = derivedTexts(session).join('\n')
-    expect(texts).toContain('reason: model-requested')
-    expect(texts).toContain('stop here')
+    // The pending document is the replacement, with no checkpoint wrapper.
+    expect(texts).toContain('Stop here and continue from this document.')
+    expect(texts).not.toContain('<context-rollover checkpoint>')
     expect(pending.has(session.id)).toBe(false)
   })
 })
