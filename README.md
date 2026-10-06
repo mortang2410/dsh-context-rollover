@@ -102,11 +102,14 @@ walk keeps more, which is exactly the old material the handoff-only rule exists
 to drop. `retainRatio` / `retainTokens` remain available for a deployment that
 wants a verbatim tail (`handoffOnly: false`).
 
-The **only** case where old material can survive is a rollover that fires while
-a step is genuinely mid-tool-call with no result yet: the host requires a
-tool-pairing balanced cut, so the selector backs up to the nearest earlier
-balanced cut and that incomplete call/result unit stays on the surface. That is
-a host constraint, not a retained tail.
+Nothing old survives, in every case, including a rollover that fires while a
+step is mid-tool-call with no result yet. The host requires a tool-pairing
+balanced cut, so a pre-step whose tail cut is unbalanced does not roll over at
+all: it defers, the host appends the missing `tool/result` (a skipped or aborted
+call gets a synthetic one), and the **next** pre-step crosses with the whole
+prior surface inside the span. A deferred pre-step is logged at info level, not
+as a failure, and it leaves the model's request pending so the rollover is
+retried rather than lost.
 
 The engine-driven paths (pressure, overflow, manual) have no model in the loop
 and therefore no document to read; they still compose the deterministic notes

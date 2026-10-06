@@ -79,8 +79,10 @@ export interface RolloverConfig {
    * last surface node (and walks further back for tool pairing), which is
    * exactly the old-session material this mode exists to drop. When true the
    * replaced span runs from the first non-`system/message` node through the
-   * last surface node, backing off only to the nearest earlier tool-pairing
-   * balanced cut.
+   * last surface node, and only when the cut after that node is tool-pairing
+   * balanced. A pre-step whose tail cut is unbalanced (a tool call with no
+   * result yet) selects nothing and defers to the next pre-step rather than
+   * retaining the incomplete unit.
    */
   handoffOnly?: boolean
   /** Maximum accepted handoff document size in characters. Defaults to `20000`. */
