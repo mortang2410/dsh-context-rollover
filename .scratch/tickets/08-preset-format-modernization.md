@@ -43,7 +43,14 @@ Acceptance criteria:
       preset generator already fails loudly on an unexpected `compaction-basic` row.
 - [ ] The preset's engine row carries `reminderThresholdRatio: 0.40`, `thresholdRatio: 0.9`,
       `handoffOnly: true`, the reminder message, and the handoff directory settings.
-- [ ] The engine row's `name` RESOLVES on the running host. This is the most likely way to get a
+- [x] RESOLVED: the engine row's `name` must be the BARE package specifier `dsh-context-rollover`.
+      Verified in the host source: the boot installs runtime module-resolution interception
+      (`dsh-app-boot/lib/index.js:1641`) and `routeScoped` (`:1408`) resolves a bare name through
+      `resolution.entries` (`:1426`), which `collectInstallationScopePackages` (`:681`) fills from the
+      install anchor's closure. A plain `createRequire(<profile>/...).resolve()` probe is NOT the
+      authority and wrongly reports MODULE_NOT_FOUND. Measured end to end: `dsh-context-rollover`
+      mounts; `@deepseek-ai/dsh-context-rollover` and a repo-relative path do not.
+- [ ] The engine row's `name` RESOLVES on the running host, proven by test. This is the most likely way to get a
       preset that registers but whose engine row never mounts, so prove it rather than assuming.
       The currently committed preset names the engine `'../../lib/index.js'`, a path relative to the
       old per-preset directory. In the inline format there is no preset directory: the registry

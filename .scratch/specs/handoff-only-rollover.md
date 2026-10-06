@@ -298,6 +298,16 @@ line and are not read by the running host.
 The consequence is not cosmetic, and the first draft of this spec wrongly filed it as out of
 scope. On the running host:
 
+- the engine row's `name` in a modernized preset must be the BARE package specifier. An earlier
+  revision of this spec claimed a bare `@deepseek-ai` name could not resolve from a profile, based on
+  `createRequire('<profile>/package.json').resolve(...)` returning MODULE_NOT_FOUND. That probe
+  measures only Node's ordinary resolution and is the wrong authority: the boot installs a runtime
+  module-resolution interception (`dsh-app-boot/lib/index.js:1641` `installRuntimeInterception`) and
+  `routeScoped` (`:1408`) consults `resolution.entries.get(name)` (`:1426`), populated by
+  `collectInstallationScopePackages` (`:681`) from the install anchor's dependency closure. A bare
+  name in a bundle-layer row therefore reaches the installation's copy. Measured: with a profile
+  mirroring the real one, `dsh-context-rollover` mounted (fiber 0), while
+  `@deepseek-ai/dsh-context-rollover` and a repo-relative path both failed with MODULE_NOT_FOUND.
 - the bundle patch targets row id `agent-presets`, but the row that exists is
   `agent-preset-registry` (`dsh-web-app/cordis.patch.yml:562-566`), whose Config schema is only
   `{ default, selectedDefault }` (`dsh-agent-preset-registry/lib/index.js:471-474`). An unmatched
