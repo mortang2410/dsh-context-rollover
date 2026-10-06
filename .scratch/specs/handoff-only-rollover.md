@@ -321,9 +321,16 @@ Required new tests, mapped to the user's list:
    contain the handoff file's own distinctive content.
 4. Zero previous conversational tail is injected: every pre-rollover exchange carries a unique
    sentinel, and none of those sentinels appears in the derived messages after the rollover. The
-   one permitted survivor is the `new_context` tool call and its result when the boundary is
-   crossed with a turn open, because the host requires a tool-pairing-balanced cut; the test
-   asserts the tool call is the only non-fresh material and that it carries no conversation.
+   test additionally asserts that no prior `assistant/message` carrying a tool call and no prior
+   `tool/result` remains on the surface, and that the surface is exactly the `system/message` head
+   plus the replacement handoff message. No survivor is permitted on this path: the `new_context`
+   tool records a pending request and the engine crosses the boundary at the next pre-step, by
+   which time the host has already appended the tool result, so the cut after the last node is
+   balanced and the whole old turn is inside the replaced span.
+   The mid-call case is a separate scenario, not this test: if a rollover fires while a tool call
+   is genuinely in flight with no result yet, the selector backs up to the nearest earlier
+   balanced cut and that incomplete call/result unit stays. That scenario gets its own test
+   asserting the backed-up span and that no other old material survives.
 5. Same session id is retained across the rollover.
 6. No summarizer-model call occurs. The measurement must be observable rather than inferred: the
    test harness records adapter invocation order with timestamps or sequence numbers, and the

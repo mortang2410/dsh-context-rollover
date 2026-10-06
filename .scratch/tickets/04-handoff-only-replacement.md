@@ -41,6 +41,10 @@ messages, no tool calls, no summaries, no other old-session material reach the f
       head and the replacement handoff message, when no further turn has started.
 - [ ] Test: the `handoffOnly` selector keeps no priced tail. Revert-sensitive: it must fail if
       the mode is removed.
+- [ ] Test: a rollover fired while a tool call is genuinely in flight (no result yet) backs the
+      span up to the nearest earlier balanced cut, and the retained material is only that
+      incomplete call/result unit. This is the mid-call scenario, kept separate from the normal
+      `new_context` path test above, which permits no survivor at all.
 - [ ] Test: the session id is identical before and after.
 - [ ] The test context mounts `dsh-agent-instructions` so instruction re-injection is exercised
       rather than assumed.
