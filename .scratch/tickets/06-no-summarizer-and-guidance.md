@@ -16,15 +16,17 @@ test under ticket 02; this ticket owns only the no-model-call and guidance crite
 - [ ] No rollover path (model-requested, pressure, overflow, manual) invokes the LLM.
 - [ ] The `compaction/summary` event carries this engine's provider and its deterministic model
       string on every path.
-- [ ] The system-prompt guidance section leads with: run `/handoff-doc`, make the document fully
-      sufficient for a fresh context, then call `new_context` with its path.
-- [ ] The guidance states the handoff document is the entire continuation context.
-- [ ] The guidance states that old history is manual recovery through `history` only, and that it
-      is never injected automatically.
-- [ ] The old instruction telling the model to pass a short `handoff` string is gone from both
-      the guidance and the `new_context` tool description.
+- [x] DONE by ticket 04 (`23a1652`), verified by reading `src/guidance.ts`: the guidance leads with
+      run `/handoff-doc`, make the document fully sufficient for a fresh context, then call
+      `new_context` with its path; it states the document is the entire continuation context; and
+      it states the earlier conversation is never injected automatically and history is manual
+      recovery. The short-handoff instruction is gone from both the guidance and the tool
+      description. Do NOT redo this; only assert it.
 - [ ] The test harness records adapter invocation order (a monotonically increasing sequence
       number per stream call) so a request can be placed relative to the compaction events.
+      `tests/harness.ts` currently records `RecordedRequest { messages, tools }` with no order
+      field; add an ordinal. Note `tests/harness.ts` is also a target of tickets 07/08 only
+      indirectly, so you own it for this change.
 - [ ] Test: no stream starts between `compaction/start` and `compaction/end`, asserted for each
       rollover path separately: model-requested, pressure, overflow and manual. The scope is the
       rollover window, not the whole turn, because the model legitimately calls the LLM while
@@ -32,4 +34,6 @@ test under ticket 02; this ticket owns only the no-model-call and guidance crite
 - [ ] Test: the summary event's provider and model identify this engine's deterministic path
       rather than a summarizer route.
 - [ ] Test: the assembled system prompt contains the `/handoff-doc` workflow text and does not
-      contain the removed short-handoff instruction.
+      contain the removed short-handoff instruction. Pure assertion work; the text already exists.
+- [ ] Test: `ctx.compaction` resolves to this engine (not `dsh-compaction-basic`), and the bundle
+      patch in `cordis.patch.yml` still disables the `compaction-basic` row.
