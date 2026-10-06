@@ -22,12 +22,19 @@
 
 import { chmod, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import * as path from 'node:path'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { DEFAULT_HANDOFF_DIR, DEFAULT_HANDOFF_PATTERN, resolveConfig } from '../src/config.ts'
-import { matchesHandoffPattern, readHandoffFile, resolveHandoffPath, scanHandoffDir } from '../src/handoff.ts'
+import {
+  compareHandoffCandidates,
+  matchesHandoffPattern,
+  readHandoffFile,
+  resolveHandoffPath,
+  scanHandoffDir,
+} from '../src/handoff.ts'
 import { NotesStore } from '../src/notes.ts'
 import { countRollovers } from '../src/rollover.ts'
 import {
@@ -280,6 +287,118 @@ describe('the emergency handoff scan', () => {
     // And the scan itself agrees with what the engine did.
     const candidates = await scanHandoffDir({ dir: 'handoffs', pattern: 'handoff-*.md', cwd })
     expect(candidates.map(candidate => candidate.path)).toEqual([wanted])
+  })
+
+  it('answers a pathological multi-star pattern promptly and correctly', () => {
+    // `handoffPattern` is operator configuration, and a mis-typed pattern used
+    // to hang the pre-step it runs inside: the previous implementation expanded
+    // every `*` into a non-atomic `[^/]*` group, so a pattern with several stars
+    // separated by a literal that never matches backtracked exponentially. The
+    // shape below is the worst case for that translation.
+    //
+    // The elapsed-time bound is a REGRESSION GUARD, not the primary claim: what
+    // is asserted first is the ANSWER. A fast matcher that returned the wrong
+    // boolean would fail the equality checks below. What no assertion here can
+    // do is prove a wrong-but-fast matcher is impossible, so the correctness
+    // half is pinned by the explicit cases, including the ones where the shape
+    // of the name (a literal `*` character) is where a naive re-implementation
+    // gets it wrong.
+    const name = 'a'.repeat(30)
+    const pathological = `${'*a'.repeat(12)}b`
+    const startedAt = Date.now()
+    const result = matchesHandoffPattern(name, pathological)
+    const elapsedMs = Date.now() - startedAt
+    // `*a` twelve times followed by `b` cannot match 30 'a's with no 'b'.
+    expect(result).toBe(false)
+    expect(elapsedMs).toBeLessThan(1000)
+
+    // The same shape, matching: the trailing literal is present, so the stars
+    // must consume the run and the pattern must succeed.
+    expect(matchesHandoffPattern(`${name}b`, pathological)).toBe(true)
+    // And a longer name, to show cost grows with the name and not with the
+    // star count: this would have been astronomically slow before.
+    const longStartedAt = Date.now()
+    expect(matchesHandoffPattern('a'.repeat(200), pathological)).toBe(false)
+    expect(Date.now() - longStartedAt).toBeLessThan(1000)
+
+    // Correctness on the shapes a wrong-but-fast matcher gets wrong. A `*` in
+    // the NAME is an ordinary character: the pattern `*` is a wildcard that
+    // matches it, and the pattern `a*b` matches the literal-star name `a*b`
+    // by wildcard, not by literal equality.
+    expect(matchesHandoffPattern('*b', '*')).toBe(true)
+    expect(matchesHandoffPattern('*', '*')).toBe(true)
+    expect(matchesHandoffPattern('a*b', 'a*b')).toBe(true)
+    expect(matchesHandoffPattern('axb', 'a*b')).toBe(true)
+    expect(matchesHandoffPattern('ab', 'a*b')).toBe(true)
+    expect(matchesHandoffPattern('axc', 'a*b')).toBe(false)
+    // A name containing a path separator is never selected, whichever the
+    // pattern: the previous translation excluded separators from `*`, and a
+    // hand-written matcher must preserve that rather than treat `/` as ordinary.
+    expect(matchesHandoffPattern('a/b', '*')).toBe(false)
+    expect(matchesHandoffPattern('a\\b', '*')).toBe(false)
+    expect(matchesHandoffPattern('nested/HANDOFF-x.md', 'HANDOFF-*.md')).toBe(false)
+  })
+
+  it('orders two candidates that share a modification time by a total order', async () => {
+    // Modification time is the documented key, but two files can share one (a
+    // copy preserves mtimes; a filesystem with coarse timestamps rounds them
+    // together). The tiebreak must therefore be a TOTAL order. The previous
+    // `localeCompare` tiebreak was not: it reports equality for distinct names
+    // that collate together, such as a precomposed `é` (U+00E9) and a
+    // decomposed `e` plus combining acute, so those two would tie and fall back
+    // to whatever order the directory happened to return.
+    //
+    // The comparator is asserted DIRECTLY, because that is the only way to make
+    // this deterministic: a tie is exactly the input a stable sort resolves from
+    // its own input order, so the scan's output alone can agree with the correct
+    // answer by luck.
+    const sharedMtime = 1_700_000_000_000
+    const precomposed = path.join('dir', 'HANDOFF-\u00e9.md')
+    const decomposed = path.join('dir', 'HANDOFF-e\u0301.md')
+    expect(precomposed).not.toBe(decomposed)
+    // The name pair really does collate equal, which is what made the old
+    // tiebreak non-total.
+    expect(path.basename(precomposed).localeCompare(path.basename(decomposed))).toBe(0)
+
+    const a = { path: precomposed, modifiedAtMs: sharedMtime }
+    const b = { path: decomposed, modifiedAtMs: sharedMtime }
+    // Anti-symmetry and non-equality for two distinct paths sharing an mtime:
+    // the old comparator returned 0 in both directions here.
+    expect(compareHandoffCandidates(a, b)).not.toBe(0)
+    expect(compareHandoffCandidates(b, a)).not.toBe(0)
+    expect(Math.sign(compareHandoffCandidates(a, b)))
+      .toBe(-Math.sign(compareHandoffCandidates(b, a)))
+    // Reflexivity, and mtime still outranks the path half.
+    expect(compareHandoffCandidates(a, a)).toBe(0)
+    const older = { path: decomposed, modifiedAtMs: sharedMtime - 1000 }
+    const newer = { path: precomposed, modifiedAtMs: sharedMtime }
+    expect(compareHandoffCandidates(newer, older)).toBeLessThan(0)
+    expect(compareHandoffCandidates(older, newer)).toBeGreaterThan(0)
+
+    // End to end as well: the scan returns both, and repeats agree.
+    const cwd = await scratch('dsh-emergency-tie-')
+    const dir = await handoffDirIn(cwd)
+    await writeCandidate(dir, 'HANDOFF-\u00e9.md', '# Handoff\n\nTIE-A\n', new Date(sharedMtime))
+    await writeCandidate(dir, 'HANDOFF-e\u0301.md', '# Handoff\n\nTIE-B\n', new Date(sharedMtime))
+
+    const first = await scanHandoffDir({
+      dir: DEFAULT_HANDOFF_DIR,
+      pattern: DEFAULT_HANDOFF_PATTERN,
+      cwd,
+    })
+    expect(first).toHaveLength(2)
+    for (let round = 0; round < 5; round += 1) {
+      const again = await scanHandoffDir({
+        dir: DEFAULT_HANDOFF_DIR,
+        pattern: DEFAULT_HANDOFF_PATTERN,
+        cwd,
+      })
+      expect(again.map(candidate => candidate.path)).toEqual(first.map(candidate => candidate.path))
+    }
+    // Ascending code-unit order of the absolute paths, which is what the
+    // comparator defines; `e` + combining acute precedes precomposed `é`.
+    expect(first.map(candidate => candidate.path))
+      .toEqual([join(dir, 'HANDOFF-e\u0301.md'), join(dir, 'HANDOFF-\u00e9.md')])
   })
 })
 
