@@ -76,6 +76,29 @@ interface SurfaceSelection {
   readonly shadowedSeqs: readonly Seq[]
 }
 
+/** One selector-chosen inclusive span of current surface positions. */
+export interface RolloverRange {
+  readonly start: Seq
+  readonly end: Seq
+  readonly shadowedSeqs: readonly Seq[]
+}
+
+/**
+ * The read-only sizing answer for one candidate replacement over one span.
+ *
+ * Every number here comes from the running meter and the session surface, so a
+ * caller can make the same accept/refuse decision the transaction's shrink
+ * guard makes, before any durable event is written.
+ */
+export interface RolloverSizing {
+  /** Route price of the shadowed span: what the guard compares against. */
+  readonly shadowedRouteTokens: number
+  /** Heuristic price of the candidate replacement text as a committed message. */
+  readonly replacementTokens: number
+  /** True when the replacement is strictly smaller than the span it replaces. */
+  readonly fits: boolean
+}
+
 /** Options for one rollover transaction. */
 export interface CommitRolloverOptions {
   /** `current-turn` derives the open turn's number; `null` writes a standalone bracket. */
@@ -131,7 +154,7 @@ export function selectRolloverRange(
   session: Session,
   measurement: TokenMeasurement,
   selection: RolloverSelection,
-): { start: Seq; end: Seq; shadowedSeqs: readonly Seq[] } | null {
+): RolloverRange | null {
   const pricedNodes = measurement.nodes
   if (pricedNodes.length === 0) return null
 
@@ -193,6 +216,70 @@ export function selectRolloverRange(
     end: cutoff,
     shadowedSeqs: surfaceNodes.slice(firstIdx, keepFromIdx),
   }
+}
+
+/**
+ * Price one candidate replacement against the span it would replace, without
+ * writing anything.
+ *
+ * This is the same comparison {@link commitRollover}'s shrink guard makes, run
+ * as a pure read over the selected span and the candidate text. The emergency
+ * path needs it *before* it takes the compaction lock: a candidate that is not
+ * strictly smaller than the span must be rejected while the context is still
+ * untouched, not after `compaction/start` has made the attempt durable. The
+ * guard keeps its own copy of the comparison, so a replacement that reaches the
+ * transaction is still checked there.
+ * @param dependencies - the conversation meter used for pricing.
+ * @param session - session supplying authoritative current surface positions.
+ * @param range - the span selected by {@link selectRolloverRange}.
+ * @param replacement - the candidate replacement to price.
+ * @returns the span price, the replacement price, and whether it fits.
+ * @throws when the meter's surface does not match the current session surface.
+ */
+export function sizeRolloverReplacement(
+  dependencies: RolloverDependencies,
+  session: Session,
+  range: RolloverRange,
+  replacement: RolloverReplacement,
+): RolloverSizing {
+  const measurement = dependencies.meter.measure(session)
+  const nodes = measurement.nodes
+  const shadowedSeqs = session.surface.nodes
+  if (nodes.length !== shadowedSeqs.length
+    || nodes.some((node, index) => node.seq !== shadowedSeqs[index])) {
+    throw new Error('context-rollover: token-meter surface does not match the current session surface')
+  }
+  const startIdx = nodes.findIndex(node => node.seq === range.start)
+  const endIdx = nodes.findIndex(node => node.seq === range.end)
+  if (startIdx === -1 || endIdx === -1 || startIdx > endIdx) {
+    throw new Error('context-rollover: the selected span is no longer on the current surface')
+  }
+  const selectedNodes = nodes.slice(startIdx, endIdx + 1)
+  const shadowedRouteTokens = selectedNodes.reduce((total, node) => total + node.tokens, 0)
+  const replacementTokens = priceReplacementText(dependencies, buildReplacementText(replacement))
+  return {
+    shadowedRouteTokens,
+    replacementTokens,
+    fits: replacementTokens < shadowedRouteTokens,
+  }
+}
+
+/**
+ * Price replacement text exactly as the committed message would be priced.
+ *
+ * The transaction wraps the same text in a `user/message` and prices that
+ * message. Only `role` and `content` contribute to that price, so this builds
+ * the same shape with a plain user source rather than minting a transaction
+ * identity the preflight has not been given yet; the two numbers cannot differ.
+ * @param dependencies - the conversation meter used for pricing.
+ * @param text - the candidate replacement text.
+ * @returns the token price of the replacement message.
+ */
+function priceReplacementText(dependencies: RolloverDependencies, text: string): number {
+  return dependencies.meter.estimateMessage(createUserMessage({
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }))
 }
 
 /** Validate one requested surface-position span before committing. */

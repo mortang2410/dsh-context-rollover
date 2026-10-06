@@ -19,8 +19,8 @@
  * @module dsh-context-rollover/handoff
  */
 
-import { readFile, stat } from 'node:fs/promises'
-import { isAbsolute, resolve } from 'node:path'
+import { readdir, readFile, stat } from 'node:fs/promises'
+import { isAbsolute, join, resolve } from 'node:path'
 
 /** Why a handoff path could not be turned into usable document text. */
 export type HandoffFailureReason =
@@ -87,18 +87,21 @@ export class HandoffError extends Error {
 }
 
 /**
- * Resolve a model-supplied handoff path to an absolute path.
+ * Resolve a handoff path or directory to an absolute path.
  *
  * An absolute path is used as given. A relative path is resolved against the
  * session working directory, and a relative path with no session working
  * directory is refused rather than resolved against the process working
  * directory: the process directory is not the workspace the model was told to
- * write into, so guessing it would read a file the model never named.
- * @param path - the model-supplied path.
+ * write into, so guessing it would read a file the model never named. The
+ * emergency scan resolves `handoffDir` through this same function, so the
+ * explicit path and the scanned directory can never disagree about what "the
+ * handoff directory" means.
+ * @param path - the model-supplied path, or the configured handoff directory.
  * @param cwd - the session working directory, when the session has one.
  * @returns the resolved absolute path, or the refusal.
  */
-function resolveHandoffPath(path: string, cwd: string | undefined): { ok: true; path: string } | HandoffFailure {
+export function resolveHandoffPath(path: string, cwd: string | undefined): { ok: true; path: string } | HandoffFailure {
   if (path.trim().length === 0) {
     return {
       ok: false,
@@ -209,6 +212,85 @@ export async function readHandoffFileOrThrow(request: HandoffReadRequest): Promi
   const result = await readHandoffFile(request)
   if (result.ok === false) throw new HandoffError(result.reason, result.path, result.message)
   return result
+}
+
+/** One handoff document the emergency scan found, with its selection key. */
+export interface HandoffCandidate {
+  /** The absolute path of the matching directory entry. */
+  readonly path: string
+  /** The entry's modification time, the scan's only ordering key. */
+  readonly modifiedAtMs: number
+}
+
+/** Input for one emergency handoff-directory scan. */
+export interface HandoffScanRequest {
+  /** The configured handoff directory: absolute, or relative to `cwd`. */
+  readonly dir: string
+  /** The configured file-name pattern selecting handoff documents. */
+  readonly pattern: string
+  /** The session working directory (`session.header.cwd`), an absolute path. */
+  readonly cwd: string | undefined
+}
+
+/**
+ * Whether one directory entry's name matches the configured handoff pattern.
+ *
+ * The pattern is a file-name glob, not a path pattern: `*` matches any run of
+ * characters, `?` matches exactly one, and a separator can never be matched.
+ * A pattern carrying a separator therefore selects nothing, which is the
+ * correct answer for a key documented as a file-name pattern.
+ * @param name - one directory entry's name.
+ * @param pattern - the configured pattern.
+ * @returns true when the name matches.
+ */
+export function matchesHandoffPattern(name: string, pattern: string): boolean {
+  if (pattern.includes('/') || pattern.includes('\\')) return false
+  // Escape every regular-expression metacharacter except the two glob ones.
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+  const source = escaped.replaceAll('*', '[^/\\\\]*').replaceAll('?', '[^/\\\\]')
+  return new RegExp(`^${source}$`).test(name)
+}
+
+/**
+ * List the handoff documents in the emergency scan's directory, newest first.
+ *
+ * This is the only function that enumerates a directory, and it does exactly
+ * that: it resolves the configured directory through the same rule
+ * {@link readHandoffFile} uses, names the entries matching the configured
+ * pattern, and orders them by modification time. It reads no document text and
+ * decides nothing about which candidate is usable, so an unreadable, empty,
+ * oversized or non-regular entry stays in the list and is skipped later by the
+ * caller's read instead of silently disappearing here.
+ *
+ * A missing directory, an unreadable directory, or a directory that cannot be
+ * resolved (no session working directory) all yield an empty list rather than
+ * an error: the emergency path falls back to the notes checkpoint, because
+ * there is no handoff to prefer.
+ * @param request - the configured directory, pattern, and session working directory.
+ * @returns the matching candidates, newest modification time first.
+ */
+export async function scanHandoffDir(request: HandoffScanRequest): Promise<readonly HandoffCandidate[]> {
+  const resolved = resolveHandoffPath(request.dir, request.cwd)
+  if (resolved.ok === false) return []
+  let entries: string[]
+  try {
+    entries = await readdir(resolved.path)
+  } catch {
+    return []
+  }
+  const candidates = await Promise.all(entries
+    .filter(name => matchesHandoffPattern(name, request.pattern))
+    .map(async (name): Promise<HandoffCandidate | undefined> => {
+      const path = join(resolved.path, name)
+      // `stat` follows symlinks, so a dangling link is skipped here the same
+      // way the read would refuse it.
+      const info = await stat(path).catch(() => undefined)
+      if (info === undefined) return undefined
+      return { path, modifiedAtMs: info.mtimeMs }
+    }))
+  return candidates
+    .filter((candidate): candidate is HandoffCandidate => candidate !== undefined)
+    .sort((left, right) => right.modifiedAtMs - left.modifiedAtMs || left.path.localeCompare(right.path))
 }
 
 /** A one-line description of a path's kind, for a `not-a-file` refusal. */

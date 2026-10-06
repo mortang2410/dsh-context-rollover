@@ -29,6 +29,7 @@ import { renderReminderMessage, resolveConfig } from './config.ts'
 import type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
 import type { RolloverReason, RolloverReplacement } from './checkpoint.ts'
 import { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
+import { readHandoffFile, scanHandoffDir } from './handoff.ts'
 import { NotesStore } from './notes.ts'
 import { sessionEventAt } from './compat.ts'
 import {
@@ -38,8 +39,9 @@ import {
   PLUGIN_NAME,
   REMINDER_SUMMARY_PREFIX,
   selectRolloverRange,
+  sizeRolloverReplacement,
 } from './rollover.ts'
-import type { RolloverSelection } from './rollover.ts'
+import type { RolloverRange, RolloverSelection } from './rollover.ts'
 import { replacementWindowNumber } from './checkpoint.ts'
 import { createRolloverTools } from './tools.ts'
 import type { PendingRollover } from './state.ts'
@@ -109,14 +111,19 @@ export { buildCheckpointText, buildReplacementText, replacementWindowNumber } fr
 export type { CheckpointInput, RolloverReason, RolloverReplacement } from './checkpoint.ts'
 export {
   HandoffError,
+  matchesHandoffPattern,
   readHandoffFile,
   readHandoffFileOrThrow,
+  resolveHandoffPath,
+  scanHandoffDir,
 } from './handoff.ts'
 export type {
+  HandoffCandidate,
   HandoffFailure,
   HandoffFailureReason,
   HandoffReadRequest,
   HandoffResult,
+  HandoffScanRequest,
   HandoffSuccess,
 } from './handoff.ts'
 export { NotesStore, resolveNotePath } from './notes.ts'
@@ -126,9 +133,10 @@ export {
   countRollovers,
   rolloverSummarySeqs,
   selectRolloverRange,
+  sizeRolloverReplacement,
   ROLLOVER_PROVIDER,
 } from './rollover.ts'
-export type { RolloverSelection } from './rollover.ts'
+export type { RolloverRange, RolloverSelection, RolloverSizing } from './rollover.ts'
 export { createRolloverTools } from './tools.ts'
 export { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
 
@@ -326,6 +334,14 @@ export class ContextRolloverEngine extends CompactionEngine {
    * per-step re-injection plus tail exceed the threshold (a config/tail
    * mismatch), which no rollover fixes — rolling over again would burn the
    * prefix cache every step. Model-requested and overflow rollovers are exempt.
+   *
+   * Only a COMMITTED rollover consumes the turn's one attempt. A pre-step whose
+   * span has no candidate that would shrink it (the preflight below rejects one)
+   * leaves the attempt unspent on purpose: that pre-step measured a span too
+   * small to hold anything useful, and the next pre-step of the same turn
+   * measures a larger span that the checkpoint does fit. Spending the attempt on
+   * the refusal would strand the context above the threshold with the notes
+   * checkpoint still available, which is the exact harm the ordering prevents.
    */
   private async rollOverOnPressure(agent: Agent, turn: number, signal: AbortSignal): Promise<void> {
     const contextWindow = agent.session.requestContext()?.contextWindow
@@ -342,8 +358,12 @@ export class ContextRolloverEngine extends CompactionEngine {
       )
       return
     }
-    await this.performRollover(agent, { reason: 'pressure', handoff: null }, signal)
-    this.pressureRolledTurns.add(turnKey(agent.session.id, turn))
+    const result = await this.performRollover(
+      agent,
+      { reason: 'pressure', handoff: null, emergency: true },
+      signal,
+    )
+    if (result !== null) this.pressureRolledTurns.add(turnKey(agent.session.id, turn))
   }
 
   /**
@@ -357,7 +377,7 @@ export class ContextRolloverEngine extends CompactionEngine {
    */
   private async performRollover(
     agent: Agent,
-    request: { reason: RolloverReason; handoff: string | null; handoffPath?: string },
+    request: { reason: RolloverReason; handoff: string | null; handoffPath?: string; emergency?: true },
     signal: AbortSignal,
   ): Promise<CompactionResult | null> {
     signal.throwIfAborted()
@@ -367,7 +387,19 @@ export class ContextRolloverEngine extends CompactionEngine {
       this.ctx.logger.info('context rollover skipped: no compactable surface span (context is already minimal)')
       return null
     }
-    const replacement = await this.replacementFor(session, request)
+    // The emergency path decides which candidate to write BEFORE the lock is
+    // taken, because a refused candidate must leave no failed transaction in
+    // the durable log. Every other path resolves one replacement by
+    // construction and keeps the transaction's own shrink guard as the check.
+    const replacement = request.emergency === true
+      ? await this.emergencyReplacement(session, request.reason, range)
+      : await this.replacementFor(session, request)
+    if (replacement === null) {
+      this.ctx.logger.info(
+        'context rollover skipped: no candidate replacement is smaller than the selected span',
+      )
+      return null
+    }
     const windowNumber = replacementWindowNumber(replacement)
     const result = await commitRollover(
       { meter: this.ctx.tokenMeter },
@@ -381,6 +413,87 @@ export class ContextRolloverEngine extends CompactionEngine {
       + `shadowed ${result.shadowedSeqs.length} surface nodes (~${result.shadowedTokenCount} tokens)`,
     )
     return result
+  }
+
+  /**
+   * Choose the emergency path's replacement: newest eligible handoff document
+   * that passes the shrink check, else the deterministic notes checkpoint, else
+   * nothing.
+   *
+   * The order is the whole point. A readable handoff that is NOT smaller than
+   * the span it would replace must not consume the one automatic rollover a
+   * turn gets and leave the context unchanged while a smaller notes checkpoint
+   * was available, so each candidate is priced against the selected span here,
+   * before {@link commitRollover} takes the compaction lock. A candidate that
+   * cannot be turned into document text (missing by a race, not a regular file,
+   * unreadable, empty, oversized) is skipped rather than fatal: the scan is a
+   * fallback of last resort, and one bad file must not abort the rollover.
+   *
+   * A session with no working directory cannot resolve a relative
+   * `handoffDir`, so {@link scanHandoffDir} returns no candidates and this falls
+   * straight through to the notes checkpoint rather than reading anywhere else.
+   * @param session - session whose window number is being started.
+   * @param reason - the rollover reason, carried into a notes checkpoint.
+   * @param range - the selected span every candidate is priced against.
+   * @returns the replacement to commit, or `null` when nothing would shrink.
+   */
+  private async emergencyReplacement(
+    session: Session,
+    reason: RolloverReason,
+    range: RolloverRange,
+  ): Promise<RolloverReplacement | null> {
+    const windowNumber = countRollovers(session) + 1
+    const cwd = session.header.cwd
+    const candidates = await scanHandoffDir({
+      dir: this.config.handoffDir,
+      pattern: this.config.handoffPattern,
+      cwd,
+    })
+    if (candidates.length === 0) {
+      this.ctx.logger.info(
+        `context rollover: no handoff document matched ${this.config.handoffPattern} under `
+        + `the session handoff directory; using the notes checkpoint`,
+      )
+    }
+    for (const candidate of candidates) {
+      const read = await readHandoffFile({
+        path: candidate.path,
+        cwd,
+        maxChars: this.config.handoffMaxChars,
+      })
+      if (read.ok === false) {
+        this.ctx.logger.info(
+          `context rollover: skipping handoff candidate ${candidate.path}: ${read.message}`,
+        )
+        continue
+      }
+      const replacement: RolloverReplacement = {
+        kind: 'handoff-document',
+        windowNumber,
+        text: read.text,
+        path: read.path,
+      }
+      const sizing = sizeRolloverReplacement({ meter: this.ctx.tokenMeter }, session, range, replacement)
+      if (!sizing.fits) {
+        this.ctx.logger.info(
+          `context rollover: skipping handoff candidate ${read.path}: `
+          + `${sizing.replacementTokens} estimated tokens >= ${sizing.shadowedRouteTokens} shadowed`,
+        )
+        continue
+      }
+      return replacement
+    }
+    const checkpoint: RolloverReplacement = {
+      kind: 'checkpoint',
+      checkpoint: {
+        reason,
+        windowNumber,
+        notes: await this.renderNotes(session),
+        handoff: null,
+      },
+    }
+    const sizing = sizeRolloverReplacement({ meter: this.ctx.tokenMeter }, session, range, checkpoint)
+    return sizing.fits ? checkpoint : null
   }
 
   /**

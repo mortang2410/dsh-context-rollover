@@ -205,6 +205,51 @@ describe('rollover at the turn-stop boundary', () => {
   })
 })
 
+describe('the size preflight precedes the compaction lock', () => {
+  it('writes no compaction event at all when no candidate replacement would shrink the span', async () => {
+    // The span here is a single tiny exchange (~10 priced tokens), which no
+    // replacement can be strictly smaller than, and notes are disabled so the
+    // deterministic checkpoint cannot shrink it either. The pressure point is
+    // crossed, so the automatic path does run and does refuse.
+    //
+    // This is the ordering claim in its sharpest form. If the size comparison
+    // still happened inside the transaction, the refusal would land after
+    // `compaction/start` and the log would carry that start plus an error
+    // `compaction/end` — a durable record of an attempt that never had a chance
+    // of committing. The correct behavior leaves the log completely untouched.
+    const { ctx, agent, session } = await engineHarness('pressure-preflight-refusal', {
+      thresholdRatio: 0.001,
+      reminderThresholdRatio: 0.001,
+      retainTokens: 0,
+      notesEnabled: false,
+    })
+    const adapter = new ScriptedAdapter([
+      usageResponse(`tiny answer one ${'x'.repeat(50)}`, 5000),
+      usageResponse(`tiny answer two ${'y'.repeat(50)}`, 5100),
+    ])
+    ctx.llm.registerAdapter(['mock'], adapter)
+
+    await followup(agent, 'turn one')
+    await followup(agent, 'turn two')
+
+    const diagnostics = captureDiagnostics(ctx, session)
+    expect(countRollovers(session)).toBe(0)
+    const compactionEvents = session.snapshotEvents()
+      .filter(event => (event as { type: string }).type.startsWith('compaction/'))
+      .map(event => (event as { type: string }).type)
+    expect(compactionEvents).toEqual([])
+    // Nothing was refused by the transaction's own guard, and nothing failed.
+    expect(diagnostics.compactionErrors).toEqual([])
+    expect(diagnostics.warnings.some(message => message.includes('not smaller than the shadowed content')))
+      .toBe(false)
+    // The old context is intact: no replacement was substituted in.
+    const texts = derivedTexts(session).join('\n')
+    expect(texts).toContain('tiny answer one')
+    expect(texts).toContain('tiny answer two')
+    expect(texts).not.toContain('<context-rollover checkpoint>')
+  })
+})
+
 describe('forced-span compaction', () => {
   it('replaces the requested span with a rollover checkpoint', async () => {
     const { engine } = await engineHarness('compact-region')
