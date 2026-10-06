@@ -145,9 +145,24 @@ the only real constraint is the mid-call case described above.
   to the session working directory.
 - The engine resolves and reads that exact file at the moment it crosses the boundary.
 - The engine refuses to cross the boundary when the file is missing, is not a regular file,
-  cannot be read, or is empty/whitespace-only. On refusal the tool reports the failure and the
-  old context stays intact. The refusal happens before `compaction/start`, so no partial
-  transaction is left behind.
+  cannot be read, is empty/whitespace-only, or exceeds the size limit. On refusal the old context
+  stays intact and no `compaction/start` is written.
+- WHERE THE REFUSAL IS DECIDED, and why the tool must validate before it answers. The tool does
+  not cross the boundary: it records a pending request and returns immediately
+  (`src/tools.ts:109`), and the engine performs the rollover later at `agent/pre-step`
+  (`src/index.ts:171-179`). That listener wraps the whole attempt in a `try/catch` that turns any
+  failure into `ctx.logger.warn(... "continuing the turn")` (`src/index.ts:180-183`). So a file
+  that is unreadable only at pre-step time would produce a WARNING THE MODEL NEVER SEES, and the
+  model would believe the rollover happened while its context silently stayed put. That is the
+  exact failure the requirement forbids.
+  The fix is that the tool validates and READS the handoff file during its own `execute`, and
+  refuses there, where a thrown error becomes the tool result the model actually reads. The
+  resolved text is carried in the pending request, so the engine does not have to re-read it.
+  The engine still re-checks that the text is present and non-empty before committing, because a
+  pending request is not proof that the boundary will be crossed.
+  Consequence for `PendingRollover` (`src/state.ts`): it must carry the already-read handoff TEXT
+  (and the path it came from, for error messages), not a model-authored string that the engine
+  may later fail to resolve.
 - A new module owns resolution and reading, so the tool and the engine agree on one rule.
 
 ### The replacement content

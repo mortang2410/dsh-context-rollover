@@ -6,6 +6,12 @@ returning an empty or partial document.
 
 **Blocked by:** 01.
 
+**Note for the implementer:** this module is called from `new_context`'s `execute` for the
+explicit path, and from the emergency scan in ticket 05. Ticket 05 needs a variant that reports
+whether a candidate is usable WITHOUT throwing, so a candidate that fails can be skipped rather
+than aborting the emergency rollover. Design the module so both callers are served; a throwing
+read plus a non-throwing probe that share one validation core is the smallest shape that does it.
+
 **Verify:** `pnpm test -- tests/handoff.spec.ts`
 
 **Status:** ready-for-agent
@@ -21,6 +27,11 @@ returning an empty or partial document.
       actual size.
 - [ ] Successful read returns the file text unchanged, with no added wrapper, preamble or
       markers.
+- [ ] The read happens inside `new_context`'s own `execute`, so a refusal is thrown where it
+      becomes the tool result the MODEL reads. Do not defer the read to the engine's pre-step
+      path: that path catches every failure into `ctx.logger.warn` (`src/index.ts:180-183`), so a
+      deferred refusal would silently leave the context unchanged while the model believed the
+      rollover had happened.
 - [ ] Test: each refusal case above asserts the specific failure, not merely that something
       threw.
 - [ ] Test: a successful read returns byte-identical text to what was written to disk.
