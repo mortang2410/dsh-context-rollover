@@ -719,6 +719,44 @@ describe('the emergency replacement order', () => {
     expect(diagnostics.some(message => message.includes('skipping handoff candidate'))).toBe(true)
   })
 
+  it('reuses the sizing it decided with, instead of re-pricing the candidate at commit time', async () => {
+    const cwd = await scratch('dsh-emergency-pin-')
+    const dir = await handoffDirIn(cwd)
+    const documentText = '# Handoff\n\nPIN-REUSE-DOCUMENT-SENTINEL: continue the migration.\n'
+    await writeCandidate(dir, 'HANDOFF-pin.md', documentText, new Date('2024-05-01T00:00:00Z'))
+
+    const { ctx, agent, session } = await engineHarness('emergency-pin', EMERGENCY_CONFIG, { cwd })
+
+    // Count how often the exact committed text is priced. The emergency path
+    // prices its chosen candidate once, before the lock, and hands that sizing
+    // to the transaction; if the transaction re-priced the same candidate there
+    // would be a second call. Counting per-text calls makes that visible without
+    // depending on the two numbers happening to agree.
+    const meter = ctx.tokenMeter
+    const originalEstimate = meter.estimateMessage.bind(meter)
+    let documentPrices = 0
+    ;(meter as unknown as { estimateMessage: typeof originalEstimate }).estimateMessage = (message) => {
+      const value = originalEstimate(message)
+      const text = message.content
+        .map(block => block.type === 'text' ? block.text : '')
+        .join('')
+      if (text === documentText) documentPrices += 1
+      return value
+    }
+
+    const adapter = pressureScript()
+    ctx.llm.registerAdapter(['mock'], adapter)
+
+    await followup(agent, 'turn one')
+    await followup(agent, 'turn two')
+
+    expect(countRollovers(session)).toBe(1)
+    expect(visibleTexts(session)).toContain('PIN-REUSE-DOCUMENT-SENTINEL')
+    // Exactly one price for the committed document text: the preflight's, reused
+    // by the transaction. A commit-time re-price would make this two.
+    expect(documentPrices).toBe(1)
+  })
+
   it('does not scan for a handoff when the session has no working directory', async () => {
     // No `cwd` in the session header: the configured directory is relative, so
     // there is nothing to resolve it against. The engine must fall back to the

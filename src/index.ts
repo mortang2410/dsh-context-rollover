@@ -402,12 +402,14 @@ export class ContextRolloverEngine extends CompactionEngine {
       return null
     }
     // The emergency path decides which candidate to write BEFORE the lock is
-    // taken, because a refused candidate must leave no failed transaction in
-    // the durable log. It hands its accepted sizing to the transaction, so the
-    // guard decides with the numbers that were accepted rather than re-pricing
-    // the same span after `compaction/start` is already durable. Every other
-    // path resolves one replacement by construction and keeps the transaction's
-    // own shrink guard as the check.
+    // taken, because a refused candidate must leave no trace in the durable log;
+    // `commitRollover` makes the same decision before its own lock now, and this
+    // preflight additionally decides WHICH candidate, choosing the newest
+    // document that fits over the notes checkpoint. It hands its accepted sizing
+    // to the transaction, so the guard reuses the accepted numbers rather than
+    // pricing the same span a second time. Every other path resolves one
+    // replacement by construction and lets the transaction's own shrink guard
+    // decide.
     const chosen = request.emergency === true
       ? await this.emergencyReplacement(session, request.reason, range)
       : null

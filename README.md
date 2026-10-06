@@ -302,8 +302,10 @@ smaller than the span it would replace wins; if no candidate qualifies (none
 exists, all are unreadable, empty, oversized, or too large to shrink the span),
 the engine falls back to the deterministic notes checkpoint so the context is
 still reduced instead of stalling. The sizing decision is made BEFORE the
-compaction lock is taken, so a rejected candidate leaves no failed transaction in
-the log.
+compaction lock is taken, so a rejected candidate leaves no transaction and no
+error in the log; the accepted numbers are then reused for the commit, so a
+price change between the decision and the commit cannot turn an accepted
+candidate into a failed transaction.
 
 If a task's handoff must survive an emergency rollover, keep it as the newest
 file in `handoffDir`, or ignore the 40% reminder at your own risk.
@@ -450,6 +452,12 @@ first, so `pnpm test` works whether or not `pnpm build` has run.
 - Under `handoffOnly` a rollover replacement contains the handoff document and
   nothing else: no notes, no narration, no older user prompts and no tail. The
   notes checkpoint still exists and is what the engine-driven paths compose.
+- The one exception to "the document and nothing else" is the 0.90 emergency
+  fallback. When no handoff document is available to scan (none exists, or none
+  that would shrink the span), that path has no model in the loop to write one,
+  so it composes the deterministic notes checkpoint instead of leaving the
+  window to overflow. The model-requested path never substitutes notes for the
+  document the model named.
 - Notes survive context rollovers within a session; no cross-session sync,
   embeddings, or cloud storage.
 - Notes are files, not session events: `Session.append` cannot mark a plugin's
