@@ -261,13 +261,17 @@ export class ContextRolloverEngine extends CompactionEngine {
       if (this.compactionOwnedElsewhere(agent)) return
       const pending = this.pendingRollovers.get(agent.session.id)
       if (pending === undefined || signal.aborted) return
-      this.pendingRollovers.delete(agent.session.id)
       try {
-        await this.performRollover(agent, {
+        // Same rule as the pre-step path: the request is cleared only once it
+        // has been honoured. This event fires once per turn, so clearing a
+        // request that deferred here would lose it for good rather than
+        // retrying; leaving it pending lets the next turn's pre-step cross.
+        const result = await this.performRollover(agent, {
           reason: 'model-requested',
           handoff: pendingHandoff(pending),
           handoffPath: pending.handoffPath,
         }, signal)
+        if (result !== null) this.pendingRollovers.delete(agent.session.id)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         ctx.logger.warn(`context rollover at turn stop failed: ${message}`)
