@@ -72,7 +72,10 @@ Acceptance criteria:
 - [ ] Test: the `handoffOnly` selector keeps no priced tail. Revert-sensitive: it must fail if the
       mode is removed.
 - [ ] Test: an explicit `new_context` whose `handoff_path` is missing, empty or unreadable leaves
-      the old context intact, throws where the model can read it, and writes no `compaction/start`.
+      the old context intact and writes no `compaction/start|summary|end`. Drive it through the real
+      agent loop and assert exactly one `tool/result` with `message.isError === true` carrying the
+      specific cause: a throw inside `execute` becomes an error tool result, not a thrown call
+      (`packages/core/agent-loop/src/tool-calls.ts:254,280`).
 - [ ] The test context mounts `dsh-agent-instructions` so instruction re-injection is exercised
       rather than assumed (its only injected service is `sessionProjections`, which the testkit
       already mounts; the tsconfig path exists).

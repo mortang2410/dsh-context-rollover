@@ -156,7 +156,12 @@ the only real constraint is the mid-call case described above.
   model would believe the rollover happened while its context silently stayed put. That is the
   exact failure the requirement forbids.
   The fix is that the tool validates and READS the handoff file during its own `execute`, and
-  refuses there, where a thrown error becomes the tool result the model actually reads. The
+  refuses there. A throw inside a tool's `execute` is caught by the tool runtime and converted into
+  a `tool/result` carrying `isError: true` (`packages/core/agent-loop/src/tool-calls.ts:254,280`,
+  `createToolResultMessage({ isError: result.isError })`), so the refusal becomes the model-visible
+  tool result. The correct test therefore drives the refusal through the real agent loop and
+  asserts the error tool result; asserting a rejection from `ctx.tools.execute` directly would test
+  less of the path the model actually sees. The
   resolved text is carried in the pending request, so the engine does not have to re-read it.
   The engine still re-checks that the text is present and non-empty before committing, because a
   pending request is not proof that the boundary will be crossed.
