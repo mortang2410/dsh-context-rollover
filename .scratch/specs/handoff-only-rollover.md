@@ -202,11 +202,16 @@ the only real constraint is the mid-call case described above.
 - The model-visible context is therefore: the system head (standing instructions) plus the
   handoff document, plus the fresh turn's own messages. Nothing from the old conversation
   survives, including the tool call that requested the rollover.
-- A rollover that fires while a step is genuinely mid-tool-call (no result yet) backs off to the
-  nearest earlier balanced cut and will therefore retain that incomplete call/result unit. That
-  is a real host constraint and the only case where the fresh surface can carry a trace of the
-  old turn; it is not the normal path, and the selector handles it by walking back rather than by
-  retaining a priced tail.
+- A rollover that fires while a step is genuinely mid-tool-call (no result yet) cannot cut after
+  the tool call, because that cut is not tool-pairing balanced. An earlier revision of this spec
+  had the selector walk back to an earlier balanced cut, which retains that incomplete
+  call/result unit on the fresh surface and contradicts the requirement's "no ... tool calls".
+  An independent implementation review raised this and the fix is to DEFER: the selector returns
+  no range for that pre-step, the tool runtime appends the result, and the next pre-step sees a
+  balanced cut and crosses with zero old material. Deferral is the correct answer because the
+  window is one step long and the rollout is not lost; walking back is only defensible if
+  deferring can verifiably strand a rollover, and then it must be named as a ceiling rather than
+  described as intended behavior.
 - Standing instructions from `AGENTS.md` and the project chain are delivered as `user/message`
   surface nodes carrying source kind `agent-instructions`, and they sit inside the replaced span.
   They are expected back because `dsh-agent-instructions` re-injects them: its `agent/pre-step`
