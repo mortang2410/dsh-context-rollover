@@ -22,7 +22,13 @@ import {
   LlmAdapter,
   ToolCallId,
 } from '@deepseek-ai/dsh-llm'
-import type { LlmResolvedModelInfo, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type {
+  GenerateOptions,
+  LlmResolvedModelInfo,
+  Message,
+  RequestMessage,
+  StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
@@ -37,7 +43,9 @@ export const CONTEXT_WINDOW = 100_000
 
 /** One text answer per request, with a large advertised context window. */
 export class TextAdapter extends LlmAdapter {
-  readonly requests: Message[][] = []
+  // Exactly what the loop handed the adapter: `GenerateOptions.messages` is
+  // `RequestMessage[]`, which is a superset of the persisted `Message`.
+  readonly requests: RequestMessage[][] = []
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return Promise.resolve({
@@ -48,7 +56,7 @@ export class TextAdapter extends LlmAdapter {
     })
   }
 
-  override async *stream(options: { messages: readonly Message[] }): AsyncIterable<StreamChunk> {
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push([...options.messages])
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: 'answer' } }
@@ -61,7 +69,7 @@ export class TextAdapter extends LlmAdapter {
  * order; a final entry repeats when the script is exhausted.
  */
 export class ScriptedAdapter extends LlmAdapter {
-  readonly requests: Message[][] = []
+  readonly requests: RequestMessage[][] = []
 
   constructor(private readonly script: StreamScript) {
     super()
@@ -76,7 +84,7 @@ export class ScriptedAdapter extends LlmAdapter {
     })
   }
 
-  override async *stream(options: { messages: readonly Message[] }): AsyncIterable<StreamChunk> {
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push([...options.messages])
     const entry = this.script[Math.min(this.requests.length - 1, this.script.length - 1)]
     if (entry === undefined) throw new Error('scripted adapter ran out of entries')
@@ -185,11 +193,21 @@ export function appendExchange(
   session.append('turn/end', { turn, reason: { kind: 'completed' } })
 }
 
-/** A closed multi-turn session with tool calls in the early exchanges. */
-export function closedConversation(turns = 4): Session {
+/**
+ * A closed multi-turn session with tool calls in the early exchanges.
+ *
+ * `fillerRepeats` pads every exchange with that many copies of a filler
+ * phrase. The shrink guard prices a fixed-size checkpoint against the span it
+ * replaces and refuses a replacement that is not strictly smaller, so a case
+ * that commits a rollover needs a span genuinely larger than the checkpoint's
+ * own framing — padding is how that precondition is met honestly, rather than
+ * by weakening the guard.
+ */
+export function closedConversation(turns = 4, fillerRepeats = 0): Session {
   const session = Session.create(SessionId(`closed-${turns}-${Math.random().toString(36).slice(2, 8)}`))
+  const filler = fillerRepeats === 0 ? '' : ` ${'detail '.repeat(fillerRepeats).trimEnd()}`
   for (let index = 1; index <= turns; index += 1) {
-    appendExchange(session, index, `exchange ${index}`, index <= 2)
+    appendExchange(session, index, `exchange ${index}${filler}`, index <= 2)
   }
   return session
 }

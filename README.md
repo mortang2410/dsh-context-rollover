@@ -195,8 +195,11 @@ it keep running, new ones must pick another preset.
 
 Maintainers: `presets/standard-rollover/` is generated, not authored —
 re-run `pnpm preset:sync` after harness updates and commit the refresh. The
-sync keeps everything else byte-identical and fails loud when the shipped
-`standard` shape drifts.
+sync reads `tests/fixtures/standard/agent.cordis.yml`, which carries the
+shipped `standard` rows this repo controls (the running host declares its
+presets as `.patch.yml` files, not `standard/agent.cordis.yml` directories),
+keeps everything else byte-identical, and fails loud when the `standard` shape
+drifts.
 
 Configuration (cordis.yml `config` on the plugin row):
 

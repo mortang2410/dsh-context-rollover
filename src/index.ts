@@ -35,6 +35,7 @@ import {
   claimReminder,
   commitRollover,
   countRollovers,
+  PLUGIN_NAME,
   REMINDER_SUMMARY_PREFIX,
   selectRolloverRange,
 } from './rollover.ts'
@@ -42,7 +43,7 @@ import { createRolloverTools } from './tools.ts'
 import type { PendingRollover } from './state.ts'
 
 /** Cordis plugin name used by loader diagnostics and message-source attribution. */
-export const name = 'context-rollover'
+export const name = PLUGIN_NAME
 
 /** Identity of one agent turn for per-turn engine bookkeeping. */
 function turnKey(sessionId: string, turn: number): string {
@@ -257,8 +258,7 @@ export class ContextRolloverEngine extends CompactionEngine {
           + 'save what matters to notes and call new_context with a short handoff; otherwise checkpoint soon.',
       }],
       source: {
-        kind: 'plugin',
-        plugin: name,
+        kind: PLUGIN_NAME,
         form: 'notice',
         summary: boundContextSummary(`${REMINDER_SUMMARY_PREFIX} (${percent}% used)`),
       },
