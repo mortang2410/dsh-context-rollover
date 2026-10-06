@@ -32,8 +32,13 @@ Acceptance criteria:
       engine and not `compaction-basic`.
 - [ ] The preset declaration matches the running host's format, derived from the host's own
       shipped `standard` declaration rather than hand-written from memory.
-- [ ] The bundle patch stops targeting roster fields the running host does not have, and stops
-      silently doing nothing when a target row is absent.
+- [ ] The bundle patch stops targeting roster fields the running host does not have. Note the
+      failure mode this fixes: an unmatched patch id only WARNS and is skipped
+      (`dsh-app-boot/lib/index.js:61-110`), so the current patch installs and boots clean while
+      doing nothing at all.
+- [ ] The bundle patch cannot silently no-op. Either the row it targets is asserted to exist, or
+      the preset is declared by a mechanism that fails loudly when its anchor is absent. State in
+      the ticket which of the two you implemented and how a future drift is caught.
 - [ ] The bundle patch fails loudly if the host's preset declaration shape drifts, the way the
       preset generator already fails loudly on an unexpected `compaction-basic` row.
 - [ ] The preset's engine row carries `reminderThresholdRatio: 0.40`, `thresholdRatio: 0.9`,

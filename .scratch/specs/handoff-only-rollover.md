@@ -280,7 +280,11 @@ scope. On the running host:
 
 - the bundle patch targets row id `agent-presets`, but the row that exists is
   `agent-preset-registry` (`dsh-web-app/cordis.patch.yml:562-566`), whose Config schema is only
-  `{ default, selectedDefault }` (`dsh-agent-preset-registry/lib/index.js:471-474`);
+  `{ default, selectedDefault }` (`dsh-agent-preset-registry/lib/index.js:471-474`). An unmatched
+  patch id only WARNS and is skipped, it does not fail the boot
+  (`dsh-app-boot/lib/index.js:61-110`, messages `patch: entry %C not found` and
+  `patch insert: entry %C not found`), so this failure is silent: the bundle installs, the host
+  starts clean, and the patch simply did nothing. A test is the only thing that will catch it;
 - shipped presets are declared as `@deepseek-ai/dsh-agent-preset` rows carrying an inline
   `config.plugins` array inside `.patch.yml` files
   (`dsh-web-app/presets/standard.patch.yml:1-12`);

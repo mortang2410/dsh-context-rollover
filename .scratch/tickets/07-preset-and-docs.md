@@ -25,4 +25,7 @@ the recorded limitation.
 - [ ] The README names the host line the shipped preset targets and the steps a deployment on a
       different host line must take. It no longer describes the running host's preset format as
       an unresolved limitation, because ticket 08 fixes that.
+- [ ] The README warns that a patch whose target row id is absent only warns and is skipped
+      (`dsh-app-boot/lib/index.js:61-110`), so a silently ineffective install is possible and must
+      not be mistaken for a working one.
 - [ ] Verification performed on the delivered artifacts, with the results stated.
