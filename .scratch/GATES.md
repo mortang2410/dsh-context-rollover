@@ -91,6 +91,7 @@ G1-G7. No requirement is satisfied only by a comment or a doc sentence.
 | G6 | PASS | typecheck exit 0; 14 suites / 114 tests. Mutation: removing the shrink-aware ordering fails 2 tests, including the preflight one. |
 | G7 | PASS | typecheck exit 0; 15 suites / 126 tests; `pnpm build` exit 0. Preset id is `standard-rollover`. Mutation: pointing the bundle patch at a nonexistent row id fails 2 tests, including the real-registry resolution case. |
 | G8 | PASS | eight requirements mapped below |
+| G1-G8 re-run | PASS | after closing the second review's two findings: `pnpm typecheck` exit 0 with 0 `error TS`, `pnpm typecheck:compat` exit 0, `pnpm build` exit 0, `pnpm test` exit 0 with **16 suites / 133 tests**. Three new mutation checks below. |
 
 ### G8 requirement map
 
@@ -110,3 +111,6 @@ G1-G7. No requirement is satisfied only by a comment or a doc sentence.
 - Remove the shrink-aware candidate ordering -> 2 failures, including the preflight case.
 - Point the bundle patch at a nonexistent row id -> 2 failures, including the real-registry resolution case.
 - Re-run the pathological glob (`'*a'.repeat(12)+'b'` against 30 'a's) against the fixed matcher: 889 ms before, 0.02 ms after; the new matcher agrees with the old translation on 88 pattern/name pairs.
+- Second-review finding (pin bound to the span but not the candidate): reproduce first, then fix. Probe on the pre-fix tree: a pin measured for a 99-token short candidate over a 128-token span let a ~20k-token replacement commit (`countRollovers` 1). Mutation: removing `pinned.replacementText === replacementText` from the guard fails 1 test, `re-prices rather than trusting a pinned sizing measured for a different candidate`.
+- Second-review finding 3 (re-priced refusal left a failed bracket): probe on the pre-fix tree showed `["...","compaction/start","compaction/end"]` after a refused oversized commit. Mutation: moving the shrink decision back after `compaction/start` fails 2 tests, `leaves no failed bracket when a stale pin is re-priced and refused` and `leaves no compaction event at all when the size guard refuses`.
+- Pin-reuse plumbing: mutation making the commit always re-price (never reuse the pin) fails 1 test, `reuses the sizing it decided with, instead of re-pricing the candidate at commit time`.

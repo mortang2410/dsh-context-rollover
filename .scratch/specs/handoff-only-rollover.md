@@ -181,6 +181,13 @@ the only real constraint is the mid-call case described above.
   the fresh context reads as the document itself.
 - The existing shrink guard stays: a replacement that is not smaller than the content it
   replaces is still refused.
+- The guard decides BEFORE `compaction/start` opens the transaction, and the prices it decides
+  with are read once and reused for the commit. A refusal therefore writes nothing at all to the
+  durable log (no start plus error-end bracket recording an attempt that could never commit), and
+  a `request/header` landing between the decision and the commit cannot make the two disagree.
+- A preflight's accepted sizing is reused only while it still describes the span being replaced
+  AND the text being committed: a price is a claim about one candidate as well as one span, so a
+  pin measured for one candidate must never let a different, larger one through the guard.
 - The system-prompt guidance section is where the model learns the workflow (run
   `/handoff-doc`, then call `new_context` with the path), so the replacement content does not
   need to carry that instruction itself.
@@ -248,6 +255,12 @@ the only real constraint is the mid-call case described above.
 - The explicit `new_context` path has no such fallback by design: the model named one file, and
   substituting the notes checkpoint would give it a continuation context it did not choose. It
   refuses instead, and the refusal is tested.
+- This notes-checkpoint fallback is the ONE stated exception to "the fresh context is only the
+  handoff document and nothing else" (requirements 4 and 5). It applies only where no document
+  exists to carry: the emergency path has no model in the loop to write one, so the choice is a
+  notes checkpoint or a window that overflows. The model-requested path never takes it. Decided
+  by the user, 2026-10-06, when the conflict between requirement 4/5 and requirement 8 was
+  raised.
 
 ### Model-facing tools and guidance
 
