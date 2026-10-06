@@ -78,3 +78,35 @@ G1-G7. No requirement is satisfied only by a comment or a doc sentence.
   including inside heredoc bodies or prompt text.
 - No push to any remote.
 - No test assertion deleted or loosened to reach green.
+
+## Verification log (committed tree, measured by the orchestrator)
+
+| Gate | Result | Evidence |
+|---|---|---|
+| G1 | PASS | typecheck exit 0, 0 `error TS`; 11 suites / 53 tests (baseline 23 errors, 3 failed / 49) |
+| G2 | PASS | typecheck exit 0; 12 suites / 79 tests. Default reminder rendered at 40 is byte-identical to the required sentence, verified by direct comparison. Mutation: reverting the 0.40 default fails 4 tests. |
+| G3 | PASS | typecheck exit 0; 13 suites / 95 tests |
+| G4 | PASS | covered by G3's run; `tests/handoff-only.spec.ts` asserts the id is identical before and after |
+| G5 | PASS | `tests/no-summarizer.spec.ts` 7 passed, one case per rollover path. Verified the proof's assumption: `session/event` observers run synchronously inside `Session.append` (`packages/core/session/src/index.ts:764`), so the bracket sampling is exact. |
+| G6 | PASS | typecheck exit 0; 14 suites / 114 tests. Mutation: removing the shrink-aware ordering fails 2 tests, including the preflight one. |
+| G7 | PASS | typecheck exit 0; 15 suites / 126 tests; `pnpm build` exit 0. Preset id is `standard-rollover`. Mutation: pointing the bundle patch at a nonexistent row id fails 2 tests, including the real-registry resolution case. |
+| G8 | PASS | eight requirements mapped below |
+
+### G8 requirement map
+
+1. 40%: `src/config.ts` `reminderThresholdRatio ?? 0.4`; 0.90 `thresholdRatio ?? 0.9` documented as the emergency fallback.
+2. Configurable message: `DEFAULT_REMINDER_MESSAGE` + `renderReminderMessage` in `src/config.ts`; the preset carries the literal text; `{percent}` is the only placeholder.
+3. Durable `/handoff-doc` file: `DEFAULT_HANDOFF_DIR = '.scratch/handoff'`, `DEFAULT_HANDOFF_PATTERN = 'HANDOFF-*.md'`, matching the skill's stated save path.
+4. Handoff replaces everything: `selectRolloverRange` `handoff-only` arm in `src/rollover.ts`; `buildReplacementText` in `src/checkpoint.ts` adds nothing to the document.
+5. No summarizer: `tests/no-summarizer.spec.ts`, one bracket assertion per path; the engine never calls `ctx.llm` anywhere in `src/`.
+6. Same session id, history retained but not injected: `tests/handoff-only.spec.ts` id assertion; `history` is tool-only (`src/tools.ts`), and nothing in `src/` injects history into the surface.
+7. Preset name: `presets/standard-rollover/declaration.patch.yml` declares `id: standard-rollover`.
+8. Tests: `tests/reminder-delivery.spec.ts` (once at 40%, names the workflow), `tests/handoff-only.spec.ts` (loads the handoff, zero tail, same id), `tests/no-summarizer.spec.ts` (no model call), `tests/emergency-fallback.spec.ts` (90% fallback).
+
+### Independent mutation checks run by the orchestrator (not taken from any implementer's report)
+
+- Revert the 0.40 default -> 4 failures.
+- Reintroduce a one-node tail in the `handoffOnly` selector -> 3 failures, including the end-to-end two-node surface assertion which showed `assistant/message` + `tool/result` surviving.
+- Remove the shrink-aware candidate ordering -> 2 failures, including the preflight case.
+- Point the bundle patch at a nonexistent row id -> 2 failures, including the real-registry resolution case.
+- Re-run the pathological glob (`'*a'.repeat(12)+'b'` against 30 'a's) against the fixed matcher: 889 ms before, 0.02 ms after; the new matcher agrees with the old translation on 88 pattern/name pairs.
