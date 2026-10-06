@@ -289,7 +289,7 @@ describe('the emergency handoff scan', () => {
     expect(candidates.map(candidate => candidate.path)).toEqual([wanted])
   })
 
-  it('answers a pathological multi-star pattern promptly and correctly', () => {
+  it('answers a pathological multi-star pattern promptly and correctly', { timeout: 30_000 }, () => {
     // `handoffPattern` is operator configuration, and a mis-typed pattern used
     // to hang the pre-step it runs inside: the previous implementation expanded
     // every `*` into a non-atomic `[^/]*` group, so a pattern with several stars
@@ -303,23 +303,38 @@ describe('the emergency handoff scan', () => {
     // half is pinned by the explicit cases, including the ones where the shape
     // of the name (a literal `*` character) is where a naive re-implementation
     // gets it wrong.
-    const name = 'a'.repeat(30)
+    // The fixture size is chosen so the bound is SOUND, and choosing it took
+    // measurement, because the intuitive sizes are both wrong:
+    //   - 30 characters: the exponential translation lands anywhere from 207 ms
+    //     to 906 ms, so it can slip UNDER a 1000 ms bound and pass. V8 abandons
+    //     its backtracking past an internal budget, so the old cost is not even
+    //     monotonic in the name length (22 stars took 29 ms, 24 took 4 ms).
+    //   - 100_000 characters: the old translation never finishes, and vitest
+    //     cannot interrupt a synchronous loop, so the whole suite HANGS instead
+    //     of reporting a failure. Measured: a 42-character name did not finish
+    //     in 25 s.
+    // 34 characters is the size where the old translation reliably completes and
+    // reliably exceeds the bound: 5.3 s across five runs (~39_000x the linear
+    // matcher's 0.004 ms). The 1000 ms bound therefore sits ~5x below the broken
+    // cost and ~250_000x above the correct one, so it cannot flake under load and
+    // cannot pass an exponential matcher.
+    const name = 'a'.repeat(34)
     const pathological = `${'*a'.repeat(12)}b`
     const startedAt = Date.now()
     const result = matchesHandoffPattern(name, pathological)
     const elapsedMs = Date.now() - startedAt
-    // `*a` twelve times followed by `b` cannot match 30 'a's with no 'b'.
+    // `*a` twelve times followed by `b` cannot match a run of 'a's with no 'b'.
     expect(result).toBe(false)
     expect(elapsedMs).toBeLessThan(1000)
 
     // The same shape, matching: the trailing literal is present, so the stars
     // must consume the run and the pattern must succeed.
     expect(matchesHandoffPattern(`${name}b`, pathological)).toBe(true)
-    // And a longer name, to show cost grows with the name and not with the
-    // star count: this would have been astronomically slow before.
-    const longStartedAt = Date.now()
-    expect(matchesHandoffPattern('a'.repeat(200), pathological)).toBe(false)
-    expect(Date.now() - longStartedAt).toBeLessThan(1000)
+    // The cost tracks the NAME length, not the star count: a second star-heavy
+    // pattern over the same name must also stay well inside the bound.
+    const secondStartedAt = Date.now()
+    expect(matchesHandoffPattern(name, `${'*a'.repeat(6)}${'*b'.repeat(6)}`)).toBe(false)
+    expect(Date.now() - secondStartedAt).toBeLessThan(1000)
 
     // Correctness on the shapes a wrong-but-fast matcher gets wrong. A `*` in
     // the NAME is an ordinary character: the pattern `*` is a wildcard that
