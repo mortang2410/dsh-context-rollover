@@ -51,27 +51,80 @@ export const CONTEXT_WINDOW = 100_000
  * catalogue rides `GenerateOptions.tools` and not the message list.
  */
 export interface RecordedRequest {
+  /**
+   * Position of this request in the process-wide order of adapter `stream`
+   * invocations: 0 for the first stream any recording adapter started, 1 for
+   * the next, and so on.
+   *
+   * Assigned once per `stream` invocation from a single counter, so the number
+   * identifies real invocation order. It is deliberately not derived from the
+   * request's content: a rollover rewrites the whole message list, so any
+   * content-derived key would move with the very surface it is being measured
+   * against, and two different requests could collide. One counter for the
+   * whole process rather than one per adapter, so a call an adapter other than
+   * the scripted one served is still placed in the same order.
+   */
+  readonly ordinal: number
   readonly messages: RequestMessage[]
   readonly tools: readonly ToolSchema[]
 }
 
-/** Record one request's messages and tool catalogue into both sinks. */
-function record(
-  options: GenerateOptions,
-  messages: RequestMessage[][],
-  requests: RecordedRequest[],
-): void {
-  messages.push([...options.messages])
-  requests.push({ messages: [...options.messages], tools: options.tools ?? [] })
+/** Process-wide ordinal of the next adapter `stream` invocation. */
+let nextStreamOrdinal = 0
+
+/** Every adapter stream this process started, indexed by its ordinal. */
+const recordedStreams: RecordedRequest[] = []
+
+/**
+ * How many adapter streams have started so far in this process.
+ *
+ * Sampled while a durable session event is being published, this is the exact
+ * number of streams that started before that event: `session.append` invokes
+ * its `session/event` observers synchronously, before it returns.
+ */
+export function startedStreamCount(): number {
+  return recordedStreams.length
 }
 
-/** One text answer per request, with a large advertised context window. */
-export class TextAdapter extends LlmAdapter {
+/** Every recorded adapter stream in invocation order, oldest first. */
+export function startedStreams(): readonly RecordedRequest[] {
+  return recordedStreams
+}
+
+/**
+ * Shared request recording for the scripted adapters: both sinks, with the
+ * invocation ordinal assigned synchronously in `stream` before any chunk is
+ * produced.
+ */
+abstract class RecordingAdapter extends LlmAdapter {
   // Exactly what the loop handed the adapter: `GenerateOptions.messages` is
   // `RequestMessage[]`, which is a superset of the persisted `Message`.
   readonly requests: RequestMessage[][] = []
   /** The same requests with the tool catalogue each one advertised. */
   readonly recorded: RecordedRequest[] = []
+
+  /**
+   * Record one request on this adapter and on the process-wide stream log.
+   *
+   * Called at the top of `stream`, which the loop invokes once per model
+   * request, so the ordinal is assigned at invocation rather than at the first
+   * chunk or at completion.
+   * @param options - the request exactly as the loop handed it over.
+   * @returns this adapter's own request index (0 for its first request).
+   */
+  protected recordRequest(options: GenerateOptions): number {
+    const index = this.requests.length
+    const request: RecordedRequest = {
+      ordinal: nextStreamOrdinal,
+      messages: [...options.messages],
+      tools: options.tools ?? [],
+    }
+    nextStreamOrdinal += 1
+    recordedStreams.push(request)
+    this.requests.push([...options.messages])
+    this.recorded.push(request)
+    return index
+  }
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return Promise.resolve({
@@ -81,9 +134,16 @@ export class TextAdapter extends LlmAdapter {
       context: { contextWindow: CONTEXT_WINDOW },
     })
   }
+}
 
-  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    record(options, this.requests, this.recorded)
+/** One text answer per request, with a large advertised context window. */
+export class TextAdapter extends RecordingAdapter {
+  override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.recordRequest(options)
+    return this.answer()
+  }
+
+  private async *answer(): AsyncIterable<StreamChunk> {
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: 'answer' } }
     yield { type: 'finish', reason: { kind: 'stop' } }
@@ -94,28 +154,19 @@ export class TextAdapter extends LlmAdapter {
  * One scripted chunk sequence per request. Script entries are consumed in
  * order; a final entry repeats when the script is exhausted.
  */
-export class ScriptedAdapter extends LlmAdapter {
-  readonly requests: RequestMessage[][] = []
-  /** The same requests with the tool catalogue each one advertised. */
-  readonly recorded: RecordedRequest[] = []
-
+export class ScriptedAdapter extends RecordingAdapter {
   constructor(private readonly script: StreamScript) {
     super()
   }
 
-  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return Promise.resolve({
-      provider,
-      id: model,
-      name: model,
-      context: { contextWindow: CONTEXT_WINDOW },
-    })
+  override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const index = this.recordRequest(options)
+    const entry = this.script[Math.min(index, this.script.length - 1)]
+    if (entry === undefined) throw new Error('scripted adapter ran out of entries')
+    return this.answer(entry)
   }
 
-  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    record(options, this.requests, this.recorded)
-    const entry = this.script[Math.min(this.requests.length - 1, this.script.length - 1)]
-    if (entry === undefined) throw new Error('scripted adapter ran out of entries')
+  private async *answer(entry: readonly StreamChunk[]): AsyncIterable<StreamChunk> {
     for (const chunk of entry) yield chunk
   }
 }
