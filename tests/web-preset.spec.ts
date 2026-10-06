@@ -125,6 +125,20 @@ describe('make-web-preset', () => {
     }
   })
 
+  it('defaults the reminder ratio to 0.4 and rejects a blank reminder message', () => {
+    const { presetsDir, outDir, cleanup } = scratch(standardFixture())
+    try {
+      run(['--presets-dir', presetsDir, '--out-dir', outDir])
+      const composition = readFileSync(join(outDir, 'standard-rollover', 'agent.cordis.yml'), 'utf8')
+      expect(composition).toContain('reminderThresholdRatio: 0.4\n')
+      expect(() => run([
+        '--presets-dir', presetsDir, '--out-dir', outDir, '--reminder-message', '   ',
+      ])).toThrow(/reminder-message must be a non-empty string/)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('committed preset matches a fresh sync of the repo standard fixture', () => {
     // Temp dir inside the repo: the sync names the engine relatively, which
     // cannot cross drives (the script fails loud on that instead).
@@ -146,6 +160,26 @@ describe('make-web-preset', () => {
     } finally {
       rmSync(outDir, { recursive: true, force: true })
     }
+  })
+
+  it('a copy of the shipped preset keeps the 40% reminder and its message', () => {
+    // Equality with a fresh generation would still hold if the generator and
+    // the committed preset both regressed to the old defaults, so the values
+    // the ticket requires are asserted directly on the committed artifact.
+    const committed = readFileSync(
+      join(repoRoot, 'presets', 'standard-rollover', 'agent.cordis.yml'),
+      'utf8',
+    )
+    expect(committed).toContain('reminderThresholdRatio: 0.4\n')
+    expect(committed).toContain('thresholdRatio: 0.9\n')
+    // The message renders as a YAML double-quoted scalar, so parse it back the
+    // way a config loader would rather than matching the rendered line.
+    const line = committed.split('\n').find(candidate => candidate.trimStart().startsWith('reminderMessage: '))
+    if (line === undefined) throw new Error('the preset engine row carries no reminderMessage')
+    const rendered = JSON.parse(line.trimStart().slice('reminderMessage: '.length)) as string
+    expect(rendered).toContain('/handoff-doc')
+    expect(rendered).toContain('new_context')
+    expect(rendered).toContain('{percent}')
   })
 
   it('the repo fixture is the shipped standard shape the generator expects', () => {

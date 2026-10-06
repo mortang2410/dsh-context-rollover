@@ -78,7 +78,10 @@ describe('ContextRolloverEngine', () => {
     // once; the second turn must not repeat it (same window, no rollover).
     const reminders = reminderTexts(session)
     expect(reminders).toHaveLength(1)
-    expect(reminders[0]).toContain('automatic rollover')
+    // The delivered text is the configured handoff message, naming the
+    // workflow the model must follow.
+    expect(reminders[0]).toContain('/handoff-doc')
+    expect(reminders[0]).toContain('new_context')
     expect(countRollovers(session)).toBe(0)
   })
 

@@ -13,6 +13,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type TokenMeter from '@deepseek-ai/dsh-token-meter'
 import type { ResolvedRolloverConfig } from './config.ts'
+import { readHandoffFileOrThrow } from './handoff.ts'
 import { readHistoryItem, searchHistory } from './history.ts'
 import { NotesStore } from './notes.ts'
 import { countRollovers, rolloverSummarySeqs } from './rollover.ts'
@@ -63,6 +64,14 @@ function newContextTool(deps: RolloverToolDependencies) {
       + 'environment state. Earlier conversation leaves the active context; durable notes, your handoff, '
       + 'and a recent verbatim conversation tail carry over, and full history stays recoverable via history.',
     parameters: {
+      handoff_path: {
+        type: 'string',
+        description:
+          'Path of the durable handoff document this window should continue from: an absolute path, '
+          + 'or one relative to the session working directory. Read at the moment you call this tool, '
+          + 'so a missing, unreadable, empty or oversized document is refused here instead of leaving '
+          + 'you with a context that silently never rolled over.',
+      },
       handoff: {
         type: 'string',
         description:
@@ -98,6 +107,30 @@ function newContextTool(deps: RolloverToolDependencies) {
       // boundary the deferring engine never crosses, so answer honestly.
       if (exec.agent !== undefined && deps.compactionOwnedElsewhere(exec.agent)) {
         return { accepted: false }
+      }
+      const handoffPath = args.handoff_path
+      if (handoffPath !== undefined && args.handoff !== undefined) {
+        throw new Error(
+          'pass either handoff_path (a durable handoff document) or handoff (a short inline string), not both.',
+        )
+      }
+      if (handoffPath !== undefined) {
+        // Read here, inside this tool's own `execute`. The engine crosses the
+        // boundary later, in an `agent/pre-step` listener that converts every
+        // failure into `ctx.logger.warn(... "continuing the turn")` — a warning
+        // the model never sees. Deferring the read to that point would let the
+        // model believe the rollover happened while its context stayed put.
+        // Thrown from here, the refusal becomes the tool result the model reads.
+        const document = await readHandoffFileOrThrow({
+          path: handoffPath,
+          cwd: session.header.cwd,
+          maxChars: deps.config.handoffMaxChars,
+        })
+        deps.pendingRollovers.set(session.id, {
+          handoff: document.text,
+          handoffPath: document.path,
+        })
+        return { accepted: true }
       }
       const handoff = args.handoff ?? null
       if (handoff !== null && handoff.length > deps.config.handoffMaxChars) {

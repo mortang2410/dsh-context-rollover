@@ -15,6 +15,7 @@
  * Usage:
  *   node scripts/make-web-preset.mjs [--presets-dir <dir>] [--out-dir <dir>]
  *     [--preset-id <id>] [--threshold-ratio <n>] [--reminder-ratio <n>]
+ *     [--reminder-message <text>]
  *     [--retain-tokens <n> | --retain-ratio <n>] [--handoff-max-chars <n>]
  */
 
@@ -29,6 +30,16 @@ const SOURCE_PRESET = 'standard'
 
 /** Default id (directory name) of the generated preset. */
 const DEFAULT_PRESET_ID = 'standard-rollover'
+
+/**
+ * The shipped handoff reminder text. Mirrors `DEFAULT_REMINDER_MESSAGE` in
+ * `src/config.ts`: this script is plain Node with no build step, so it cannot
+ * import that module, and a generated preset that omitted the message would
+ * silently drop back to whatever default the engine happened to carry.
+ */
+const DEFAULT_REMINDER_MESSAGE = 'Context is {percent}% full. Use `/handoff-doc` to create/update the durable '
+  + 'handoff document. Make it fully sufficient for a fresh context to continue the work. After it succeeds, '
+  + 'call `new_context`. The handoff document will be the entire continuation context.'
 
 /** Directory names must stay path-contained; mirrors the harness preset rule. */
 const PRESET_ID = /^[a-z0-9][a-z0-9-]*$/
@@ -71,15 +82,16 @@ export function findSourcePreset(presetsDir, source = SOURCE_PRESET) {
 }
 
 /**
- * Validate the numeric engine configuration, mirroring the engine's own
- * rules so a bad flag fails here instead of at session start.
- * @param config - raw numeric options.
+ * Validate the numeric engine configuration and the reminder message,
+ * mirroring the engine's own rules so a bad flag fails here instead of at
+ * session start.
+ * @param config - raw options.
  * @returns the validated options.
- * @throws on any out-of-range value.
+ * @throws on any out-of-range or blank value.
  */
 export function resolveOptions(config) {
   const thresholdRatio = config.thresholdRatio ?? 0.9
-  const reminderRatio = config.reminderRatio ?? 0.75
+  const reminderRatio = config.reminderRatio ?? 0.4
   const handoffMaxChars = config.handoffMaxChars ?? 20000
   for (const [name, value] of [['threshold-ratio', thresholdRatio], ['reminder-ratio', reminderRatio]]) {
     if (!Number.isFinite(value) || value <= 0 || value > 1) {
@@ -89,6 +101,12 @@ export function resolveOptions(config) {
   if (reminderRatio > thresholdRatio) {
     throw new Error(
       `make-web-preset: --reminder-ratio (${reminderRatio}) must not exceed --threshold-ratio (${thresholdRatio})`,
+    )
+  }
+  const reminderMessage = config.reminderMessage ?? DEFAULT_REMINDER_MESSAGE
+  if (typeof reminderMessage !== 'string' || reminderMessage.trim().length === 0) {
+    throw new Error(
+      `make-web-preset: --reminder-message must be a non-empty string, got ${JSON.stringify(reminderMessage)}`,
     )
   }
   const retainTokens = config.retainTokens ?? null
@@ -102,14 +120,27 @@ export function resolveOptions(config) {
   if (!Number.isSafeInteger(handoffMaxChars) || handoffMaxChars <= 0) {
     throw new Error(`make-web-preset: --handoff-max-chars must be a positive integer, got ${String(handoffMaxChars)}`)
   }
-  return { thresholdRatio, reminderRatio, retainTokens, retainRatio, handoffMaxChars }
+  return { thresholdRatio, reminderRatio, reminderMessage, retainTokens, retainRatio, handoffMaxChars }
+}
+
+/**
+ * Render a value as a YAML double-quoted scalar.
+ *
+ * A JSON string is a valid YAML 1.2 double-quoted scalar, and it is the one
+ * rendering that survives every message an operator can pass: backticks,
+ * braces, quotes, backslashes and newlines all stay intact and unambiguous.
+ * @param text - the value to render.
+ * @returns the quoted scalar.
+ */
+function yamlString(text) {
+  return JSON.stringify(text)
 }
 
 /**
  * Render the replacement engine row (same 4-space nesting as the shipped row).
  * @param engineEntry - module specifier of the built engine, as the preset row
  *   names it (relative to the preset directory for shipped presets).
- * @param options - validated numeric options from {@link resolveOptions}.
+ * @param options - validated options from {@link resolveOptions}.
  * @returns the row text, without trailing newline.
  */
 export function renderEngineRow(engineEntry, options) {
@@ -124,6 +155,7 @@ export function renderEngineRow(engineEntry, options) {
     + `      config:\n`
     + `        thresholdRatio: ${options.thresholdRatio}\n`
     + `        reminderThresholdRatio: ${options.reminderRatio}\n`
+    + `        reminderMessage: ${yamlString(options.reminderMessage)}\n`
     + `${tail}\n`
     + `        handoffMaxChars: ${options.handoffMaxChars}\n`
     + `        modelSurface: 'always'`
@@ -206,7 +238,9 @@ Options:
   --out-dir <dir>         presets root to write into (default: this package's presets/)
   --preset-id <id>        generated preset id (default: ${DEFAULT_PRESET_ID})
   --threshold-ratio <n>   auto-rollover point, fraction of window (default: 0.9)
-  --reminder-ratio <n>    one-time checkpoint reminder point (default: 0.75)
+  --reminder-ratio <n>    one-time handoff reminder point (default: 0.4)
+  --reminder-message <t>  reminder text; {percent} is the only placeholder
+                          (default: the shipped /handoff-doc reminder)
   --retain-tokens <n>     absolute recent-tail budget (default: unset)
   --retain-ratio <n>      tail budget fraction when --retain-tokens is unset (default: 0.1)
   --handoff-max-chars <n> max handoff/notes text (default: 20000)`)
@@ -236,6 +270,7 @@ export async function main(argv = process.argv.slice(2)) {
   const options = resolveOptions({
     thresholdRatio: number('threshold-ratio'),
     reminderRatio: number('reminder-ratio'),
+    reminderMessage: flags['reminder-message'],
     retainTokens: number('retain-tokens'),
     retainRatio: number('retain-ratio'),
     handoffMaxChars: number('handoff-max-chars'),

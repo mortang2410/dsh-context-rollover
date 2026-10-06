@@ -30,6 +30,7 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 
@@ -245,15 +246,22 @@ export interface EngineHarness {
   readonly notesBase: string
 }
 
-/** Mount one engine over the standard test stack with a temp notes base. */
+/**
+ * Mount one engine over the standard test stack with a temp notes base.
+ * @param id - session id for the created agent.
+ * @param config - engine configuration overrides.
+ * @param meta - session creation metadata; pass `cwd` to give the session a
+ *   real working directory (relative handoff paths resolve against it).
+ */
 export async function engineHarness(
   id: string,
   config: Partial<RolloverConfig> = {},
+  meta: Pick<SessionHeader, 'cwd'> = {},
 ): Promise<EngineHarness> {
   const ctx = await mountTestContext()
   const notesBase = await tempNotesDir()
   const engine = new ContextRolloverEngine(ctx, { notesDir: notesBase, retainTokens: 40, ...config })
-  const agent = await ctx.agentLoop.create(SessionId(id), { provider: MODEL, model: MODEL })
+  const agent = await ctx.agentLoop.create(SessionId(id), { provider: MODEL, model: MODEL }, meta)
   return { ctx, engine, agent, session: agent.session, notesBase }
 }
 

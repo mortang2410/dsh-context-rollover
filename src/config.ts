@@ -8,18 +8,60 @@
 
 import z from '@deepseek-ai/schemastery'
 
+/**
+ * The shipped reminder text: the model's one-per-window instruction to write
+ * the durable handoff and then cross the boundary.
+ *
+ * `{percent}` is the only placeholder. A deployment that restates the value
+ * takes over the wording entirely; the engine substitutes nothing else.
+ */
+export const DEFAULT_REMINDER_MESSAGE =
+  'Context is {percent}% full. Use `/handoff-doc` to create/update the durable handoff document. '
+  + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
+  + '`new_context`. The handoff document will be the entire continuation context.'
+
+/** Default base directory, relative to the session working directory, holding durable handoffs. */
+export const DEFAULT_HANDOFF_DIR = '.scratch/handoff'
+
+/** Default glob for durable handoff files inside {@link DEFAULT_HANDOFF_DIR}. */
+export const DEFAULT_HANDOFF_PATTERN = 'HANDOFF-*.md'
+
+/**
+ * Substitute the measured percentage into a reminder template.
+ *
+ * `{percent}` is deliberately the only placeholder: this is not a template
+ * language, so an unknown placeholder survives verbatim rather than silently
+ * expanding to nothing.
+ * @param template - configured reminder text.
+ * @param percent - measured percentage of the context window, already rounded.
+ * @returns the text to deliver as the reminder.
+ */
+export function renderReminderMessage(template: string, percent: number): string {
+  return template.replaceAll('{percent}', String(percent))
+}
+
 /** Model-facing configuration surface for the rollover engine. */
 export interface RolloverConfig {
   /**
    * Automatic rollover pressure point as a fraction of the routed model's
    * context window. Defaults to `0.9`.
+   *
+   * This is the emergency fallback: it fires when the earlier reminder was
+   * ignored and the window is about to overflow.
    */
   thresholdRatio?: number
   /**
-   * One-time checkpoint reminder point as a fraction of the context window.
-   * Defaults to `0.75`.
+   * One-time handoff-reminder point as a fraction of the context window, well
+   * below {@link thresholdRatio} so the handoff is written while there is
+   * still room for it. Defaults to `0.4`.
    */
   reminderThresholdRatio?: number
+  /**
+   * Text of the one-per-window reminder. `{percent}` is substituted with the
+   * measured percentage at send time and is the only placeholder.
+   * Defaults to {@link DEFAULT_REMINDER_MESSAGE}.
+   */
+  reminderMessage?: string
   /**
    * Recent verbatim tail retained across a rollover, as a fraction of the
    * context window. Defaults to `0.1`.
@@ -38,6 +80,13 @@ export interface RolloverConfig {
   /** Base directory for note files; defaults to `<dsh home>/notes/<session id>`. */
   notesDir?: string
   /**
+   * Directory holding durable handoff documents, resolved against the session
+   * working directory. Only the emergency path (ticket 05's scan) reads it.
+   */
+  handoffDir?: string
+  /** File-name pattern selecting handoff documents inside {@link handoffDir}. */
+  handoffPattern?: string
+  /**
    * Model-surface registration: `auto` registers tools and guidance only
    * where no preset roster exists (the host row), while `always` registers
    * them unconditionally (the preset row, which owns its composition).
@@ -50,12 +99,15 @@ export interface RolloverConfig {
 export const Config: z<RolloverConfig> = z.object({
   thresholdRatio: z.number(),
   reminderThresholdRatio: z.number(),
+  reminderMessage: z.string(),
   retainRatio: z.number(),
   retainTokens: z.number().step(1).min(0),
   handoffMaxChars: z.number().step(1).min(0),
   notesEnabled: z.boolean(),
   historyEnabled: z.boolean(),
   notesDir: z.string(),
+  handoffDir: z.string(),
+  handoffPattern: z.string(),
   modelSurface: z.union(['auto', 'always'] as const),
 })
 
@@ -63,6 +115,7 @@ export const Config: z<RolloverConfig> = z.object({
 export interface ResolvedRolloverConfig {
   readonly thresholdRatio: number
   readonly reminderThresholdRatio: number
+  readonly reminderMessage: string
   readonly retainRatio: number
   /** `null` keeps the ratio-based tail budget. */
   readonly retainTokens: number | null
@@ -70,6 +123,8 @@ export interface ResolvedRolloverConfig {
   readonly notesEnabled: boolean
   readonly historyEnabled: boolean
   readonly notesDir: string | undefined
+  readonly handoffDir: string
+  readonly handoffPattern: string
   readonly modelSurface: 'auto' | 'always'
 }
 
@@ -77,6 +132,13 @@ export interface ResolvedRolloverConfig {
 function validateRatio(name: string, value: number): void {
   if (!Number.isFinite(value) || value <= 0 || value > 1) {
     throw new TypeError(`context-rollover: ${name} must be in (0, 1], got ${String(value)}`)
+  }
+}
+
+/** Reject a blank string where the engine needs a usable value. */
+function validateNonEmptyString(name: string, value: string): void {
+  if (value.trim().length === 0) {
+    throw new TypeError(`context-rollover: ${name} must be a non-empty string, got ${JSON.stringify(value)}`)
   }
 }
 
@@ -88,7 +150,7 @@ function validateRatio(name: string, value: number): void {
  */
 export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
   const thresholdRatio = config.thresholdRatio ?? 0.9
-  const reminderThresholdRatio = config.reminderThresholdRatio ?? 0.75
+  const reminderThresholdRatio = config.reminderThresholdRatio ?? 0.4
   const retainRatio = config.retainRatio ?? 0.1
   validateRatio('thresholdRatio', thresholdRatio)
   validateRatio('reminderThresholdRatio', reminderThresholdRatio)
@@ -99,6 +161,12 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
       + `thresholdRatio (${thresholdRatio})`,
     )
   }
+  const reminderMessage = config.reminderMessage ?? DEFAULT_REMINDER_MESSAGE
+  validateNonEmptyString('reminderMessage', reminderMessage)
+  const handoffDir = config.handoffDir ?? DEFAULT_HANDOFF_DIR
+  validateNonEmptyString('handoffDir', handoffDir)
+  const handoffPattern = config.handoffPattern ?? DEFAULT_HANDOFF_PATTERN
+  validateNonEmptyString('handoffPattern', handoffPattern)
   const retainTokens = config.retainTokens ?? null
   if (retainTokens !== null && (!Number.isSafeInteger(retainTokens) || retainTokens < 0)) {
     throw new TypeError(`context-rollover: retainTokens must be a non-negative integer, got ${String(retainTokens)}`)
@@ -116,12 +184,15 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
   return {
     thresholdRatio,
     reminderThresholdRatio,
+    reminderMessage,
     retainRatio,
     retainTokens,
     handoffMaxChars,
     notesEnabled: config.notesEnabled ?? true,
     historyEnabled: config.historyEnabled ?? true,
     notesDir: config.notesDir,
+    handoffDir,
+    handoffPattern,
     modelSurface,
   }
 }

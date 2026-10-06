@@ -25,7 +25,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { Seq } from './compat.ts'
-import { resolveConfig } from './config.ts'
+import { renderReminderMessage, resolveConfig } from './config.ts'
 import type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
 import type { RolloverReason } from './checkpoint.ts'
 import { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
@@ -73,8 +73,50 @@ function concreteCompaction(engine: CompactionEngine): CompactionEngine {
   return (engine as CompactionEngine & { [symbols.original]?: CompactionEngine })[symbols.original] ?? engine
 }
 
+/**
+ * The handoff text one pending request will commit, with its internal
+ * invariant asserted.
+ *
+ * `new_context` already read and validated the document inside its own
+ * `execute`, so a pending request carrying a path must carry non-empty text.
+ * A violation here is an engine bug, not a user mistake, which is why it is an
+ * assertion rather than another refusal the model has to read: the pre-step
+ * listener logs it as a warning, and the old context correctly stays put.
+ * @param pending - the model's recorded rollover request.
+ * @returns the handoff text to commit, or `null` when none was supplied.
+ */
+function pendingHandoff(pending: PendingRollover): string | null {
+  if (pending.handoffPath === undefined) return pending.handoff
+  if (pending.handoff === null || pending.handoff.trim().length === 0) {
+    throw new Error(
+      `context-rollover: internal invariant violated: the rollover read ${pending.handoffPath} but `
+      + 'recorded no handoff text',
+    )
+  }
+  return pending.handoff
+}
+
 export type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
+export {
+  DEFAULT_HANDOFF_DIR,
+  DEFAULT_HANDOFF_PATTERN,
+  DEFAULT_REMINDER_MESSAGE,
+  renderReminderMessage,
+  resolveConfig,
+} from './config.ts'
 export { buildCheckpointText } from './checkpoint.ts'
+export {
+  HandoffError,
+  readHandoffFile,
+  readHandoffFileOrThrow,
+} from './handoff.ts'
+export type {
+  HandoffFailure,
+  HandoffFailureReason,
+  HandoffReadRequest,
+  HandoffResult,
+  HandoffSuccess,
+} from './handoff.ts'
 export { NotesStore, resolveNotePath } from './notes.ts'
 export { collectHistory, readHistoryItem, searchHistory } from './history.ts'
 export {
@@ -99,12 +141,15 @@ export class ContextRolloverEngine extends CompactionEngine {
   static Config: z<RolloverConfig> = z.object({
     thresholdRatio: z.number(),
     reminderThresholdRatio: z.number(),
+    reminderMessage: z.string(),
     retainRatio: z.number(),
     retainTokens: z.number().step(1).min(0),
     handoffMaxChars: z.number().step(1).min(0),
     notesEnabled: z.boolean(),
     historyEnabled: z.boolean(),
     notesDir: z.string(),
+    handoffDir: z.string(),
+    handoffPattern: z.string(),
     modelSurface: z.union(['auto', 'always'] as const),
   })
 
@@ -173,7 +218,7 @@ export class ContextRolloverEngine extends CompactionEngine {
             this.pendingRollovers.delete(agent.session.id)
             await this.performRollover(agent, {
               reason: 'model-requested',
-              handoff: pending.handoff,
+              handoff: pendingHandoff(pending),
             }, signal)
           } else {
             await this.rollOverOnPressure(agent, turn, signal)
@@ -198,7 +243,10 @@ export class ContextRolloverEngine extends CompactionEngine {
       if (pending === undefined || signal.aborted) return
       this.pendingRollovers.delete(agent.session.id)
       try {
-        await this.performRollover(agent, { reason: 'model-requested', handoff: pending.handoff }, signal)
+        await this.performRollover(agent, {
+          reason: 'model-requested',
+          handoff: pendingHandoff(pending),
+        }, signal)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         ctx.logger.warn(`context rollover at turn stop failed: ${message}`)
@@ -233,8 +281,12 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * The one-per-window checkpoint reminder, when this step crosses the
-   * reminder threshold for the first time in the current window.
+   * The one-per-window handoff reminder, when this step crosses the reminder
+   * threshold for the first time in the current window.
+   *
+   * The text is the configured {@link RolloverConfig.reminderMessage} with
+   * `{percent}` replaced by the measured percentage. The threshold is what
+   * gates delivery: nothing about the text is hardcoded here.
    */
   private pendingReminder(session: Session): UserMessage | undefined {
     const contextWindow = session.requestContext()?.contextWindow
@@ -247,15 +299,11 @@ export class ContextRolloverEngine extends CompactionEngine {
     // preset row both observe this pre-step, and neither delivery is in the
     // log yet when the second one decides.
     if (!claimReminder(session)) return undefined
-    const rolloverTokens = Math.floor(contextWindow * this.config.thresholdRatio)
     const percent = Math.min(100, Math.round((measurement.totalTokens / contextWindow) * 100))
     return createUserMessage({
       content: [{
         type: 'text',
-        text:
-          `Context window: ${percent}% used (~${measurement.totalTokens} of ${contextWindow} tokens). `
-          + `An automatic rollover starts around ${rolloverTokens} tokens. If a task boundary is near, `
-          + 'save what matters to notes and call new_context with a short handoff; otherwise checkpoint soon.',
+        text: renderReminderMessage(this.config.reminderMessage, percent),
       }],
       source: {
         kind: PLUGIN_NAME,
