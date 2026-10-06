@@ -43,6 +43,18 @@ Acceptance criteria:
       preset generator already fails loudly on an unexpected `compaction-basic` row.
 - [ ] The preset's engine row carries `reminderThresholdRatio: 0.40`, `thresholdRatio: 0.9`,
       `handoffOnly: true`, the reminder message, and the handoff directory settings.
+- [ ] The engine row's `name` RESOLVES on the running host. This is the most likely way to get a
+      preset that registers but whose engine row never mounts, so prove it rather than assuming.
+      The currently committed preset names the engine `'../../lib/index.js'`, a path relative to the
+      old per-preset directory. In the inline format there is no preset directory: the registry
+      mounts a preset's rows with `prepareProfileEntries(ctx, plugins, ctx.baseUrl)` and
+      `mountPreset` passes `record.context.baseUrl`, which is the composition's base, not a preset
+      folder (`dsh-agent-preset-registry/lib/index.js:262-269,534`). So a relative path now resolves
+      against a different base and may not reach this package at all. Determine the correct form
+      empirically. The shipped presets name their plugins by bare package specifier
+      (`dsh-web-app/presets/standard.patch.yml` names `@deepseek-ai/dsh-compaction-basic`), which is
+      the strongest candidate; a `!!js` profile-relative expression is the other. Whichever you
+      choose, a test must show the row actually resolves from the running profile layout.
 - [ ] The committed preset matches a fresh generation from the host's shipped declaration.
 - [ ] Test: the generated preset contains this engine's row and not `compaction-basic`.
 - [ ] Test: the generator fails loudly when the host declaration's anchor row is absent or gains
