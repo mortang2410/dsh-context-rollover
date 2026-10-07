@@ -39,7 +39,7 @@
   "scripts": {
     "generate:paths": "node scripts/generate-dsh-paths.mjs",
     "build": "node scripts/generate-dsh-build-paths.mjs && tsc -p tsconfig.build.json",
-    "preset:sync": "node scripts/make-web-preset.mjs",
+    "preset:sync": "node scripts/make-web-preset.mjs --source-preset standard --preset-id standard-rollover && node scripts/make-web-preset.mjs --source-preset cordis --preset-id local-cordis",
     "test": "node scripts/generate-dsh-paths.mjs && vitest run",
     "typecheck": "node scripts/generate-dsh-paths.mjs && tsc -p tsconfig.json",
     "prepack": "npm run build",
