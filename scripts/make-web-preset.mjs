@@ -41,11 +41,41 @@ import { fileURLToPath } from 'node:url'
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
-/** The host's shipped declaration this preset derives from. */
+/** The host's shipped declaration this preset derives from by default. */
 const SOURCE_PRESET = 'standard'
 
-/** Row id of the host's shipped declaration inside its patch file. */
-const SOURCE_ROW_ID = 'preset-standard'
+/**
+ * Per-source identity anchors: the Loader row id, the preset id inside the
+ * declaration, and the display metadata the generated preset carries.
+ *
+ * `cordis` derives Creator Mode: its tool list adds `tool-cordis` and the
+ * preset-authoring skill directory, and its roster position is 4, so a
+ * cordis-derived preset must restate those rather than inherit standard's.
+ */
+const SOURCE_PRESETS = {
+  standard: {
+    rowId: 'preset-standard',
+    presetId: 'standard',
+    order: 1,
+    meta: {
+      name: 'Standard + rollover (experimental)',
+      description: 'Full coding agent with model-driven context rollover instead of summarization '
+        + '(generated from the host standard preset). Experimental opt-in; standard remains the default.',
+      order: 2,
+    },
+  },
+  cordis: {
+    rowId: 'preset-cordis',
+    presetId: 'cordis',
+    order: 4,
+    meta: {
+      name: 'Local Cordis',
+      description: 'Creator Mode with model-driven context rollover instead of summarization '
+        + '(generated from the host cordis preset). Keeps the Creator Mode tools and skills.',
+      order: 5,
+    },
+  },
+}
 
 /** Default id of the generated preset. */
 const DEFAULT_PRESET_ID = 'standard-rollover'
@@ -83,14 +113,6 @@ const COMPACTION_GROUP = '          - id: compaction\n'
   + '              compaction: true\n'
   + '              toolResultPruner: true\n'
 
-/** Preset display metadata, carried inline on the declaration row. */
-const PRESET_META = {
-  name: 'Standard + rollover (experimental)',
-  description: 'Full coding agent with model-driven context rollover instead of summarization '
-    + '(generated from the host standard preset). Experimental opt-in; standard remains the default.',
-  order: 2,
-}
-
 /**
  * Candidate roots holding the host's shipped declaration
  * (`<root>/standard.patch.yml`): explicit `--presets-dir` first, then the
@@ -105,6 +127,25 @@ const PRESET_META = {
 export function candidatePresetRoots(presetsDir) {
   if (presetsDir !== undefined) return [resolve(presetsDir)]
   return [join(packageDir, 'tests', 'fixtures', 'host')]
+}
+
+/**
+ * Resolve one source entry by preset id.
+ * @param source - source preset id.
+ * @returns the source's identity anchors and display metadata.
+ * @throws when the id is not a known source, because an unknown source would
+ *   silently derive from the wrong declaration or produce a preset with the
+ *   wrong row id.
+ */
+export function resolveSource(source) {
+  const entry = SOURCE_PRESETS[source]
+  if (entry === undefined) {
+    throw new Error(
+      `make-web-preset: unknown --source-preset ${JSON.stringify(source)}; `
+      + `known sources: ${Object.keys(SOURCE_PRESETS).join(', ')}`,
+    )
+  }
+  return entry
 }
 
 /**
@@ -314,15 +355,17 @@ function spliceOnce(text, pattern, replacement, what) {
  * @param text - the host declaration text.
  * @param options - validated options from {@link resolveOptions}.
  * @param presetId - generated preset id.
+ * @param sourceId - source preset id the text derives from.
  * @returns the generated declaration text.
  * @throws when any anchor row is absent, duplicated, or has gained a block this
  *   transform would silently mis-scope, or when the compaction isolate group
  *   the engine must publish into is no longer the shipped one.
  */
-export function transformPresetText(text, options, presetId = DEFAULT_PRESET_ID) {
+export function transformPresetText(text, options, presetId = DEFAULT_PRESET_ID, sourceId = SOURCE_PRESET) {
   if (!PRESET_ID.test(presetId)) {
     throw new Error(`make-web-preset: --preset-id must match ${PRESET_ID}, got ${presetId}`)
   }
+  const source = resolveSource(sourceId)
   // Check the realm-bearing group first: if the host ever moves the anchor out
   // of it, the replacement row would register into the root realm, where the
   // registry rejects the whole mount as a leaked service.
@@ -359,22 +402,22 @@ export function transformPresetText(text, options, presetId = DEFAULT_PRESET_ID)
   // Restamp the declaration: row id, preset id, and inline display metadata.
   output = spliceOnce(
     output,
-    new RegExp(`^( {4}- id: )${SOURCE_ROW_ID}$`, 'm'),
+    new RegExp(`^( {4}- id: )${source.rowId}$`, 'm'),
     match => `${match[1] ?? ''}preset-${presetId}`,
     'declaration row id',
   ).text
   output = spliceOnce(
     output,
-    new RegExp(`^( {8}id: )${SOURCE_PRESET}$`, 'm'),
+    new RegExp(`^( {8}id: )${source.presetId}$`, 'm'),
     match => `${match[1] ?? ''}${presetId}`,
     'declaration preset id',
   ).text
   output = spliceOnce(
     output,
-    /^ {8}order: 1$/m,
-    `        name: ${yamlString(PRESET_META.name)}\n`
-    + `        description: ${yamlString(PRESET_META.description)}\n`
-    + `        order: ${PRESET_META.order}`,
+    new RegExp(`^ {8}order: ${source.order}$`, 'm'),
+    `        name: ${yamlString(source.meta.name)}\n`
+    + `        description: ${yamlString(source.meta.description)}\n`
+    + `        order: ${source.meta.order}`,
     'declaration order',
   ).text
   return output
@@ -386,7 +429,12 @@ export function transformPresetText(text, options, presetId = DEFAULT_PRESET_ID)
  * @returns the parsed flags.
  */
 export function parseArgs(argv) {
-  const flags = {}
+  // A null-prototype object, not `{}`. Assigning to `flags['__proto__']` on a
+  // plain object invokes the inherited setter, creates no OWN key, and so is
+  // invisible to Object.keys — verified: `const f = {}; f['__proto__'] = 'x'`
+  // leaves Object.keys(f) empty. That would let `--__proto__ cordis` through
+  // the allow-list below and silently derive from the default source.
+  const flags = Object.create(null)
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (!arg.startsWith('--')) throw new Error(`make-web-preset: unexpected argument ${arg}; see --help`)
@@ -402,6 +450,16 @@ export function parseArgs(argv) {
     if (inline === undefined) index += 1
     flags[key] = value
   }
+  const known = new Set([
+    'help', 'presets-dir', 'out-dir', 'preset-id', 'source-preset', 'engine-name',
+    'threshold-ratio', 'reminder-ratio', 'reminder-message', 'handoff-dir',
+    'handoff-pattern', 'retain-tokens', 'retain-ratio', 'handoff-only', 'handoff-max-chars',
+  ])
+  for (const key of Object.keys(flags)) {
+    if (!known.has(key)) {
+      throw new Error(`make-web-preset: unknown option --${key}; see --help`)
+    }
+  }
   return flags
 }
 
@@ -412,6 +470,8 @@ export function printHelp() {
 Options:
   --presets-dir <dir>     directory holding the host's standard.patch.yml
                           (default: tests/fixtures/host)
+  --source-preset <id>    host declaration to derive from: standard | cordis
+                          (default: standard)
   --out-dir <dir>         presets root to write into (default: this package's presets/)
   --preset-id <id>        generated preset id (default: ${DEFAULT_PRESET_ID})
   --engine-name <spec>    module specifier the engine row names
@@ -475,11 +535,12 @@ export async function main(argv = process.argv.slice(2)) {
   if (flags['retain-tokens'] !== undefined && flags['retain-ratio'] !== undefined) {
     throw new Error('make-web-preset: --retain-tokens and --retain-ratio are exclusive')
   }
-  const source = findSourcePreset(flags['presets-dir'])
+  const sourceId = flags['source-preset'] ?? SOURCE_PRESET
+  const source = findSourcePreset(flags['presets-dir'], resolveSource(sourceId).presetId)
   const text = readFileSync(source, 'utf8')
   const outDir = flags['out-dir'] === undefined ? join(packageDir, 'presets') : resolve(flags['out-dir'])
   const dir = join(outDir, presetId)
-  const preset = transformPresetText(text, options, presetId)
+  const preset = transformPresetText(text, options, presetId, sourceId)
   mkdirSync(dir, { recursive: true })
   const declaration = join(dir, 'declaration.patch.yml')
   writeFileSync(declaration, preset)
