@@ -97,13 +97,26 @@ function findRow(rows: readonly EntryOptions[], id: string): EntryOptions | unde
   return undefined
 }
 
-/** Scratch dirs for one generator run: a declaration dir and an out dir. */
-function scratch(declaration: string): { presetsDir: string; outDir: string; cleanup: () => void } {
+/**
+ * Scratch dirs for one generator run: a declaration dir and an out dir.
+ *
+ * The declaration is written under `<sourcePreset>.patch.yml`, because
+ * `findSourcePreset` looks the file up by the requested source's own name.
+ * Writing it as `standard.patch.yml` while passing `--source-preset cordis`
+ * makes the generator fail with "no cordis declaration found", so the two
+ * must agree.
+ * @param declaration - the host declaration text to place in the scratch dir.
+ * @param sourcePreset - filename stem the generator will look for.
+ */
+function scratch(
+  declaration: string,
+  sourcePreset = 'standard',
+): { presetsDir: string; outDir: string; cleanup: () => void } {
   const base = mkdtempSync(join(tmpdir(), 'dsh-web-preset-'))
   const presetsDir = join(base, 'presets')
   const outDir = join(base, 'out')
   mkdirSync(presetsDir, { recursive: true })
-  writeFileSync(join(presetsDir, 'standard.patch.yml'), declaration)
+  writeFileSync(join(presetsDir, `${sourcePreset}.patch.yml`), declaration)
   return { presetsDir, outDir, cleanup: () => { rmSync(base, { recursive: true, force: true }) } }
 }
 
