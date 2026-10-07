@@ -635,7 +635,17 @@ describe('bundle patch against the real host tree', () => {
 })
 
 describe('the shipped declaration loads through the real preset registry', () => {
-  it('selecting standard-rollover resolves the session compaction service to THIS engine', async () => {
+  /**
+   * Boot the real host composition with this bundle installed, mount `presetId`
+   * on one fresh session, and hand back what the preset tests assert on.
+   *
+   * Shared by both preset tests so the two cannot drift into measuring
+   * different trees. The caller owns disposal: call `dispose()` in a `finally`.
+   * @param presetId - the preset to mount on the session.
+   * @returns the booted context, its registry, the session's agent and
+   *   compaction service, the composition inventory, and a disposer.
+   */
+  async function bootPreset(presetId: string) {
     const anchor = builtInstallationAnchor()
     const work = mkdtempSync(join(tmpdir(), 'dsh-web-preset-boot-'))
     bootCleanup.push(() => { rmSync(work, { recursive: true, force: true }) })
@@ -756,11 +766,37 @@ describe('the shipped declaration loads through the real preset registry', () =>
 
       const handle = await ctx.agents.create({
         sessionId: SessionId('web-preset-resolution'),
-        setup: async (agentCtx: Context) => { await registry!.mount(agentCtx, 'standard-rollover') },
+        setup: async (agentCtx: Context) => { await registry!.mount(agentCtx, presetId) },
       })
       const agent: Agent = handle.agent
       const service = registry!.serviceFor(agent, 'compaction') as CompactionEngine | undefined
       expect(service).toBeDefined()
+      const inventory = await registry!.compositionInventory()
+      return {
+        ctx,
+        registry: registry!,
+        agent,
+        service,
+        inventory,
+        engineName,
+        dispose: async () => {
+          await ctx?.fiber.dispose()
+          if (previousHome === undefined) delete process.env.DSH_HOME
+          else process.env.DSH_HOME = previousHome
+        },
+      }
+    } catch (error: unknown) {
+      await ctx?.fiber.dispose()
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      throw error
+    }
+  }
+
+  it('selecting standard-rollover resolves the session compaction service to THIS engine', async () => {
+    const booted = await bootPreset('standard-rollover')
+    try {
+      const { service, inventory, engineName } = booted
       // The row RESOLVED and mounted: this engine, not the host's summarizer.
       expect(service?.constructor.name).toBe('ContextRolloverEngine')
       expect(service?.constructor.name).not.toBe('BasicCompactionEngine')
@@ -774,14 +810,49 @@ describe('the shipped declaration loads through the real preset registry', () =>
         handoffPattern: 'HANDOFF-*.md',
       })
       // The mounted composition carries this engine's row and no summarizer.
-      const inventory = await registry!.compositionInventory()
       const rows = inventory.find(row => row.id === 'standard-rollover')?.rows ?? []
       expect(rows.map(row => row.moduleName)).toContain(engineName)
       expect(rows.map(row => row.entryId)).not.toContain('compaction-basic')
     } finally {
-      await ctx?.fiber.dispose()
-      if (previousHome === undefined) delete process.env.DSH_HOME
-      else process.env.DSH_HOME = previousHome
+      await booted.dispose()
+    }
+  })
+
+  it('selecting local-cordis mounts THIS engine and reaches the model with Creator Mode tools', async () => {
+    const booted = await bootPreset('local-cordis')
+    try {
+      const { ctx, agent, service, inventory, engineName } = booted
+      // A cordis-derived session runs THIS engine, not the shipped summarizer.
+      expect(service?.constructor.name).toBe('ContextRolloverEngine')
+      expect(service?.constructor.name).not.toBe('BasicCompactionEngine')
+
+      const rows = inventory.find(row => row.id === 'local-cordis')?.rows ?? []
+      const modules = rows.map(row => row.moduleName)
+      expect(modules).toContain(engineName)
+      // Creator Mode's own contributions survived the derivation. Both are
+      // checked, because either could be dropped independently: `tool-cordis`
+      // is the preset-authoring tool, and `skill-filesystem` is the row that
+      // carries `customSkillDirs` pointing at the preset-authoring skills.
+      expect(modules).toContain('@deepseek-ai/dsh-tool-cordis')
+      expect(modules).toContain('@deepseek-ai/dsh-skill-filesystem')
+      expect(rows.map(row => row.entryId)).toContain('skill-filesystem')
+      expect(rows.map(row => row.entryId)).not.toContain('compaction-basic')
+
+      // The model actually receives the rollover tools. Without
+      // `modelSurface: 'always'` the engine mounts and the model sees nothing,
+      // which is the failure this assertion exists to catch.
+      const tools = ctx.get('tools') as { schemas(scope?: unknown): { name: string }[] }
+      const visible = tools.schemas(agent).map(tool => tool.name)
+      for (const name of ['new_context', 'get_context_remaining', 'notes', 'history']) {
+        expect(visible, `local-cordis session must see ${name}`).toContain(name)
+      }
+      expect(visible).toContain('cordis_inspect_list')
+
+      // The shipped `cordis` preset is unaffected: it still runs the summarizer.
+      const cordisRows = inventory.find(row => row.id === 'cordis')?.rows ?? []
+      expect(cordisRows.map(row => row.entryId)).toContain('compaction-basic')
+    } finally {
+      await booted.dispose()
     }
   }, 300_000)
 })
