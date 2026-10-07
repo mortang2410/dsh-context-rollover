@@ -60,6 +60,12 @@ const COMMITTED = join(repoRoot, 'presets', 'standard-rollover', 'declaration.pa
 /** The checked-in byte-for-byte copy of the running host's `standard` declaration. */
 const HOST_FIXTURE = join(repoRoot, 'tests', 'fixtures', 'host', 'standard.patch.yml')
 
+/** The checked-in byte-for-byte copy of the running host's `cordis` declaration. */
+const CORDIS_FIXTURE = join(repoRoot, 'tests', 'fixtures', 'host', 'cordis.patch.yml')
+
+/** The generated cordis-derived declaration: the second shipped artifact. */
+const COMMITTED_LOCAL_CORDIS = join(repoRoot, 'presets', 'local-cordis', 'declaration.patch.yml')
+
 /**
  * SHA-256 of the running host's `dsh-web-app/presets/standard.patch.yml`
  * (DSH 0.2.0-rc.2). The committed fixture must stay that exact file: the
@@ -133,6 +139,11 @@ function escapeRegExp(text: string): string {
 /** The real host fixture text, the shape the generator anchors on. */
 function hostDeclaration(): string {
   return readFileSync(HOST_FIXTURE, 'utf8')
+}
+
+/** The real host's `cordis` fixture text, the shape a cordis-derived preset anchors on. */
+function cordisDeclaration(): string {
+  return readFileSync(CORDIS_FIXTURE, 'utf8')
 }
 
 /**
@@ -462,6 +473,115 @@ describe('make-web-preset', () => {
     expect(message).toContain('/handoff-doc')
     expect(message).toContain('new_context')
     expect(message).toContain('{percent}')
+  })
+
+  it('derives a cordis-sourced preset under a new id, keeping Creator Mode tools', () => {
+    const { presetsDir, outDir, cleanup } = scratch(cordisDeclaration(), 'cordis')
+    try {
+      const output = run([
+        '--presets-dir', presetsDir, '--out-dir', outDir,
+        '--source-preset', 'cordis', '--preset-id', 'local-cordis',
+      ])
+      expect(output).toContain('local-cordis')
+      const generated = readFileSync(join(outDir, 'local-cordis', 'declaration.patch.yml'), 'utf8')
+      expect(generated).toContain('    - id: preset-local-cordis\n')
+      expect(generated).toContain('        id: local-cordis\n')
+      expect(generated).toContain('        name: "Local Cordis"\n')
+      expect(generated).toContain('        order: 5\n')
+      expect(generated).toContain('              - id: context-rollover\n')
+      expect(generated).not.toContain('compaction-basic')
+      expect(generated).toContain('          - id: tool-cordis\n')
+    } finally { cleanup() }
+  })
+
+  it('rejects an unknown source preset', () => {
+    const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
+    try {
+      expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir, '--source-preset', 'nope']))
+        .toThrow(/unknown --source-preset/)
+      // A misspelled FLAG must fail too. Without the allow-list in Task 2
+      // Step 4 this exits 0 and silently derives from standard.
+      expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir, '--source-presett', 'cordis']))
+        .toThrow(/unknown option --source-presett/)
+    } finally { cleanup() }
+  })
+
+  it('rejects a known source whose declaration is absent from the presets dir', () => {
+    // The scratch dir holds only standard.patch.yml, so asking for cordis must
+    // fail rather than silently deriving from standard.
+    const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
+    try {
+      expect(() => run(['--presets-dir', presetsDir, '--out-dir', outDir, '--source-preset', 'cordis']))
+        .toThrow(/no "cordis" declaration found/)
+    } finally { cleanup() }
+  })
+
+  it('committed local-cordis matches a fresh sync of the checked-in cordis fixture', () => {
+    const { presetsDir, outDir, cleanup } = scratch(cordisDeclaration(), 'cordis')
+    try {
+      run([
+        '--presets-dir', presetsDir, '--out-dir', outDir,
+        '--source-preset', 'cordis', '--preset-id', 'local-cordis',
+      ])
+      expect(readFileSync(join(outDir, 'local-cordis', 'declaration.patch.yml'), 'utf8'))
+        .toBe(readFileSync(COMMITTED_LOCAL_CORDIS, 'utf8'))
+    } finally { cleanup() }
+  })
+
+  it('the committed local-cordis artifact keeps the cordis-only content, asserted directly', () => {
+    // Deliberately NOT a regeneration: this reads the committed artifact and
+    // the fixture, so a transform which silently dropped or MOVED the
+    // cordis-only content cannot pass by comparing its own output with itself.
+    const committed = readFileSync(COMMITTED_LOCAL_CORDIS, 'utf8')
+    const fixture = cordisDeclaration()
+
+    // The row id unique to cordis.
+    expect(committed).toContain('          - id: tool-cordis\n')
+    expect(fixture).toContain('          - id: tool-cordis\n')
+
+    // The config cordis adds to a row that standard ALSO has. A file-wide
+    // substring check is not enough: a transform could leave the
+    // `customSkillDirs` block in the file while detaching it from its row, or
+    // attach it to a different row. So locate the row and read its own block.
+    const rowBlock = (text: string, rowId: string): string => {
+      const lines = text.split('\n')
+      // Exactly one match. `findIndex` alone would silently take the first of
+      // two same-id rows, so a fixture that gained a duplicate could pass by
+      // inspecting the wrong one.
+      const starts = lines
+        .map((line, index) => (line.trim() === `- id: ${rowId}` ? index : -1))
+        .filter(index => index >= 0)
+      expect(starts, `${rowId} must appear exactly once`).toHaveLength(1)
+      const start = starts[0]!
+      const indent = lines[start]!.search(/\S/)
+      const block = [lines[start]!]
+      for (const line of lines.slice(start + 1)) {
+        if (line.trim() === '') continue
+        if (line.search(/\S/) <= indent) break
+        block.push(line)
+      }
+      return block.join('\n')
+    }
+
+    const committedSkills = rowBlock(committed, 'skill-filesystem')
+    const fixtureSkills = rowBlock(fixture, 'skill-filesystem')
+    expect(fixtureSkills).toContain('customSkillDirs:')
+    // Equality, not substring: the transform preserves this row's block byte
+    // for byte (measured: a real transform run leaves it identical), so a
+    // substring check would accept a truncated value — dropping the trailing
+    // `'skills'` argument would still contain `customSkillDirs:` and
+    // `dsh-agent-preset/package.json` while pointing the skill directory at the
+    // package root instead of its `skills/` subdirectory.
+    expect(committedSkills).toBe(fixtureSkills)
+    expect(committedSkills).toContain("'skills'")
+
+    // And the preset-authoring tool row is NOT where that config ended up.
+    expect(rowBlock(committed, 'tool-cordis')).not.toContain('customSkillDirs:')
+  })
+
+  it('the checked-in cordis fixture is the running host declaration, byte for byte', () => {
+    expect(createHash('sha256').update(cordisDeclaration()).digest('hex'))
+      .toBe('b74d71901b692f11111d02d20072735b2fe94b74744ee7e3bfdc5d972f1a3aa5')
   })
 })
 
