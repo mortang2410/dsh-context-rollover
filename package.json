@@ -31,7 +31,8 @@
     "bundle": {
       "patch": [
         "./cordis.patch.yml",
-        "./presets/standard-rollover/declaration.patch.yml"
+        "./presets/standard-rollover/declaration.patch.yml",
+        "./presets/local-cordis/declaration.patch.yml"
       ]
     }
   },

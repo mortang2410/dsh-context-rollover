@@ -526,11 +526,10 @@ describe('the shipped declaration loads through the real preset registry', () =>
     ], { cwd: repoRoot, stdio: 'pipe' })
     const engineName = manifest.name
     cpSync(join(repoRoot, 'cordis.patch.yml'), join(engineDir, 'cordis.patch.yml'))
-    cpSync(
-      join(repoRoot, 'presets', 'standard-rollover'),
-      join(engineDir, 'presets', 'standard-rollover'),
-      { recursive: true },
-    )
+    // The whole presets tree, because the manifest's patch list now names both
+    // declarations: copying only standard-rollover leaves the local-cordis
+    // overlay unreadable and `skippedBundles` non-empty.
+    cpSync(join(repoRoot, 'presets'), join(engineDir, 'presets'), { recursive: true })
     // The manifest carries the real `peerDependencies`. They are not decoration:
     // the host's linked-root routing reads THE IMPORTING PACKAGE's manifest to
     // decide that a peer of this plugin resolves from the installation closure
