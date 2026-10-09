@@ -8,6 +8,12 @@
 
 import z from '@deepseek-ai/schemastery'
 
+/** The rollover modes a deployment may select. */
+export const ROLLOVER_MODES = ['upstream', 'structured-handoff'] as const
+
+/** One rollover mode: the upstream behavior or the structured-handoff behavior. */
+export type RolloverMode = (typeof ROLLOVER_MODES)[number]
+
 /** Model-facing configuration surface for the rollover engine. */
 export interface RolloverConfig {
   /**
@@ -44,6 +50,12 @@ export interface RolloverConfig {
    * Defaults to `auto`.
    */
   modelSurface?: 'auto' | 'always'
+  /**
+   * Rollover mode. `upstream` keeps the upstream reminder, guidance, and
+   * checkpoint wording; `structured-handoff` selects the structured-handoff
+   * wording and rule. Defaults to `upstream`.
+   */
+  mode?: RolloverMode
 }
 
 /** Schemastery validation for {@link RolloverConfig}. */
@@ -57,6 +69,7 @@ export const Config: z<RolloverConfig> = z.object({
   historyEnabled: z.boolean(),
   notesDir: z.string(),
   modelSurface: z.union(['auto', 'always'] as const),
+  mode: z.union(ROLLOVER_MODES),
 })
 
 /** Resolved and validated rollover configuration. */
@@ -71,6 +84,7 @@ export interface ResolvedRolloverConfig {
   readonly historyEnabled: boolean
   readonly notesDir: string | undefined
   readonly modelSurface: 'auto' | 'always'
+  readonly mode: RolloverMode
 }
 
 /** Reject a ratio that cannot represent a fraction of a context window. */
@@ -113,6 +127,14 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
       `context-rollover: modelSurface must be 'auto' or 'always', got ${String(modelSurface)}`,
     )
   }
+  // An explicit undefined selects the default; any other value, including
+  // null, must name a mode.
+  const mode = config.mode === undefined ? 'upstream' : config.mode
+  if (!ROLLOVER_MODES.includes(mode)) {
+    throw new TypeError(
+      `context-rollover: mode must be 'upstream' or 'structured-handoff', got ${String(mode)}`,
+    )
+  }
   return {
     thresholdRatio,
     reminderThresholdRatio,
@@ -123,5 +145,6 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
     historyEnabled: config.historyEnabled ?? true,
     notesDir: config.notesDir,
     modelSurface,
+    mode,
   }
 }

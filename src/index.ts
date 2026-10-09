@@ -25,10 +25,11 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { Seq } from './compat.ts'
-import { resolveConfig } from './config.ts'
+import { resolveConfig, ROLLOVER_MODES } from './config.ts'
 import type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
 import type { RolloverReason } from './checkpoint.ts'
-import { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
+import { buildContextManagementGuidance } from './guidance.ts'
+import { buildReminderText } from './reminder.ts'
 import { NotesStore } from './notes.ts'
 import { sessionEventAt } from './compat.ts'
 import {
@@ -73,7 +74,7 @@ function concreteCompaction(engine: CompactionEngine): CompactionEngine {
   return (engine as CompactionEngine & { [symbols.original]?: CompactionEngine })[symbols.original] ?? engine
 }
 
-export type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
+export type { RolloverConfig, ResolvedRolloverConfig, RolloverMode } from './config.ts'
 export { buildCheckpointText } from './checkpoint.ts'
 export { NotesStore, resolveNotePath } from './notes.ts'
 export { collectHistory, readHistoryItem, searchHistory } from './history.ts'
@@ -106,6 +107,7 @@ export class ContextRolloverEngine extends CompactionEngine {
     historyEnabled: z.boolean(),
     notesDir: z.string(),
     modelSurface: z.union(['auto', 'always'] as const),
+    mode: z.union(ROLLOVER_MODES),
   })
 
   /** Resolved and validated configuration. */
@@ -144,7 +146,7 @@ export class ContextRolloverEngine extends CompactionEngine {
     this.ctx.systemPrompt.section({
       name: 'context:rollover',
       order: 2350,
-      text: CONTEXT_MANAGEMENT_GUIDANCE,
+      text: buildContextManagementGuidance(this.config.mode),
     })
   }
 
@@ -252,10 +254,13 @@ export class ContextRolloverEngine extends CompactionEngine {
     return createUserMessage({
       content: [{
         type: 'text',
-        text:
-          `Context window: ${percent}% used (~${measurement.totalTokens} of ${contextWindow} tokens). `
-          + `An automatic rollover starts around ${rolloverTokens} tokens. If a task boundary is near, `
-          + 'save what matters to notes and call new_context with a short handoff; otherwise checkpoint soon.',
+        text: buildReminderText({
+          mode: this.config.mode,
+          percent,
+          totalTokens: measurement.totalTokens,
+          contextWindow,
+          rolloverTokens,
+        }),
       }],
       source: {
         kind: PLUGIN_NAME,
@@ -329,6 +334,7 @@ export class ContextRolloverEngine extends CompactionEngine {
           windowNumber,
           notes,
           handoff: request.handoff,
+          mode: this.config.mode,
         },
       },
     )
@@ -450,6 +456,7 @@ export class ContextRolloverEngine extends CompactionEngine {
             windowNumber,
             notes,
             handoff: null,
+            mode: this.config.mode,
           },
           flush: async () => {
             await this.ctx.sessions.flush(session)
@@ -495,6 +502,7 @@ export class ContextRolloverEngine extends CompactionEngine {
           windowNumber,
           notes,
           handoff: null,
+          mode: this.config.mode,
         },
       },
     )

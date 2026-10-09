@@ -7,6 +7,8 @@
  * @module dsh-context-rollover/checkpoint
  */
 
+import type { RolloverMode } from './config.ts'
+
 /** Why a context window rolled over. */
 export type RolloverReason = 'model-requested' | 'pressure' | 'overflow' | 'manual'
 
@@ -19,6 +21,12 @@ export interface CheckpointInput {
   readonly notes: string | null
   /** The model's own handoff text, or `null` when absent. */
   readonly handoff: string | null
+  /**
+   * The rollover mode the checkpoint is rendered under. Absent means
+   * `upstream`. Both modes render the upstream checkpoint until the
+   * structured-handoff render rule lands.
+   */
+  readonly mode?: RolloverMode
 }
 
 /** Wrap checkpoint text in the rollover markers. */

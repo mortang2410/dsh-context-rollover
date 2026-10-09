@@ -5,6 +5,8 @@
  * @module dsh-context-rollover/guidance
  */
 
+import type { RolloverMode } from './config.ts'
+
 /** System-prompt section text for the context-management plugin. */
 export const CONTEXT_MANAGEMENT_GUIDANCE = `
 # Context management
@@ -32,3 +34,20 @@ tool.
   did not receive is a fabrication even when the guess sounds plausible.
 - A reminder near the automatic rollover point appears at most once per window.
 `.trim()
+
+/**
+ * The guidance text for one rollover mode. Both modes emit the upstream text
+ * until the structured-handoff wording lands; the mode already reaches this
+ * builder, so that wording becomes a table entry rather than a new call path.
+ * @param mode - the resolved rollover mode.
+ * @returns the system-prompt section text for that mode.
+ */
+export function buildContextManagementGuidance(mode: RolloverMode): string {
+  return GUIDANCE_BY_MODE[mode]
+}
+
+/** Guidance text keyed by rollover mode. */
+const GUIDANCE_BY_MODE: Readonly<Record<RolloverMode, string>> = {
+  upstream: CONTEXT_MANAGEMENT_GUIDANCE,
+  'structured-handoff': CONTEXT_MANAGEMENT_GUIDANCE,
+}
