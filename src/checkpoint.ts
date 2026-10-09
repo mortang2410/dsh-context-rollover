@@ -22,9 +22,9 @@ export interface CheckpointInput {
   /** The model's own handoff text, or `null` when absent. */
   readonly handoff: string | null
   /**
-   * The rollover mode the checkpoint is rendered under. Absent means
-   * `upstream`. Both modes render the upstream checkpoint until the
-   * structured-handoff render rule lands.
+   * The rollover mode the notes snapshot was rendered under. Absent means
+   * `upstream`. The checkpoint text does not branch on the mode; the notes
+   * render does.
    */
   readonly mode?: RolloverMode
 }

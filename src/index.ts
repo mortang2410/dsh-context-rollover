@@ -321,7 +321,7 @@ export class ContextRolloverEngine extends CompactionEngine {
       return null
     }
     const notes = this.config.notesEnabled
-      ? await this.notesStore(session).renderAll(this.config.handoffMaxChars)
+      ? await this.notesStore(session).renderCheckpoint(this.config.handoffMaxChars, this.config.mode)
       : null
     const windowNumber = countRollovers(session) + 1
     const result = await commitRollover(
@@ -442,7 +442,7 @@ export class ContextRolloverEngine extends CompactionEngine {
       )
       if (range === null) return null
       const notes = this.config.notesEnabled
-        ? await this.notesStore(session).renderAll(this.config.handoffMaxChars)
+        ? await this.notesStore(session).renderCheckpoint(this.config.handoffMaxChars, this.config.mode)
         : null
       const windowNumber = countRollovers(session) + 1
       return commitRollover(
@@ -489,7 +489,7 @@ export class ContextRolloverEngine extends CompactionEngine {
     }
     const session = agent.session
     const notes = this.config.notesEnabled
-      ? await this.notesStore(session).renderAll(this.config.handoffMaxChars)
+      ? await this.notesStore(session).renderCheckpoint(this.config.handoffMaxChars, this.config.mode)
       : null
     const windowNumber = countRollovers(session) + 1
     return commitRollover(
