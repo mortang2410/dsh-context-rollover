@@ -11,10 +11,12 @@
 import { mkdtemp, rm, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { afterEach, describe, expect, it } from 'vitest'
 import { isHandoffNotePath, NotesStore } from '../src/notes.ts'
 import { countRollovers } from '../src/rollover.ts'
 import {
+  closedConversation,
   derivedTexts,
   engineHarness,
   followup,
@@ -250,6 +252,27 @@ describe('rollover through the engine', () => {
     ]))
     await seedExchanges(agent, 20)
     await followup(agent, 'Research is done; roll over and implement.')
+
+    expect(countRollovers(session)).toBe(1)
+    const texts = derivedTexts(session).join('\n')
+    expect(texts).toContain(`## Durable notes\n### ${NEWER}\nNEWER BODY`)
+    expect(texts).not.toContain(OLDER)
+  })
+
+  it('renders the newest handoff first on a forced-span rollover under structured-handoff', async () => {
+    const { engine, notesBase } = await engineHarness('structured-region', { mode: 'structured-handoff' })
+    const session = closedConversation(8)
+    const store = new NotesStore(NotesStore.directoryFor(session.id, notesBase))
+    await writeNote(store, OLDER, 'OLDER BODY', 0)
+    await writeNote(store, NEWER, 'NEWER BODY', 10)
+    session.append('turn/start', { turn: 5 })
+    const fakeAgent = { session, options: {} } as Agent
+    const nodes = session.surface.nodes
+    const start = nodes[0]
+    const end = nodes[nodes.length - 1]
+    if (start === undefined || end === undefined) throw new Error('expected surface nodes')
+
+    await engine.compactRegion(start, end, fakeAgent)
 
     expect(countRollovers(session)).toBe(1)
     const texts = derivedTexts(session).join('\n')
