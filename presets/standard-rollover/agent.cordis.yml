@@ -9,12 +9,12 @@
 # stack, persistence, and the model route.
 #
 # A service row here MUST sit inside a group carrying an `isolate` realm.
-# Without one it publishes into the root realm, where it is process-global —
+# Without one it publishes into the root realm, where it is process-global:
 # another preset publishing the same name collides, and a host reader would
 # resolve one preset's instance for every session; `dsh-agent-presets` rejects
 # that at mount. `true` means an entry-local realm: this standing mount's own
 # private instance, apart from every other preset's. (A shared label does NOT
-# pool instances — `provide()` throws on the second registration under the
+# pool instances: `provide()` throws on the second registration under the
 # same realm symbol; labels join REALMS, and are not what this file needs.)
 
 # ── identity ────────────────────────────────────────────────────────────────
@@ -37,7 +37,7 @@
 
 # `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to
 # publish `DSH_WEB_URL`/`DSH_WEB_MODE`, and a host row that injects a service is
-# the criterion for host-plane ownership — injection resolves before any session
+# the criterion for host-plane ownership: injection resolves before any session
 # exists, so there is no agent to key by. Behind a preset realm those variables
 # never reached the model's shell at all. Both shell tools consume the host
 # registry from here; their executors (`bash-sandbox`/`pwsh-sandbox`) are
@@ -65,7 +65,7 @@
 # ── background jobs ────────────────────────────────────────────────────────
 
 # Only the model-facing controls. The task REGISTRY stays on the host plane:
-# its producers sit outside any realm this file could put it in — `tool-bash`
+# its producers sit outside any realm this file could put it in: `tool-bash`
 # above resolves it with `ctx.get`, and an entry-local realm here is invisible
 # to every sibling row, so `run_in_background` would answer "background jobs
 # unavailable" while these controls sat in the catalog. The registry is keyed by
@@ -101,7 +101,7 @@
 # ── plan mode ───────────────────────────────────────────────────────────────
 
 # Plan state is per-agent by nature, so an entry-local realm is not a
-# workaround here — it is the correct lifetime.
+# workaround here: it is the correct lifetime.
 - id: planning
   name: cordis:group
   group: true
@@ -132,7 +132,7 @@
 # `tokenMeter` is deliberately NOT in this realm: the meter stays on the HOST
 # plane, and the rows here resolve that one instance. It takes no configuration,
 # keys every fold by Session, and owns the context-meter projection units the
-# browser reads for every session — behind a realm those units would come and go
+# browser reads for every session: behind a realm those units would come and go
 # with whichever presets happen to be mounted. What a preset chooses is whether
 # its agent compacts at all, which is `compaction-basic` below.
 - id: compaction
@@ -172,7 +172,7 @@
 # registered once. This preset contributes the delegation TOOLS, which resolve
 # that host registry.
 #
-# `workflows` is different — nothing outside an agent reads it — so every row
+# `workflows` is different: nothing outside an agent reads it, so every row
 # that reaches it shares one entry-local realm here, and a consumer left
 # outside would resolve a host registry this preset does not populate.
 - id: delegation

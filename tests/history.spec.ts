@@ -13,7 +13,7 @@ import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { Session } from '@deepseek-ai/dsh-session'
 import { collectHistory, readHistoryItem, searchHistory } from '../src/history.ts'
-import { commitRollover, countRollovers, rolloverSummarySeqs, selectRolloverRange } from '../src/rollover.ts'
+import { commitRollover, countRollovers, PLUGIN_NAME, rolloverSummarySeqs, selectRolloverRange } from '../src/rollover.ts'
 import { appendExchange, closedConversation } from './harness.ts'
 
 /** A meter on a bare context, for direct transaction tests. */
@@ -151,12 +151,14 @@ describe('history', () => {
   })
 
   it('excludes plugin-injected notices while keeping conversation kinds', async () => {
-    const session = closedConversation(2)
+    // Padded so the shadowed span genuinely exceeds the checkpoint's own price
+    // (the shrink guard refuses a replacement that is not strictly smaller).
+    const session = closedConversation(2, 10)
     // A pressure-reminder-shaped plugin notice on the surface, like the
     // engine's one-per-window checkpoint reminder.
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'Context window: 80% used reminder marker xyz' }],
-      source: { kind: 'plugin', plugin: 'context-rollover', form: 'notice', summary: 'context pressure reminder' },
+      source: { kind: PLUGIN_NAME, form: 'notice', summary: 'context pressure reminder' },
     }), { surfaceOp: 'append' })
     // Later conversation pushes the notice off the retained tail so the
     // rollover genuinely shadows it (a zero tail budget keeps the last node).

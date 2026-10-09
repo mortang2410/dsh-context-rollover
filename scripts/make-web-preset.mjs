@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Regenerate the shipped `standard-rollover` agent preset from the harness's
- * shipped `standard` composition, swapping only the compaction engine row.
+ * Regenerate the shipped `standard-rollover` agent preset from the `standard`
+ * composition this repo checks in (tests/fixtures/standard/agent.cordis.yml),
+ * swapping only the compaction engine row.
  *
  * Maintainer tooling (`pnpm preset:sync`), not a user command: Web users get
  * the preset automatically through the bundle's preset-root registration, and
@@ -37,14 +38,19 @@ const BASIC_ROW = `    - id: compaction-basic\n      name: '@deepseek-ai/dsh-com
 
 /**
  * Candidate roots holding shipped presets (`<root>/standard/agent.cordis.yml`):
- * explicit `--presets-dir` first, then the sibling DSH checkout this repo
- * develops against.
+ * explicit `--presets-dir` first, then the checked-in fixture this repo owns.
+ *
+ * The running host ships its presets as `.patch.yml` declarations rather than
+ * `<id>/agent.cordis.yml` directories, so there is no harness path to read
+ * them from. `tests/fixtures/standard/agent.cordis.yml` carries exactly the
+ * shipped `standard` rows instead, which is what the sync transforms and what
+ * the web-preset test regenerates from.
  * @param presetsDir - value of `--presets-dir`, when given.
  * @returns candidate preset-root directories, nearest first.
  */
 export function candidatePresetRoots(presetsDir) {
   if (presetsDir !== undefined) return [resolve(presetsDir)]
-  return [join(packageDir, '..', 'deepseek-harness', 'packages', 'preset', 'agent-presets', 'presets')]
+  return [join(packageDir, 'tests', 'fixtures')]
 }
 
 /**
@@ -60,7 +66,7 @@ export function findSourcePreset(presetsDir, source = SOURCE_PRESET) {
     if (existsSync(file)) return file
   }
   throw new Error(
-    `make-web-preset: no "${source}" preset found; pass --presets-dir <harness>/packages/preset/agent-presets/presets`,
+    `make-web-preset: no "${source}" preset found; pass --presets-dir <dir> holding <dir>/${source}/agent.cordis.yml`,
   )
 }
 
@@ -196,7 +202,7 @@ export function printHelp() {
   console.log(`make-web-preset: regenerate the shipped standard-rollover preset (maintainer sync)
 
 Options:
-  --presets-dir <dir>     shipped presets root (default: sibling DSH checkout)
+  --presets-dir <dir>     presets root holding standard/ (default: tests/fixtures)
   --out-dir <dir>         presets root to write into (default: this package's presets/)
   --preset-id <id>        generated preset id (default: ${DEFAULT_PRESET_ID})
   --threshold-ratio <n>   auto-rollover point, fraction of window (default: 0.9)

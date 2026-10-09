@@ -21,7 +21,7 @@ import {
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ContextFormed } from '@deepseek-ai/dsh-llm'
 import type TokenMeter from '@deepseek-ai/dsh-token-meter'
 import type { TokenMeasurement } from '@deepseek-ai/dsh-token-meter'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -31,10 +31,23 @@ import { buildCheckpointText } from './checkpoint.ts'
 import type { CheckpointInput, RolloverReason } from './checkpoint.ts'
 
 /**
- * Cordis plugin name this engine registers under, as it appears in message
- * `source.plugin` and in loader diagnostics.
+ * Cordis plugin name this engine registers under, and the message-source
+ * `kind` every message this engine injects carries. The host has no catch-all
+ * `plugin` kind: a producer declares its own through the `MessageSourceMap`
+ * merge point below, so this one constant names the engine in loader
+ * diagnostics *and* attributes its injected messages.
  */
 export const PLUGIN_NAME = 'context-rollover'
+
+// The engine is a message producer, so it declares its own source kind at the
+// host's documented merge point (the pattern shipped plugins use). The
+// declaration is keyed and typed by PLUGIN_NAME, so the sender in index.ts and
+// isPressureReminder below cannot disagree about the kind.
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    [PLUGIN_NAME]: { kind: typeof PLUGIN_NAME } & ContextFormed
+  }
+}
 
 /**
  * Prefix of the pressure reminder's message summary.
@@ -413,12 +426,13 @@ export function reminderWindowKey(session: Session): string {
 /**
  * The one definition of "this event is a pressure reminder".
  *
- * The source carries the engine's own plugin name, which is not the package
- * name: a predicate keyed on `dsh-context-rollover` never matches anything the
- * engine writes, and silently disables whatever depends on it. The summary
- * prefix is shared with the sender for the same reason. Every consumer — the
- * delivery check below and the test harness — reads this predicate, so the
- * definition cannot drift again.
+ * The source carries the engine's own plugin name as its source kind, which is
+ * not the package name: a predicate keyed on `dsh-context-rollover` never
+ * matches anything the engine writes, and silently disables whatever depends
+ * on it. Both the kind and the summary prefix come from the shared constants
+ * the sender uses for the same reason. Every consumer (the delivery check
+ * below and the test harness) reads this predicate, so the definition cannot
+ * drift again.
  * @param event - one logged session event.
  * @returns true when the event is this engine's pressure reminder, narrowing
  *   the event to a `user/message` for the caller.
@@ -426,10 +440,8 @@ export function reminderWindowKey(session: Session): string {
 export function isPressureReminder(event: SessionEvent): event is SessionEvent<'user/message'> {
   if (event.type !== 'user/message') return false
   const { source } = event.data
-  return source.kind === 'plugin'
-    && 'plugin' in source
-    && source.plugin === PLUGIN_NAME
-    && source.form === 'notice'
+  if (source.kind !== PLUGIN_NAME) return false
+  return source.form === 'notice'
     && source.summary.startsWith(REMINDER_SUMMARY_PREFIX)
 }
 

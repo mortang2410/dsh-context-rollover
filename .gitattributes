@@ -1,3 +1,7 @@
 # The web-preset test byte-compares these against generator output (LF).
 # Without this, Windows checkouts get CRLF and the test fails.
 presets/** -text
+
+# The generator's `standard` source: its bytes are copied verbatim into the
+# generated preset above, so it must be LF on every checkout too.
+tests/fixtures/standard/agent.cordis.yml -text
