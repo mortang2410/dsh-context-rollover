@@ -187,19 +187,20 @@ No commands, no profile edits. Two behaviors make that hold:
 
 Custom thresholds belong to your own preset copy (the supported customization
 flow: copy `standard-rollover` in the picker and edit the `context-rollover`
-row) — the shipped preset carries the defaults below. If a deployment
-restates the whole `agent-presets` config in a later patch layer, that layer
-wins and hides the shipped preset; re-adding the bundle's root there
-restores it. Uninstalling the bundle removes the preset: sessions already on
-it keep running, new ones must pick another preset.
+row) — the shipped preset carries the defaults below. A later patch layer can override the shipped declaration by its row id
+`preset-standard-rollover`; that override replaces the row's whole config, so it
+must restate `id`, `plugins`, `name`, `description`, and `order`. Uninstalling
+the bundle removes the preset: sessions already on it keep running, new ones
+must pick another preset.
 
-Maintainers: `presets/standard-rollover/` is generated, not authored —
+Maintainers: `presets/standard-rollover.patch.yml` is generated, not authored —
 re-run `pnpm preset:sync` after harness updates and commit the refresh. The
 sync reads `tests/fixtures/standard/agent.cordis.yml`, which carries the
 shipped `standard` rows this repo controls (the running host declares its
 presets as `.patch.yml` files, not `standard/agent.cordis.yml` directories),
-keeps everything else byte-identical, and fails loud when the `standard` shape
-drifts.
+wraps them in the host's `preset-standard-rollover` declaration, keeps every
+other row unchanged apart from the indent that declaration needs, and fails loud
+when the `standard` shape drifts.
 
 Configuration (cordis.yml `config` on the plugin row):
 

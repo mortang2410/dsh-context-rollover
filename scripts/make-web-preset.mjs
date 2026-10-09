@@ -5,12 +5,13 @@
  * swapping only the compaction engine row.
  *
  * Maintainer tooling (`pnpm preset:sync`), not a user command: Web users get
- * the preset automatically through the bundle's preset-root registration, and
- * customize it through the supported preset-copy flow. Re-run after harness
- * updates and commit the refreshed `presets/` directory.
+ * the preset automatically through the bundle's patch list, and customize it
+ * through the supported preset-copy flow. Re-run after harness updates and
+ * commit the refreshed `presets/standard-rollover.patch.yml`.
  *
  * Plain Node with no dependencies. The transform keeps everything else in the
- * composition byte-identical and fails loud when the shipped shape drifts.
+ * composition byte-identical (apart from the indentation the declaration
+ * needs) and fails loud when the shipped shape drifts.
  *
  * Usage:
  *   node scripts/make-web-preset.mjs [--presets-dir <dir>] [--out-dir <dir>]
@@ -19,7 +20,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -27,8 +28,16 @@ const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 /** Id of the shipped preset the generated preset derives from. */
 const SOURCE_PRESET = 'standard'
 
-/** Default id (directory name) of the generated preset. */
+/** Default id of the generated preset (its declaration file is `<id>.patch.yml`). */
 const DEFAULT_PRESET_ID = 'standard-rollover'
+
+/** Display fields and roster order of the generated preset declaration. */
+const PRESET_NAME = 'Standard + rollover (experimental)'
+const PRESET_DESCRIPTION = 'Full coding agent with model-driven context rollover instead of summarization (generated from standard). Experimental opt-in; standard remains the default.'
+const PRESET_ORDER = 2
+
+/** Indent the composition rows take once they sit under `plugins:` in the declaration. */
+const PLUGINS_INDENT = ' '.repeat(10)
 
 /** Directory names must stay path-contained; mirrors the harness preset rule. */
 const PRESET_ID = /^[a-z0-9][a-z0-9-]*$/
@@ -107,8 +116,7 @@ export function resolveOptions(config) {
 
 /**
  * Render the replacement engine row (same 4-space nesting as the shipped row).
- * @param engineEntry - module specifier of the built engine, as the preset row
- *   names it (relative to the preset directory for shipped presets).
+ * @param engineEntry - installed package name the preset row names (see {@link enginePackageName}).
  * @param options - validated numeric options from {@link resolveOptions}.
  * @returns the row text, without trailing newline.
  */
@@ -133,7 +141,7 @@ export function renderEngineRow(engineEntry, options) {
  * Swap the shipped `compaction-basic` row for the rollover engine row.
  * Everything else in the composition stays byte-identical.
  * @param text - the shipped composition text.
- * @param engineEntry - module specifier of the built engine.
+ * @param engineEntry - installed package name of the rollover engine.
  * @param options - validated numeric options from {@link resolveOptions}.
  * @returns the preset composition text.
  * @throws when the anchor row is absent or carries an unexpected config block.
@@ -163,13 +171,49 @@ export function transformPresetText(text, engineEntry, options) {
 }
 
 /**
- * Render the preset metadata file.
- * @returns the `preset.yml` text.
+ * Package name of the rollover engine. The declaration names the engine by
+ * this name so the loader resolves it from installed packages. A relative
+ * path would not work here: the loader anchors relative names only on
+ * top-level inserted rows, not on the rows nested under a preset's `plugins`.
+ * @returns the `name` field of this package's package.json.
+ * @throws when package.json has no name.
  */
-export function renderPresetMeta() {
-  return `name: Standard + rollover (experimental)\n`
-    + `description: Full coding agent with model-driven context rollover instead of summarization (generated from standard). Experimental opt-in; standard remains the default.\n`
-    + `order: 2\n`
+export function enginePackageName() {
+  const name = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')).name
+  if (typeof name !== 'string' || name === '') {
+    throw new Error('make-web-preset: package.json has no "name" to name the rollover engine by')
+  }
+  return name
+}
+
+/**
+ * Render the host-format preset declaration: one `@deepseek-ai/dsh-agent-preset`
+ * row inserted by a bundle patch file, shaped like the host's shipped
+ * `presets/<id>.patch.yml` files. The composition rows move under `plugins:`
+ * with a uniform indent; blank lines stay blank so block scalars keep their text.
+ * @param presetId - generated preset id, used as the declaration's `config.id`.
+ * @param composition - the transformed composition text, rows at column 0.
+ * @returns the declaration file text.
+ */
+export function renderDeclaration(presetId, composition) {
+  const rows = composition
+    .split('\n')
+    .map(line => (line === '' ? line : PLUGINS_INDENT + line))
+    .join('\n')
+  return `# Agent preset ${presetId}: one \`@deepseek-ai/dsh-agent-preset\` declaration inserted\n`
+    + `# by this bundle's patch list (\`dsh.bundle.patch\` in package.json).\n`
+    + `# Generated by scripts/make-web-preset.mjs. Do not edit by hand; re-run\n`
+    + `# \`npm run preset:sync\` after harness updates.\n`
+    + `- insert:\n`
+    + `    - id: preset-${presetId}\n`
+    + `      name: '@deepseek-ai/dsh-agent-preset'\n`
+    + `      config:\n`
+    + `        id: ${presetId}\n`
+    + `        name: '${PRESET_NAME}'\n`
+    + `        description: '${PRESET_DESCRIPTION}'\n`
+    + `        order: ${PRESET_ORDER}\n`
+    + `        plugins:\n`
+    + rows
 }
 
 /**
@@ -203,7 +247,7 @@ export function printHelp() {
 
 Options:
   --presets-dir <dir>     presets root holding standard/ (default: tests/fixtures)
-  --out-dir <dir>         presets root to write into (default: this package's presets/)
+  --out-dir <dir>         directory to write <id>.patch.yml into (default: this package's presets/)
   --preset-id <id>        generated preset id (default: ${DEFAULT_PRESET_ID})
   --threshold-ratio <n>   auto-rollover point, fraction of window (default: 0.9)
   --reminder-ratio <n>    one-time checkpoint reminder point (default: 0.75)
@@ -243,6 +287,8 @@ export async function main(argv = process.argv.slice(2)) {
   if (flags['retain-tokens'] !== undefined && flags['retain-ratio'] !== undefined) {
     throw new Error('make-web-preset: --retain-tokens and --retain-ratio are exclusive')
   }
+  // The output names the engine as a package, not a built file. The sync still
+  // requires the build, so the package it names is complete when it ships.
   const engineEntryAbs = join(packageDir, 'lib', 'index.js')
   if (!existsSync(engineEntryAbs)) {
     throw new Error(`make-web-preset: built engine missing at ${engineEntryAbs}; run npm run build first`)
@@ -250,21 +296,12 @@ export async function main(argv = process.argv.slice(2)) {
   const source = findSourcePreset(flags['presets-dir'])
   const text = readFileSync(source, 'utf8')
   const outDir = flags['out-dir'] === undefined ? join(packageDir, 'presets') : resolve(flags['out-dir'])
-  const dir = join(outDir, presetId)
-  // The engine specifier stays portable across install layouts: relative from
-  // the preset directory to this package's built entry. A preset on another
-  // drive (or otherwise unreachable relatively) cannot name it, so fail loud.
-  const rawEntry = relative(dir, engineEntryAbs).split(sep).join('/')
-  if (isAbsolute(rawEntry) || rawEntry === '') {
-    throw new Error(`make-web-preset: --out-dir ${outDir} cannot relatively reach ${engineEntryAbs}`)
-  }
-  const entry = rawEntry.startsWith('.') ? rawEntry : `./${rawEntry}`
-  const preset = transformPresetText(text, entry, options)
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'agent.cordis.yml'), preset)
-  writeFileSync(join(dir, 'preset.yml'), renderPresetMeta())
+  const preset = transformPresetText(text, enginePackageName(), options)
+  const file = join(outDir, `${presetId}.patch.yml`)
+  mkdirSync(outDir, { recursive: true })
+  writeFileSync(file, renderDeclaration(presetId, preset))
   console.log(`make-web-preset: derived ${presetId} from ${source}`)
-  console.log(`make-web-preset: wrote ${join(dir, 'agent.cordis.yml')}`)
+  console.log(`make-web-preset: wrote ${file}`)
 }
 
 const invokedDirectly = process.argv[1] !== undefined
