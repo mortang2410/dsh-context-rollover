@@ -221,9 +221,9 @@ export class ContextRolloverEngine extends CompactionEngine {
       { agent, turn, signal },
       next,
     ): Promise<PreStepDecision> => {
-      // A preset-owned session is that preset's backend's responsibility;
-      // without this guard the host engine and the preset backend would race
-      // the same pressure signal and the loser would fail on the lock.
+      // A preset-owned session belongs to that preset's backend. Without this
+      // guard, the host engine would also log its pressure warning and commit
+      // any pending handoff rollover into that session.
       if (!signal.aborted && !this.compactionOwnedElsewhere(agent)) {
         try {
           const pending = this.pendingRollovers.get(agent.session.id)
