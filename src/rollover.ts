@@ -98,27 +98,6 @@ export interface RolloverSizing {
   readonly replacementTokens: number
   /** True when the replacement is strictly smaller than the span it replaces. */
   readonly fits: boolean
-  /**
-   * The exact span these numbers were measured over, in current surface order.
-   *
-   * {@link commitRollover} reuses the accepted numbers as the preflight's own
-   * decision, and that reuse is only sound over a span that still contains the
-   * measured one: a span price taken from a larger span must never stand in for
-   * a smaller one. The seqs are what makes that containment checkable.
-   */
-  readonly shadowedSeqs: readonly Seq[]
-  /**
-   * The exact replacement text these two prices were measured for.
-   *
-   * A price is a claim about one CANDIDATE as well as one span, so the seqs
-   * alone are not enough to make the claim reusable: a caller that sizes a short
-   * document and then commits a much longer one would otherwise commit a
-   * replacement larger than the span it replaces, which is the one outcome the
-   * shrink guard exists to prevent. {@link commitRollover} reuses the numbers
-   * only while this text is still the text being committed, and re-prices when
-   * it is not.
-   */
-  readonly replacementText: string
 }
 
 /**
@@ -170,20 +149,6 @@ export interface CommitRolloverOptions {
   readonly sourceCommandId?: CommandId
   /** Optional durability checkpoint after a successfully closed bracket. */
   readonly flush?: () => Promise<void>
-  /**
-   * A preflight's accepted sizing for this exact span and candidate.
-   *
-   * When present, the transaction's shrink guard decides with these numbers
-   * instead of re-pricing the span. `sizeRolloverReplacement` and this guard
-   * would otherwise each call `meter.measure` and `meter.estimateMessage`
-   * separately, so a `request/header` landing between the two can change route
-   * pricing and make the guard reject what the preflight accepted. Reusing one
-   * snapshot removes that window. The span is still verified against the
-   * surface, and a sizing whose span is not the one being replaced, or whose
-   * text is not the text being committed, is refused rather than trusted, so a
-   * stale snapshot cannot outlive either the span or the candidate it priced.
-   */
-  readonly pinnedSizing?: RolloverSizing
 }
 
 /** How one rollover selects the span it replaces. */
@@ -434,20 +399,15 @@ export function selectRolloverRange(
  * ({@link preflightRolloverReplacement}), so a refused candidate leaves no failed
  * transaction behind.
  *
- * The returned {@link RolloverSizing} carries the span it measured and the text
- * it priced, and callers pass that value on to {@link commitRollover} as
- * `pinnedSizing`. The transaction then reuses these accepted numbers rather
- * than re-pricing the span, so a `request/header` landing between the preflight
- * and the commit cannot make the two disagree about the same candidate. The
- * transaction still verifies that the pinned span is the one it is about to
- * replace and that the pinned text is the candidate it is about to commit, and
- * still refuses when the numbers say that candidate does not fit.
+ * The answer is a prediction, not a reservation. {@link commitRollover} prices
+ * the span and the candidate again when it commits, so a route change between
+ * the preflight and the commit can flip the outcome, and the commit's guard is
+ * the authority.
  * @param dependencies - the conversation meter used for pricing.
  * @param session - session supplying authoritative current surface positions.
  * @param range - the span selected by {@link selectRolloverRange}.
  * @param replacement - the candidate replacement to price.
- * @returns the span price, the replacement price, whether it fits, the span,
- *   and the exact replacement text those prices describe.
+ * @returns the span price, the replacement price, and whether the replacement fits.
  * @throws when the meter's surface does not match the current session surface.
  */
 export function sizeRolloverReplacement(
@@ -476,8 +436,6 @@ export function sizeRolloverReplacement(
     shadowedRouteTokens,
     replacementTokens,
     fits: replacementTokens < shadowedRouteTokens,
-    shadowedSeqs: selectedNodes.map(node => node.seq),
-    replacementText,
   }
 }
 
@@ -616,9 +574,7 @@ export async function commitRollover(
   // opens the transaction. Nothing between here and the lock yields, so the
   // surface cannot move; a refusal therefore leaves the durable log completely
   // untouched instead of a start/error-end bracket recording an attempt that
-  // never had a chance of committing. The prices are read once and reused by
-  // the commit below, so the guard and the caller cannot disagree about the
-  // same candidate.
+  // never had a chance of committing.
   const measurement = dependencies.meter.measure(session)
   const selectedNodes = measurement.nodes.slice(selection.startIdx, selection.endIdx + 1)
   if (selectedNodes.length !== selection.shadowedSeqs.length
@@ -628,26 +584,8 @@ export async function commitRollover(
   const shadowedTokenCount = selectedNodes.reduce((total, node) => total + nodeHeuristicTokens(node), 0)
 
   const replacementText = buildReplacementText(options.replacement)
-  // The shrink decision uses the preflight's accepted numbers when they
-  // describe exactly this candidate over exactly this span, and re-prices here
-  // otherwise. A pinned snapshot is a claim about one span AND one candidate,
-  // so it is reusable only while the surface still puts that same span in the
-  // same order and the text being committed is the text that was priced;
-  // anything else (a landed tool result shifting the tail, or a caller pairing
-  // one candidate's price with another candidate's text) makes the claim stale
-  // and this re-prices, rather than trusting numbers that were never about what
-  // is being committed.
-  const pinned = options.pinnedSizing
-  const pinnedApplies = pinned !== undefined
-    && pinned.replacementText === replacementText
-    && pinned.shadowedSeqs.length === selection.shadowedSeqs.length
-    && pinned.shadowedSeqs.every((seq, index) => seq === selection.shadowedSeqs[index])
-  const framedTokenCount = pinnedApplies
-    ? pinned.replacementTokens
-    : priceReplacementText(dependencies, replacementText)
-  const shadowedRouteTokenCount = pinnedApplies
-    ? pinned.shadowedRouteTokens
-    : selectedNodes.reduce((total, node) => total + node.tokens, 0)
+  const framedTokenCount = priceReplacementText(dependencies, replacementText)
+  const shadowedRouteTokenCount = selectedNodes.reduce((total, node) => total + node.tokens, 0)
   if (framedTokenCount >= shadowedRouteTokenCount) {
     throw new Error(rolloverTooLargeMessage(
       replacementSubject(options.replacement),

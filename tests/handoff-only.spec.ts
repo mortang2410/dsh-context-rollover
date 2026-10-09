@@ -640,7 +640,7 @@ describe('the rollover transaction', () => {
       replacement: {
         kind: 'checkpoint',
         checkpoint: {
-          reason: 'pressure',
+          reason: 'overflow',
           windowNumber: 1,
           notes: '- goal: keep the notes path alive',
           handoff: null,
@@ -653,6 +653,6 @@ describe('the rollover transaction', () => {
     expect(visible).toContain('<context-rollover checkpoint>')
     expect(visible).toContain('## Durable notes')
     expect(visible).toContain('keep the notes path alive')
-    expect(visible).toContain('reason: pressure')
+    expect(visible).toContain('reason: overflow')
   })
 })

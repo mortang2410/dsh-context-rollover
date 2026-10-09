@@ -8,7 +8,7 @@
  */
 
 /** Why a context window rolled over. */
-export type RolloverReason = 'model-requested' | 'pressure' | 'overflow' | 'manual'
+export type RolloverReason = 'model-requested' | 'overflow' | 'manual'
 
 /** Inputs for one deterministic checkpoint. */
 export interface CheckpointInput {

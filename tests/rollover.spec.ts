@@ -153,113 +153,29 @@ describe('commitRollover', () => {
     )).rejects.toThrow(/not smaller than the shadowed content/)
   })
 
-  it('re-prices rather than trusting a pinned sizing whose span is not the one committed', async () => {
+  it('the preflight sizing predicts the commit for the same candidate and span', async () => {
     const meter = await bareMeter()
     const session = closedConversation(4)
-    const nodes = session.surface.nodes
-    const start = nodes[0]
-    const end = nodes[nodes.length - 1]
-    if (start === undefined || end === undefined) throw new Error('expected surface nodes')
-
-    // A pinned sizing is a claim about ONE span and candidate. This one claims a
-    // span of a single node that is not the span being committed, so it must not
-    // be reusable: if the guard trusted it, this replacement (which is far too
-    // large for the span it actually replaces) would commit and silently grow the
-    // context. Re-pricing instead rejects it, which is the safe direction.
-    await expect(commitRollover(
-      { meter },
-      session,
-      start,
-      end,
-      {
-        owner: null,
-        pinnedSizing: {
-          shadowedRouteTokens: 100_000,
-          replacementTokens: 1,
-          fits: true,
-          shadowedSeqs: [nodes[0] as never],
-          replacementText: 'x',
-        },
-        replacement: {
-          kind: 'checkpoint',
-          checkpoint: {
-            reason: 'model-requested',
-            windowNumber: 1,
-            notes: 'note'.repeat(5000),
-            handoff: null,
-          },
-        },
-      },
-    )).rejects.toThrow(/not smaller than the shadowed content/)
-  })
-
-  it('re-prices rather than trusting a pinned sizing measured for a different candidate', async () => {
-    const meter = await bareMeter()
-    const session = closedConversation(4)
-    const measurement = meter.measure(session)
-    const range = selectRolloverRange(session, measurement, { kind: 'handoff-only' })
+    const range = selectRolloverRange(session, meter.measure(session), { kind: 'handoff-only' })
     if (range === null) throw new Error('expected a compactable range')
-
-    // Price a SHORT candidate over this exact span. The span is genuinely
-    // larger than it, so the preflight accepts.
-    const short = {
+    const candidate = (notes: string) => ({
       kind: 'checkpoint' as const,
-      checkpoint: { reason: 'manual' as const, windowNumber: 1, notes: 'short', handoff: null },
-    }
-    const sizing = sizeRolloverReplacement({ meter }, session, range, short)
-    expect(sizing.fits).toBe(true)
-    expect(sizing.replacementText).toContain('short')
+      checkpoint: { reason: 'manual' as const, windowNumber: 1, notes, handoff: null },
+    })
 
-    // Commit a much LARGER candidate over that same span, carrying the short
-    // candidate's pin. The span matches the pin exactly, so only the candidate
-    // binding can catch this. If the guard reused the pin, this would commit a
-    // replacement larger than the content it replaces and silently grow the
-    // context; re-pricing refuses it instead.
+    // The preflight accepts a short candidate over this span and refuses a long one.
+    expect(sizeRolloverReplacement({ meter }, session, range, candidate('short')).fits).toBe(true)
+    expect(sizeRolloverReplacement({ meter }, session, range, candidate('note'.repeat(5000))).fits).toBe(false)
+
+    // The commit makes the same two decisions, and the refusal leaves no rollover behind.
     await expect(commitRollover({ meter }, session, range.start, range.end, {
       owner: null,
-      pinnedSizing: sizing,
-      replacement: {
-        kind: 'checkpoint',
-        checkpoint: { ...short.checkpoint, notes: 'note'.repeat(5000) },
-      },
+      replacement: candidate('note'.repeat(5000)),
     })).rejects.toThrow(/not smaller than the shadowed content/)
     expect(countRollovers(session)).toBe(0)
-  })
-
-  it('uses an accepted pinned sizing for the exact span and candidate it measured', async () => {
-    const meter = await bareMeter()
-    const session = closedConversation(4)
-    const measurement = meter.measure(session)
-    const range = selectRolloverRange(session, measurement, { kind: 'handoff-only' })
-    if (range === null) throw new Error('expected a compactable range')
-
-    // The candidate is deliberately far too large for the span it replaces, so
-    // its own price cannot let it commit.
-    const replacement = {
-      kind: 'checkpoint' as const,
-      checkpoint: {
-        reason: 'manual' as const,
-        windowNumber: 1,
-        notes: 'note'.repeat(5000),
-        handoff: null,
-      },
-    }
-    // Measure THAT candidate over THAT span, then replace its prices with an
-    // accepted pair. The candidate binding is what makes this reachable: the
-    // pin's `replacementText` is the text being committed, so the pin applies
-    // and its numbers, not a re-price, decide. A commit therefore proves the
-    // pinned numbers were used, and this test fails if the plumbing stops
-    // passing them on. (The forged prices are the caller's own claim here on
-    // purpose: this case is about plumbing, and the tool and engine only ever
-    // pass a pin they computed themselves.)
-    const sizing = sizeRolloverReplacement({ meter }, session, range, replacement)
-    expect(sizing.fits).toBe(false)
-    const pinned = { ...sizing, shadowedRouteTokens: 10_000_000, replacementTokens: 1, fits: true }
-
     const result = await commitRollover({ meter }, session, range.start, range.end, {
       owner: null,
-      pinnedSizing: pinned,
-      replacement,
+      replacement: candidate('short'),
     })
     expect(result.shadowedSeqs.length).toBeGreaterThan(0)
     expect(countRollovers(session)).toBe(1)
@@ -298,43 +214,6 @@ describe('commitRollover', () => {
     const types = session.snapshotEvents().map(event => (event as { type: string }).type)
     expect(types.filter(type => type === 'compaction/start')).toHaveLength(1)
     expect(types).not.toContain('compaction/end')
-  })
-
-  it('leaves no failed bracket when a stale pin is re-priced and refused', async () => {
-    const meter = await bareMeter()
-    const session = closedConversation(4)
-    const nodes = session.surface.nodes
-    const start = nodes[0]
-    const end = nodes[nodes.length - 1]
-    if (start === undefined || end === undefined) throw new Error('expected surface nodes')
-
-    // The exact combination the review named: the pin does not apply, so the
-    // guard re-prices, and the re-priced candidate does not fit. Before the
-    // shrink decision moved ahead of the lock, this left `compaction/start`
-    // plus an error `compaction/end` in the durable log. Measured directly:
-    // no compaction event of any kind may appear.
-    await expect(commitRollover({ meter }, session, start, end, {
-      owner: null,
-      pinnedSizing: {
-        shadowedRouteTokens: 100_000,
-        replacementTokens: 1,
-        fits: true,
-        shadowedSeqs: [nodes[0] as never],
-        replacementText: 'a text that is not the one being committed',
-      },
-      replacement: {
-        kind: 'checkpoint',
-        checkpoint: {
-          reason: 'model-requested',
-          windowNumber: 1,
-          notes: 'note'.repeat(5000),
-          handoff: null,
-        },
-      },
-    })).rejects.toThrow(/not smaller than the shadowed content/)
-
-    const types = session.snapshotEvents().map(event => (event as { type: string }).type)
-    expect(types.filter(type => type.startsWith('compaction/'))).toEqual([])
   })
 
   it('leaves no compaction event at all when the size guard refuses', async () => {
