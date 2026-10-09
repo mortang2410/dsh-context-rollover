@@ -107,6 +107,20 @@ export interface RolloverConfig {
    * Defaults to `auto`.
    */
   modelSurface?: 'auto' | 'always'
+  /**
+   * Absolute rollover points keyed by routed model id (the session's
+   * `RequestContext.model`). An entry replaces the ratio-based reminder and
+   * rollover points for that model only; every other model keeps the ratios.
+   */
+  modelThresholds?: Record<string, ModelThresholds>
+}
+
+/** Absolute token points for one routed model, replacing its ratio-based points. */
+export interface ModelThresholds {
+  /** Automatic rollover point in tokens. */
+  thresholdTokens: number
+  /** One-time reminder point in tokens; must not exceed {@link thresholdTokens}. */
+  reminderThresholdTokens: number
 }
 
 /** Schemastery validation for {@link RolloverConfig}. */
@@ -124,6 +138,10 @@ export const Config: z<RolloverConfig> = z.object({
   handoffDir: z.string(),
   handoffPattern: z.string(),
   modelSurface: z.union(['auto', 'always'] as const),
+  modelThresholds: z.dict(z.object({
+    thresholdTokens: z.number().step(1).min(1),
+    reminderThresholdTokens: z.number().step(1).min(1),
+  })),
 })
 
 /** Resolved and validated rollover configuration. */
@@ -143,6 +161,8 @@ export interface ResolvedRolloverConfig {
   readonly handoffDir: string
   readonly handoffPattern: string
   readonly modelSurface: 'auto' | 'always'
+  /** Absolute points per routed model id; an empty map keeps the ratios for every model. */
+  readonly modelThresholds: Readonly<Record<string, ModelThresholds>>
 }
 
 /** Reject a ratio that cannot represent a fraction of a context window. */
@@ -156,6 +176,13 @@ function validateRatio(name: string, value: number): void {
 function validateNonEmptyString(name: string, value: string): void {
   if (value.trim().length === 0) {
     throw new TypeError(`context-rollover: ${name} must be a non-empty string, got ${JSON.stringify(value)}`)
+  }
+}
+
+/** Reject a token point that is not a positive integer. */
+function validateTokenCount(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`context-rollover: ${name} must be a positive integer, got ${String(value)}`)
   }
 }
 
@@ -202,6 +229,18 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
       `context-rollover: modelSurface must be 'auto' or 'always', got ${String(modelSurface)}`,
     )
   }
+  const modelThresholds = config.modelThresholds ?? {}
+  for (const [model, points] of Object.entries(modelThresholds)) {
+    validateNonEmptyString('modelThresholds key', model)
+    validateTokenCount(`modelThresholds[${model}].thresholdTokens`, points.thresholdTokens)
+    validateTokenCount(`modelThresholds[${model}].reminderThresholdTokens`, points.reminderThresholdTokens)
+    if (points.reminderThresholdTokens > points.thresholdTokens) {
+      throw new TypeError(
+        `context-rollover: modelThresholds[${model}].reminderThresholdTokens (${points.reminderThresholdTokens}) `
+        + `must not exceed thresholdTokens (${points.thresholdTokens})`,
+      )
+    }
+  }
   return {
     thresholdRatio,
     reminderThresholdRatio,
@@ -216,5 +255,38 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
     handoffDir,
     handoffPattern,
     modelSurface,
+    modelThresholds,
+  }
+}
+
+/** The reminder and rollover token points that apply to one routed model. */
+export interface RolloverPoints {
+  readonly reminderTokens: number
+  readonly rolloverTokens: number
+}
+
+/**
+ * Resolve the reminder and rollover points for the model a session is routed
+ * to. A model with a `modelThresholds` entry uses that entry's absolute tokens.
+ * Every other model derives both points from its own context window.
+ * @param config - resolved configuration.
+ * @param contextWindow - the routed model's advertised context window.
+ * @param model - the routed model id, as the session's request context reports it.
+ * @returns the reminder and rollover token points.
+ */
+export function rolloverPointsFor(
+  config: ResolvedRolloverConfig,
+  contextWindow: number,
+  model: string,
+): RolloverPoints {
+  // `hasOwn`, not a bracket read: a model named like an Object.prototype key
+  // must not pick up an inherited value.
+  const entry = Object.hasOwn(config.modelThresholds, model) ? config.modelThresholds[model] : undefined
+  if (entry !== undefined) {
+    return { reminderTokens: entry.reminderThresholdTokens, rolloverTokens: entry.thresholdTokens }
+  }
+  return {
+    reminderTokens: Math.floor(contextWindow * config.reminderThresholdRatio),
+    rolloverTokens: Math.floor(contextWindow * config.thresholdRatio),
   }
 }

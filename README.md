@@ -367,7 +367,15 @@ Configuration (cordis.yml `config` on the plugin row):
         historyEnabled: true
         notesDir: null               # base dir override; default <dsh home>/notes
         modelSurface: auto           # auto (host rows) | always (preset rows)
+        modelThresholds:             # optional absolute points per routed model
+          'strata/qwen-strata':
+            thresholdTokens: 200000        # forced rollover point
+            reminderThresholdTokens: 157286 # one-time reminder point; must not exceed thresholdTokens
 ```
+
+`modelThresholds` is keyed by the routed model id, the `model` field of the session's request context. A model with an entry uses its two token points. Every other model keeps `thresholdRatio` and `reminderThresholdRatio`, measured against its own window. A patch row replaces its whole config, so restate every other key when you add this one.
+
+An entry is not checked against the model's window. A `thresholdTokens` at or above the window never fires before the window fills, so only the overflow path rolls over.
 
 ## Local development with HMR
 
