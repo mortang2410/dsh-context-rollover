@@ -315,30 +315,65 @@ describe('no summarizer on the model-requested rollover path', () => {
   })
 })
 
+/** Record every warning the engine logs, while still forwarding it. */
+function captureWarnings(ctx: Context): string[] {
+  const warnings: string[] = []
+  const original = ctx.logger.warn.bind(ctx.logger)
+  ctx.logger.warn = (message: string): void => {
+    warnings.push(message)
+    original(message)
+  }
+  return warnings
+}
+
+/** The once-per-turn warning the engine logs when pressure crosses the rollover point. */
+function isPressureWarning(message: string): boolean {
+  return message.includes('automatic rollover is disabled')
+}
+
+/**
+ * Run two turns, the second with two model requests, against a rollover point
+ * of `thresholdRatio` times the 100,000-token test window.
+ */
+async function runPressureTurns(id: string, thresholdRatio: number) {
+  const { ctx, agent, session } = await engineHarness(id, {
+    thresholdRatio,
+    reminderThresholdRatio: thresholdRatio,
+    handoffOnly: true,
+  })
+  const windows = observeRollovers(ctx, session)
+  const warnings = captureWarnings(ctx)
+  ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+    usageResponse(`pressure answer one ${'detail '.repeat(600)}`, 5000),
+    toolCall('get_context_remaining', '{}', 'c1'),
+    usageResponse(`pressure answer two ${'detail '.repeat(600)}`, 6000),
+  ]))
+
+  await followup(agent, 'turn one')
+  await followup(agent, 'turn two')
+  return { session, windows, warnings }
+}
+
 describe('no summarizer on the pressure path', () => {
-  it('opens no compaction bracket and starts no stream at the threshold', async () => {
-    const { ctx, agent, session } = await engineHarness('no-summarizer-pressure', {
-      thresholdRatio: 0.001,
-      reminderThresholdRatio: 0.001,
-      handoffOnly: true,
-    })
-    const windows = observeRollovers(ctx, session)
+  it('warns once and opens no compaction bracket when usage crosses the point', async () => {
+    // 100 tokens of a 100,000 window: the measured usage is above it.
+    const { session, windows, warnings } = await runPressureTurns('no-summarizer-pressure', 0.001)
 
-    // Two requests in the second turn. Crossing the threshold only warns, so no
-    // compaction bracket may open, and therefore no summarizer stream may start.
-    const adapter = new ScriptedAdapter([
-      usageResponse(`pressure answer one ${'detail '.repeat(600)}`, 5000),
-      toolCall('get_context_remaining', '{}', 'c1'),
-      usageResponse(`pressure answer two ${'detail '.repeat(600)}`, 6000),
-    ])
-    ctx.llm.registerAdapter(['mock'], adapter)
-
-    await followup(agent, 'turn one')
-    await followup(agent, 'turn two')
-
+    // Crossing the threshold only warns, so no compaction bracket may open, and
+    // therefore no summarizer stream may start. The warning is what proves the
+    // pressure path actually ran; the other checks alone would pass without it.
+    expect(warnings.filter(isPressureWarning)).toHaveLength(1)
     expect(windows).toHaveLength(0)
     expect(session.deriveMessages().map(message => JSON.stringify(message)).join('\n'))
       .not.toContain('reason: pressure')
+  })
+
+  it('stays silent when usage stays below the point', async () => {
+    // Control: 99,000 tokens of a 100,000 window, which the same usage never reaches.
+    const { windows, warnings } = await runPressureTurns('no-summarizer-pressure-below', 0.99)
+
+    expect(warnings.filter(isPressureWarning)).toHaveLength(0)
+    expect(windows).toHaveLength(0)
   })
 })
 

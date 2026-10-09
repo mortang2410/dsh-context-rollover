@@ -98,6 +98,23 @@ function transactionFacts(session: Session): {
   return { starts, summaries, ends, failedEnds }
 }
 
+/**
+ * The text of every replacement the durable log committed, including one that a
+ * later rollover shadowed. The model-visible surface cannot show a shadowed
+ * replacement, so a regression that commits foreign text is only visible here.
+ */
+function committedReplacementTexts(session: Session): string[] {
+  const texts: string[] = []
+  for (const raw of session.snapshotEvents()) {
+    const event = raw as { type: string; data: { summary?: Array<{ type: string; text?: string }> } }
+    if (event.type !== 'compaction/summary') continue
+    for (const block of event.data.summary ?? []) {
+      if (block.type === 'text' && block.text !== undefined) texts.push(block.text)
+    }
+  }
+  return texts
+}
+
 /** The model-visible text of one derived conversation, joined. */
 function visibleTexts(session: Session): string {
   return derivedTexts(session).join('\n')
@@ -249,16 +266,25 @@ describe('a model-requested rollover lands the handoff the model names', () => {
 
     await followup(agent, 'turn one')
     await followup(agent, 'turn two')
-    // Usage is above the point, and nothing was rolled over or surfaced.
+    // Usage is above the point, and nothing was committed. This reads the durable
+    // log, because a later named rollover shadows a foreign replacement and hides
+    // it from the surface.
     expect(countRollovers(session)).toBe(0)
-    expect(visibleTexts(session)).not.toContain(FOREIGN_MPD)
+    expect(committedReplacementTexts(session)).toEqual([])
     expect(derivedTexts(session)).not.toContain(ownText)
 
     await followup(agent, 'roll over to the image fix')
+    // Every committed replacement, shadowed ones included: only the named own
+    // handoff, with no foreign text and no checkpoint carrying the pressure reason.
+    // Checked before the count, so a leak fails on the committed text itself.
+    const committed = committedReplacementTexts(session)
+    expect(committed.join('\n')).not.toContain(FOREIGN_MPD)
+    expect(committed.join('\n')).not.toContain('reason: pressure')
+    expect(committed).toEqual([ownText])
+
     expect(countRollovers(session)).toBe(1)
     // The replacement is exactly the named file's text: the older own handoff.
     expect(derivedTexts(session)).toContain(ownText)
-    expect(visibleTexts(session)).not.toContain(FOREIGN_MPD)
     expect(visibleTexts(session)).not.toContain('<context-rollover checkpoint>')
 
     const facts = transactionFacts(session)
