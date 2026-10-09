@@ -9,8 +9,10 @@
  *   the shared handoff directory;
  * - the model's own `new_context` call lands exactly the document it names, never
  *   the newest file in the directory (the regression this file guards);
- * - a provider-confirmed context overflow and a manual `/compact` compose the
- *   deterministic notes checkpoint and never read a handoff file;
+ * - a provider-confirmed context overflow never rolls over, so it commits no
+ *   checkpoint and no handoff, and the provider error reaches the turn unchanged;
+ * - a manual `/compact` composes the deterministic notes checkpoint and never
+ *   reads a handoff file;
  * - `handoffDir` and `handoffPattern` stay accepted configuration, so presets
  *   that set them keep validating, even though no engine path reads them.
  *
@@ -197,7 +199,7 @@ describe('crossing the rollover point by pressure only warns', () => {
     expect(visibleTexts(session)).not.toContain('<context-rollover checkpoint>')
 
     // The pressure trigger, called directly, commits nothing either.
-    const compacted = await engine.compactIfNeeded(agent, 'pressure', new AbortController().signal)
+    const compacted = await engine.compactIfNeeded(agent, 'pressure')
     expect(compacted).toBeNull()
     expect(countRollovers(session)).toBe(0)
     expect(session.surface.replaceGeneration).toBe(generation)
@@ -294,8 +296,8 @@ describe('a model-requested rollover lands the handoff the model names', () => {
   })
 })
 
-describe('engine-driven paths compose the notes checkpoint and never read a handoff file', () => {
-  it('composes the notes checkpoint on provider-confirmed overflow with a newer foreign handoff present', async () => {
+describe('a provider overflow never rolls over', () => {
+  it('commits nothing, with a newer foreign handoff and notes present, and sends the request once', async () => {
     const cwd = await scratch('dsh-rollover-overflow-')
     const dir = await handoffDirIn(cwd)
     await writeHandoff(
@@ -305,32 +307,39 @@ describe('engine-driven paths compose the notes checkpoint and never read a hand
       new Date('2024-09-01T00:00:00Z'),
     )
 
-    const { ctx, agent, session, notesBase } = await engineHarness('overflow-notes-only', {}, { cwd })
+    const { ctx, engine, agent, session, notesBase } = await engineHarness('overflow-no-rollover', {}, { cwd })
     const store = new NotesStore(NotesStore.directoryFor(session.id, notesBase))
     await store.write('state.md', 'OVERFLOW-NOTES-SENTINEL: the next step is the migration.\n')
-    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+    const adapter = new ScriptedAdapter([
       ...Array.from({ length: 20 }, (_unused, index) => textResponse(`finding ${index} details`)),
       errorFinish('request too large for model context window', CONTEXT_WINDOW_EXCEEDED_CODE),
-      textResponse('recovered after rollover'),
-    ]))
+      textResponse('unreachable: the engine must not retry'),
+    ])
+    ctx.llm.registerAdapter(['mock'], adapter)
 
     await seedExchanges(agent, 20)
     await followup(agent, 'next request should overflow')
 
-    expect(countRollovers(session)).toBe(1)
+    // No checkpoint was composed, so neither the foreign handoff nor the notes reached the surface.
+    expect(countRollovers(session)).toBe(0)
     const visible = visibleTexts(session)
-    expect(visible).toContain('<context-rollover checkpoint>')
-    expect(visible).toContain('reason: overflow')
-    expect(visible).toContain('OVERFLOW-NOTES-SENTINEL')
-    expect(visible).toContain('recovered after rollover')
+    expect(visible).not.toContain('<context-rollover checkpoint>')
     expect(visible).not.toContain(FOREIGN_OVERFLOW)
-
+    expect(visible).not.toContain('OVERFLOW-NOTES-SENTINEL')
+    // The overflow was sent once and never retried: 20 seeded answers plus the overflowing one.
+    expect(adapter.requests).toHaveLength(21)
+    // No compaction bracket opened in the durable log.
     const facts = transactionFacts(session)
-    expect(facts.starts).toBe(1)
-    expect(facts.ends).toBe(1)
-    expect(facts.failedEnds).toEqual([])
-  })
+    expect(facts.starts).toBe(0)
+    expect(facts.ends).toBe(0)
 
+    // The direct overflow trigger is accepted and also commits nothing.
+    expect(await engine.compactIfNeeded(agent, 'context-overflow')).toBeNull()
+    expect(countRollovers(session)).toBe(0)
+  })
+})
+
+describe('manual compaction composes the notes checkpoint and never reads a handoff file', () => {
   it('composes the notes checkpoint on manual compaction with a newer foreign handoff present', async () => {
     const cwd = await scratch('dsh-rollover-manual-')
     const dir = await handoffDirIn(cwd)

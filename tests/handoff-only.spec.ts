@@ -628,9 +628,8 @@ describe('the rollover transaction', () => {
   })
 
   it('leaves the notes composition intact for the paths that still use it', async () => {
-    // The notes checkpoint is what the engine-driven paths (overflow, manual)
-    // compose, so its composition must stay reachable and unchanged beside the
-    // handoff one.
+    // The notes checkpoint is what manual `/compact` composes, so its
+    // composition must stay reachable and unchanged beside the handoff one.
     const meter = await bareMeter()
     const session = closedConversation(4, 10)
     const range = selectRolloverRange(session, meter.measure(session), { kind: 'handoff-only' })
@@ -640,7 +639,7 @@ describe('the rollover transaction', () => {
       replacement: {
         kind: 'checkpoint',
         checkpoint: {
-          reason: 'overflow',
+          reason: 'manual',
           windowNumber: 1,
           notes: '- goal: keep the notes path alive',
           handoff: null,
@@ -653,6 +652,6 @@ describe('the rollover transaction', () => {
     expect(visible).toContain('<context-rollover checkpoint>')
     expect(visible).toContain('## Durable notes')
     expect(visible).toContain('keep the notes path alive')
-    expect(visible).toContain('reason: overflow')
+    expect(visible).toContain('reason: manual')
   })
 })

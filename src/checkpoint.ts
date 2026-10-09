@@ -8,7 +8,7 @@
  */
 
 /** Why a context window rolled over. */
-export type RolloverReason = 'model-requested' | 'overflow' | 'manual'
+export type RolloverReason = 'model-requested' | 'manual'
 
 /** Inputs for one deterministic checkpoint. */
 export interface CheckpointInput {
@@ -83,9 +83,8 @@ export function buildReplacementText(replacement: RolloverReplacement): string {
  * Compose the replacement checkpoint blocks. Content is deterministic for a
  * given input, so the shrink guard's pricing is reproducible.
  *
- * This is the notes composition the engine-driven paths (provider-confirmed
- * overflow and manual `/compact`) use. It is NOT the handoff composition: see
- * {@link buildReplacementText}.
+ * This is the notes composition manual `/compact` uses. It is NOT the handoff
+ * composition: see {@link buildReplacementText}.
  * @param input - the rollover's reason, window number, and retained state.
  * @returns the checkpoint content for the replacement user message.
  */

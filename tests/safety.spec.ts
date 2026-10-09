@@ -1,7 +1,8 @@
 /**
  * Runtime-driven safety tests: crossing the rollover point by pressure only
- * warns, provider-confirmed context-overflow recovery with retry, rollover
- * requested at the turn-stop boundary, and the forced-span `compactRegion` path.
+ * warns, a provider context overflow passes through without a rollover or a
+ * retry, rollover requested at the turn-stop boundary, and the forced-span
+ * `compactRegion` path.
  *
  * @module tests/safety.spec
  */
@@ -70,8 +71,8 @@ describe('pressure above the rollover point', () => {
     const diagnostics = captureDiagnostics(ctx, session)
     await followup(agent, 'turn two')
 
-    // Only the model's own new_context call or a provider-confirmed overflow
-    // may roll the context over. Pressure warns once and leaves the surface alone.
+    // Only the model's own new_context call or manual /compact may roll the
+    // context over. Pressure warns once and leaves the surface alone.
     expect(countRollovers(session)).toBe(0)
     const texts = derivedTexts(session).join('\n')
     expect(texts).not.toContain('reason: pressure')
@@ -117,29 +118,42 @@ describe('pressure warning cadence', () => {
   })
 })
 
-describe('context-overflow recovery', () => {
-  it('rolls over on a provider overflow failure and retries the request', async () => {
+/** The reason the session's most recent turn recorded when it ended. */
+function lastTurnEndReason(session: { snapshotEvents(): readonly unknown[] }): unknown {
+  let reason: unknown
+  for (const event of session.snapshotEvents()) {
+    const typed = event as { type: string; data?: { reason?: unknown } }
+    if (typed.type === 'turn/end') reason = typed.data?.reason
+  }
+  return reason
+}
+
+describe('provider context overflow', () => {
+  it('passes the error through unchanged: no rollover and no retry', async () => {
     const { ctx, agent, session } = await engineHarness('overflow')
     const adapter = new ScriptedAdapter([
       ...Array.from({ length: 20 }, (_unused, index) => textResponse(`finding ${index} details`)),
       errorFinish('request too large for model context window', CONTEXT_WINDOW_EXCEEDED_CODE),
-      textResponse('recovered after rollover'),
+      textResponse('unreachable: the engine must not retry'),
     ])
     ctx.llm.registerAdapter(['mock'], adapter)
 
     await seedExchanges(agent, 20)
     await followup(agent, 'next request should overflow')
 
-    // The overflow forced one rollover and the loop resent the request.
-    expect(countRollovers(session)).toBe(1)
+    // The engine commits nothing, so every earlier exchange stays on the surface.
+    expect(countRollovers(session)).toBe(0)
     const texts = derivedTexts(session).join('\n')
-    expect(texts).toContain('reason: overflow')
-    expect(texts).not.toContain('Recovery record')
+    expect(texts).not.toContain('<context-rollover checkpoint>')
+    expect(texts).toContain('finding 0 details')
     expect(texts).toContain('next request should overflow')
-    expect(texts).toContain('recovered after rollover')
-    // The failing request happened, then exactly one retry.
-    const answered = adapter.requests.filter(request => JSON.stringify(request).includes('overflow'))
-    expect(answered.length).toBe(2)
+    // The host ends the turn with the provider's own error code ...
+    expect(lastTurnEndReason(session)).toMatchObject({
+      kind: 'error',
+      error: { code: CONTEXT_WINDOW_EXCEEDED_CODE },
+    })
+    // ... after exactly one request: the 20 seeded answers plus the overflowing one.
+    expect(adapter.requests).toHaveLength(21)
   })
 })
 

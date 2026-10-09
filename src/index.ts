@@ -17,7 +17,7 @@ import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compac
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
-import { CONTEXT_WINDOW_EXCEEDED_CODE, boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 // Type-only: makes the optional sibling service available to `ctx.get()`, and
@@ -27,7 +27,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { Seq } from './compat.ts'
 import { renderReminderMessage, resolveConfig, rolloverPointsFor } from './config.ts'
 import type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
-import type { RolloverReason, RolloverReplacement } from './checkpoint.ts'
+import type { RolloverReplacement } from './checkpoint.ts'
 import { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
 import { NotesStore } from './notes.ts'
 import { sessionEventAt } from './compat.ts'
@@ -137,11 +137,12 @@ export { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
 
 /**
  * Summarization-free compaction backend: durable notes + handoff/recovery
- * checkpoint + token-budgeted recent verbatim tail. The only rollover that
- * replaces context with a handoff document is the model's own `new_context`
- * request. The engine rolls over by itself only after the provider rejects a
- * request for context overflow, and then composes notes alone. Crossing the
- * rollover point by pressure only warns.
+ * checkpoint + token-budgeted recent verbatim tail. The only rollovers are the
+ * model's own `new_context` request, which replaces context with its handoff
+ * document, and manual `/compact`, which composes the notes checkpoint. The
+ * engine never rolls over by itself: crossing the rollover point by pressure
+ * only warns, and a provider-rejected overflow ends the turn with the
+ * provider's own error.
  */
 export class ContextRolloverEngine extends CompactionEngine {
   static inject = ['llm', 'tokenMeter', 'sessions', 'tools', 'systemPrompt']
@@ -172,7 +173,6 @@ export class ContextRolloverEngine extends CompactionEngine {
   private readonly pendingRollovers = new Map<string, PendingRollover>()
   /** Turns that already logged the above-rollover-point warning. */
   private readonly pressureWarnedTurns = new Set<string>()
-  private readonly overflowRetries = new WeakMap<Agent, number>()
 
   constructor(ctx: Context, config: RolloverConfig = {}) {
     super(ctx)
@@ -211,7 +211,7 @@ export class ContextRolloverEngine extends CompactionEngine {
     return this.config.modelSurface === 'always' || rosterOf(this.ctx) === undefined
   }
 
-  /** Register the pending-rollover, pressure, and overflow lifecycle listeners. */
+  /** Register the pending-rollover and pressure lifecycle listeners. */
   private registerLifecycle(): void {
     const { ctx } = this
 
@@ -235,7 +235,6 @@ export class ContextRolloverEngine extends CompactionEngine {
             // the boundary the model asked for, and the next pre-step, which is
             // the one that can cross, would never try.
             const result = await this.performRollover(agent, {
-              reason: 'model-requested',
               handoff: pendingHandoff(pending),
               handoffPath: pending.handoffPath,
             }, signal)
@@ -267,7 +266,6 @@ export class ContextRolloverEngine extends CompactionEngine {
         // request that deferred here would lose it for good rather than
         // retrying; leaving it pending lets the next turn's pre-step cross.
         const result = await this.performRollover(agent, {
-          reason: 'model-requested',
           handoff: pendingHandoff(pending),
           handoffPath: pending.handoffPath,
         }, signal)
@@ -276,32 +274,6 @@ export class ContextRolloverEngine extends CompactionEngine {
         const message = error instanceof Error ? error.message : String(error)
         ctx.logger.warn(`context rollover at turn stop failed: ${message}`)
       }
-    })
-
-    ctx.on('agent/status', ({ agent, status }) => {
-      if (status === 'idle') this.overflowRetries.delete(agent)
-    })
-
-    // Provider-confirmed context overflow: roll over and let the loop resend
-    // the request against the checkpoint and retained tail.
-    ctx.on('agent/request-error', async (
-      { agent, failure, signal },
-      next,
-    ) => {
-      if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE || signal.aborted) return next()
-      if (this.compactionOwnedElsewhere(agent)) return next()
-      const generation = agent.session.surface.replaceGeneration
-      const retries = this.overflowRetries.get(agent) ?? 0
-      try {
-        await this.performRollover(agent, { reason: 'overflow', handoff: null }, signal)
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(`context-overflow rollover failed: ${message}; preserving the original request error`)
-        return next()
-      }
-      if (signal.aborted || agent.session.surface.replaceGeneration <= generation) return next()
-      this.overflowRetries.set(agent, retries + 1)
-      return { kind: 'retry' }
     })
   }
 
@@ -368,17 +340,17 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * Perform one rollover: select the replacement range, resolve the
-   * replacement content for the reason, and commit the compaction transaction.
+   * Perform one model-requested rollover: select the replacement range, make
+   * the model's handoff document the replacement, and commit the compaction
+   * transaction.
    * @param agent - agent whose session surface is rolled over.
-   * @param request - rollover reason and the already-read handoff document text,
-   *   when the model requested this rollover.
+   * @param request - the handoff document the model named, already read.
    * @param signal - live turn cancellation signal.
    * @returns the compaction result, or `null` when no useful range exists.
    */
   private async performRollover(
     agent: Agent,
-    request: { reason: RolloverReason; handoff: string | null; handoffPath?: string },
+    request: { handoff: string; handoffPath: string },
     signal: AbortSignal,
   ): Promise<CompactionResult | null> {
     signal.throwIfAborted()
@@ -394,7 +366,7 @@ export class ContextRolloverEngine extends CompactionEngine {
     // The transaction's own shrink guard refuses a replacement that is not
     // smaller than the selected span, so a refused handoff leaves the context
     // unchanged and surfaces as the caller's logged failure.
-    const replacement = await this.replacementFor(session, request)
+    const replacement = this.replacementFor(session, request)
     const windowNumber = replacementWindowNumber(replacement)
     const result = await commitRollover(
       { meter: this.ctx.tokenMeter },
@@ -404,7 +376,7 @@ export class ContextRolloverEngine extends CompactionEngine {
       { owner: 'current-turn', replacement },
     )
     this.ctx.logger.info(
-      `context rollover (${request.reason}): window ${windowNumber} started; `
+      `context rollover (model-requested): window ${windowNumber} started; `
       + `shadowed ${result.shadowedSeqs.length} surface nodes (~${result.shadowedTokenCount} tokens)`,
     )
     return result
@@ -427,38 +399,26 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * The replacement content one rollover writes.
+   * The replacement content one model-requested rollover writes.
    *
    * The model names one durable handoff document, and that document's bytes
    * become the entire continuation context: no narration, no notes section and
-   * no wrapper is added around it. The engine-driven paths (overflow, manual)
-   * have no model in the loop and no document to name, so they compose the
-   * deterministic notes checkpoint and never read a handoff file.
+   * no wrapper is added around it. Manual `/compact` never reaches this method.
+   * It has no model in the loop and no document to name, so it composes the
+   * deterministic notes checkpoint itself.
    * @param session - session whose window number is being started.
-   * @param request - rollover reason and the handoff document text, when any.
+   * @param request - the handoff document text and the path it was read from.
    * @returns the replacement to commit.
    */
-  private async replacementFor(
+  private replacementFor(
     session: Session,
-    request: { reason: RolloverReason; handoff: string | null; handoffPath?: string },
-  ): Promise<RolloverReplacement> {
-    const windowNumber = countRollovers(session) + 1
-    if (request.handoff !== null) {
-      return {
-        kind: 'handoff-document',
-        windowNumber,
-        text: request.handoff,
-        ...request.handoffPath === undefined ? {} : { path: request.handoffPath },
-      }
-    }
+    request: { handoff: string; handoffPath: string },
+  ): RolloverReplacement {
     return {
-      kind: 'checkpoint',
-      checkpoint: {
-        reason: request.reason,
-        windowNumber,
-        notes: await this.renderNotes(session),
-        handoff: null,
-      },
+      kind: 'handoff-document',
+      windowNumber: countRollovers(session) + 1,
+      text: request.handoff,
+      path: request.handoffPath,
     }
   }
 
@@ -492,7 +452,7 @@ export class ContextRolloverEngine extends CompactionEngine {
    *
    * Sessions composed from an agent preset resolve `ctx.compaction` to that
    * preset's backend; the host engine then stands down everywhere (pressure,
-   * overflow, manual) so exactly one backend acts per session. Rosterless
+   * manual) so exactly one backend acts per session. Rosterless
    * deployments (headless, base-only profiles) have no roster and this
    * backend stays active.
    * @param agent - agent whose composition to inspect.
@@ -506,24 +466,17 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * Compact only after the provider has rejected a request for context
-   * overflow. Pressure above the rollover point never compacts here: it only
-   * warns, because the model owns the handoff.
+   * Automatic-compaction entry point, which never rolls over. Above the
+   * rollover point a pressure trigger logs one warning per turn, because the
+   * model owns the handoff. A context-overflow trigger does nothing here, so
+   * the provider's error reaches the turn unchanged.
    * @param agent - agent whose latest routed request is measured.
    * @param trigger - step-boundary pressure or provider-confirmed overflow.
-   * @param signal - live turn cancellation signal.
-   * @returns the rollover result, or `null` when no rollover was warranted.
+   * @returns always `null`: no rollover is performed from this entry point.
    */
-  override async compactIfNeeded(
-    agent: Agent,
-    trigger: CompactionTrigger,
-    signal: AbortSignal,
-  ): Promise<CompactionResult | null> {
+  override async compactIfNeeded(agent: Agent, trigger: CompactionTrigger): Promise<CompactionResult | null> {
     if (this.compactionOwnedElsewhere(agent)) return null
-    if (trigger === 'context-overflow') {
-      return this.performRollover(agent, { reason: 'overflow', handoff: null }, signal)
-    }
-    this.warnAboveRolloverPoint(agent, this.openTurnNumber(agent.session))
+    if (trigger === 'pressure') this.warnAboveRolloverPoint(agent, this.openTurnNumber(agent.session))
     return null
   }
 

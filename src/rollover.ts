@@ -565,7 +565,7 @@ export async function commitRollover(
     owner = null
   } else {
     if (entryState.openTurn === null) {
-      throw new Error('rollover: no open turn — automatic rollover events must be enclosed in a turn')
+      throw new Error('rollover: no open turn; turn-owned rollover events must be enclosed in a turn')
     }
     owner = entryState.openTurn
   }

@@ -45,7 +45,7 @@ describe('preset ownership', () => {
 
     const compacted = await engine.compactNow(agent, new AbortController().signal)
     expect(compacted).toBeNull()
-    const pressured = await engine.compactIfNeeded(agent, 'pressure', new AbortController().signal)
+    const pressured = await engine.compactIfNeeded(agent, 'pressure')
     expect(pressured).toBeNull()
     expect(countRollovers(session)).toBe(0)
     expect(session.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)

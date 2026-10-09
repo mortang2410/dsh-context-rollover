@@ -377,29 +377,26 @@ describe('no summarizer on the pressure path', () => {
   })
 })
 
-describe('no summarizer on the overflow rollover path', () => {
-  it('starts no stream inside the compaction bracket before the retry', async () => {
+describe('a provider overflow opens no compaction bracket', () => {
+  it('starts no rollover, so no summarizer stream can run inside one, and sends no retry', async () => {
     const { ctx, agent, session } = await engineHarness('no-summarizer-overflow')
     const windows = observeRollovers(ctx, session)
 
     const adapter = new ScriptedAdapter([
       ...Array.from({ length: 20 }, (_unused, index) => textResponse(`overflow filler ${index}`)),
       errorFinish('request too large for model context window', CONTEXT_WINDOW_EXCEEDED_CODE),
-      textResponse('recovered after rollover'),
+      textResponse('unreachable: the engine must not retry'),
     ])
     ctx.llm.registerAdapter(['mock'], adapter)
 
     await seedExchanges(agent, 20)
     await followup(agent, 'the next request overflows')
 
-    assertOrdinalsAreInvocationOrder()
-    const window = soleCommittedWindow(windows, session)
-    assertNoStreamInside(window, session, 1)
-    // The retry after the rollover is the request that proves the bracket does
-    // not simply extend to the end of the run.
-    assertRequestsStraddle(window)
-    expect(session.deriveMessages().map(message => JSON.stringify(message)).join('\n'))
-      .toContain('reason: overflow')
+    // No bracket opened, so no summarizer stream could start inside one.
+    expect(windows).toHaveLength(0)
+    expect(countRollovers(session)).toBe(0)
+    // 20 seeded answers plus the overflowing request: a retry would make 22.
+    expect(adapter.requests).toHaveLength(21)
   })
 })
 

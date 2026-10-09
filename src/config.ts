@@ -46,10 +46,10 @@ export interface RolloverConfig {
    * Rollover point as a fraction of the routed model's context window.
    * Defaults to `0.9`.
    *
-   * Crossing it does not roll the context over by itself. It logs one warning
-   * per turn, because only the model can write the handoff a rollover needs.
-   * The model's own `new_context` call still rolls over, and a provider-rejected
-   * overflow still rolls over to notes.
+   * Crossing it does not roll the context over. It logs one warning per turn,
+   * because only the model can write the handoff a rollover needs. The only
+   * rollovers are the model's own `new_context` call and manual `/compact`. A
+   * provider-rejected overflow does not roll over either.
    */
   thresholdRatio?: number
   /**
