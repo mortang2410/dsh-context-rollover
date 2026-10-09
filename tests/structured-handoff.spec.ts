@@ -65,6 +65,7 @@ describe('isHandoffNotePath', () => {
     ['HANDOFF-2026-02-30-10-00-task.md', false],
     ['HANDOFF-2026-04-31-10-00-task.md', false],
     ['HANDOFF-2026-13-40-10-61-task.md', false],
+    ['HANDOFF-2026-13-40-10-30-task.md', false],
     ['HANDOFF-2026-00-10-10-10-task.md', false],
     ['HANDOFF-2026-10-10-24-00-task.md', false],
     ['HANDOFF-2026-10-10-14-60-task.md', false],
@@ -112,11 +113,12 @@ describe('NotesStore.renderCheckpoint in structured-handoff mode', () => {
   it('does not select a name that matches the shape but is not a real date', async () => {
     const store = await tempStore()
     await writeNote(store, OLDER, 'VALID BODY', 0)
-    await writeNote(store, 'HANDOFF-2026-13-40-10-61-task.md', 'IMPOSSIBLE BODY', 60)
+    // Invalid by calendar only (month 13, day 40), so only the date check rejects it.
+    await writeNote(store, 'HANDOFF-2026-13-40-10-30-task.md', 'IMPOSSIBLE BODY', 60)
     await writeNote(store, 'a.md', 'A BODY', 30)
     // The impossible name renders in upstream order, after the valid handoff.
     expect(await store.renderCheckpoint(1000, 'structured-handoff')).toBe(
-      `### ${OLDER}\nVALID BODY\n\n### HANDOFF-2026-13-40-10-61-task.md\nIMPOSSIBLE BODY\n\n### a.md\nA BODY`,
+      `### ${OLDER}\nVALID BODY\n\n### HANDOFF-2026-13-40-10-30-task.md\nIMPOSSIBLE BODY\n\n### a.md\nA BODY`,
     )
   })
 
@@ -157,11 +159,11 @@ describe('NotesStore.renderCheckpoint in structured-handoff mode', () => {
   it('renders upstream order with no handoff first when no handoff note is valid', async () => {
     const store = await tempStore()
     await writeNote(store, 'a.md', 'A BODY', 0)
-    await writeNote(store, 'HANDOFF-2026-13-40-10-61-task.md', 'INVALID BODY', 10)
+    await writeNote(store, 'HANDOFF-2026-13-40-10-30-task.md', 'INVALID BODY', 10)
     await writeNote(store, 'b.md', 'B BODY', 20)
     const snapshot = await store.renderCheckpoint(1000, 'structured-handoff')
     expect(snapshot).toBe(
-      '### b.md\nB BODY\n\n### HANDOFF-2026-13-40-10-61-task.md\nINVALID BODY\n\n### a.md\nA BODY',
+      '### b.md\nB BODY\n\n### HANDOFF-2026-13-40-10-30-task.md\nINVALID BODY\n\n### a.md\nA BODY',
     )
     expect(snapshot).toBe(await store.renderAll(1000))
   })
