@@ -1,8 +1,7 @@
 /**
- * The pressure reminder's wording, keyed by rollover mode. Both modes emit the
- * upstream wording until the structured-handoff wording lands; the mode already
- * reaches this builder, so that wording becomes a table entry rather than a new
- * call path.
+ * The pressure reminder's wording, keyed by rollover mode. `upstream` keeps the
+ * upstream wording. `structured-handoff` asks the model to write its handoff as
+ * one dated note and states the window number and the automatic point.
  *
  * @module dsh-context-rollover/reminder
  */
@@ -14,6 +13,8 @@ export interface ReminderInput {
   readonly mode: RolloverMode
   /** Context used as a whole percentage of the window, capped at 100. */
   readonly percent: number
+  /** The current context window's number: 1 before any rollover, one more per rollover. */
+  readonly windowNumber: number
   /** Context tokens used by the latest measured request. */
   readonly totalTokens: number
   /** The routed model's context window in tokens. */
@@ -29,10 +30,24 @@ function upstreamReminderText(input: ReminderInput): string {
     + 'save what matters to notes and call new_context with a short handoff; otherwise checkpoint soon.'
 }
 
+/**
+ * The approved structured-handoff wording. The text is fixed; only the
+ * percentage, the window number, and the automatic point are substituted. The
+ * angle-bracket task description and the HANDOFF-YYYY-MM-DD-HH-MM pattern are
+ * literal text for the model to fill in, not placeholders.
+ */
+function structuredHandoffReminderText(input: ReminderInput): string {
+  return `Context is ${input.percent}% full, in window ${input.windowNumber}. `
+    + 'Write your handoff as a new note with the notes tool, at HANDOFF-YYYY-MM-DD-HH-MM-<task-description>.md, '
+    + 'using the current date and time to the minute. Follow the /handoff-doc sections, keep the note under 20,000 characters, '
+    + `and state window ${input.windowNumber} at its top. Then call new_context. `
+    + `An automatic rollover starts around ${input.rolloverTokens} tokens.`
+}
+
 /** Reminder wording keyed by rollover mode. */
 const REMINDER_BY_MODE: Readonly<Record<RolloverMode, (input: ReminderInput) => string>> = {
   upstream: upstreamReminderText,
-  'structured-handoff': upstreamReminderText,
+  'structured-handoff': structuredHandoffReminderText,
 }
 
 /**

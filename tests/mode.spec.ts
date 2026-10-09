@@ -3,9 +3,10 @@
  * unknown value, and the plumbing that carries the resolved mode to the
  * reminder, guidance, and checkpoint-render call sites.
  *
- * The structured-handoff wording lands in a later change, so both modes emit
- * the upstream text today. The plumbing is therefore proven by the inputs each
- * real builder receives, not by different output. Each builder is wrapped in a
+ * The reminder wording differs by mode and is tested in reminder-wording.spec.
+ * The guidance and checkpoint wording still emit upstream text in both modes,
+ * so the plumbing for those two builders is proven by the inputs each real
+ * builder receives, not by different output. Each builder is wrapped in a
  * pass-through spy: it still runs the real code, and the spy only records the
  * arguments of each call.
  *

@@ -251,12 +251,14 @@ export class ContextRolloverEngine extends CompactionEngine {
     if (!claimReminder(session)) return undefined
     const rolloverTokens = Math.floor(contextWindow * this.config.thresholdRatio)
     const percent = Math.min(100, Math.round((measurement.totalTokens / contextWindow) * 100))
+    const windowNumber = countRollovers(session) + 1
     return createUserMessage({
       content: [{
         type: 'text',
         text: buildReminderText({
           mode: this.config.mode,
           percent,
+          windowNumber,
           totalTokens: measurement.totalTokens,
           contextWindow,
           rolloverTokens,
