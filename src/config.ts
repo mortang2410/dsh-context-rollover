@@ -124,7 +124,7 @@ export interface RolloverConfig {
 
 /** Absolute token points for one routed model, replacing its ratio-based points. */
 export interface ModelThresholds {
-  /** Automatic rollover point in tokens. */
+  /** Rollover point in tokens (warning only; new_context rolls over). */
   thresholdTokens: number
   /** One-time reminder point in tokens; must not exceed {@link thresholdTokens}. */
   reminderThresholdTokens: number
