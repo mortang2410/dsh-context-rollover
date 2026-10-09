@@ -102,8 +102,10 @@ Responsibilities stay split (the Codex lesson):
    one warning per turn and does not roll over. Below that, at
    `reminderThresholdRatio` (0.40), a **one-per-window** reminder tells the model
    to run `/handoff-doc` and then call `new_context`.
-3. **Overflow**: a provider-confirmed `CONTEXT_WINDOW_EXCEEDED` forces a
-   rollover and retries the request.
+3. **Overflow** (never a rollover): the engine does not roll over on a
+   provider-confirmed `CONTEXT_WINDOW_EXCEEDED` and does not retry. The provider
+   error reaches the user unchanged. The user can run `/compact`, or the model
+   can call `new_context`, before the next request.
 4. **Manual**: `/compact` keeps working on an idle agent.
 
 Under `handoffOnly` (what the shipped preset sets) every path replaces the span
@@ -123,8 +125,8 @@ prior surface inside the span. A deferred pre-step is logged at info level, not
 as a failure, and it leaves the model's request pending so the rollover is
 retried rather than lost.
 
-The engine-driven paths (overflow, manual) have no model in the loop and
-therefore no document to name; they compose the deterministic notes checkpoint.
+Manual `/compact` has no model in the loop and therefore no document to name;
+it composes the deterministic notes checkpoint.
 No engine path reads a handoff directory: `handoffDir` and `handoffPattern` are
 accepted configuration keys that nothing reads.
 
@@ -366,7 +368,7 @@ Configuration (cordis.yml `config` on the plugin row):
 
 `modelThresholds` is keyed by the routed model id, the `model` field of the session's request context. A model with an entry uses its two token points. Every other model keeps `thresholdRatio` and `reminderThresholdRatio`, measured against its own window. A patch row replaces its whole config, so restate every other key when you add this one.
 
-An entry is not checked against the model's window. A `thresholdTokens` at or above the window never fires the warning before the window fills. The threshold itself never rolls over; only `new_context`, provider overflow, and `/compact` do.
+An entry is not checked against the model's window. A `thresholdTokens` at or above the window never fires the warning before the window fills. The threshold itself never rolls over; only `new_context` and `/compact` do.
 
 ## Local development with HMR
 
@@ -487,12 +489,12 @@ first, so `pnpm test` works whether or not `pnpm build` has run.
 ## Scope and limits
 
 - Under `handoffOnly` a rollover replacement contains the handoff document and
-  nothing else: no notes, no narration, no older user prompts and no tail. The
-  notes checkpoint still exists and is what the engine-driven paths compose.
-- Engine-initiated rollovers never write a handoff document. A provider-confirmed
-  overflow and manual `/compact` compose the deterministic notes checkpoint.
-  Crossing `thresholdRatio` only warns. The model-requested path never
-  substitutes notes for the document the model named.
+  nothing else: no notes, no narration, no older user prompts and no tail.
+- The only rollovers are the model's own `new_context` call and manual `/compact`.
+  Crossing `thresholdRatio` only warns, and a provider-confirmed overflow does not
+  roll over: the provider error reaches the user unchanged.
+- Manual `/compact` composes the deterministic notes checkpoint. The
+  model-requested path never substitutes notes for the document the model named.
 - Notes survive context rollovers within a session; no cross-session sync,
   embeddings, or cloud storage.
 - Notes are files, not session events: `Session.append` cannot mark a plugin's
