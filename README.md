@@ -104,8 +104,9 @@ Responsibilities stay split (the Codex lesson):
    to run `/handoff-doc` and then call `new_context`.
 3. **Overflow** (never a rollover): the engine does not roll over on a
    provider-confirmed `CONTEXT_WINDOW_EXCEEDED` and does not retry. The provider
-   error reaches the user unchanged. The user can run `/compact`, or the model
-   can call `new_context`, before the next request.
+   error reaches the user unchanged. The model usually cannot reach
+   `new_context` after an overflow: nothing is committed, so the next request is
+   at least as large and fails too. The user runs `/compact`.
 4. **Manual**: `/compact` keeps working on an idle agent.
 
 Under `handoffOnly` (what the shipped preset sets) every path replaces the span
