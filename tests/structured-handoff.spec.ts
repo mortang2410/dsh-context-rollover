@@ -13,9 +13,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { isHandoffNotePath, NotesStore } from '../src/notes.ts'
+import { countRollovers } from '../src/rollover.ts'
 import {
   derivedTexts,
   engineHarness,
+  followup,
+  newContextCall,
   ScriptedAdapter,
   seedExchanges,
   textResponse,
@@ -196,7 +199,7 @@ describe('NotesStore.renderCheckpoint in upstream mode', () => {
   })
 })
 
-describe('manual rollover through the engine', () => {
+describe('rollover through the engine', () => {
   it('carries only the newest handoff, first, under structured-handoff', async () => {
     const { ctx, engine, agent, session, notesBase } = await engineHarness('structured-manual', {
       mode: 'structured-handoff',
@@ -231,5 +234,26 @@ describe('manual rollover through the engine', () => {
     const compacted = await engine.compactNow(agent, new AbortController().signal)
     expect(compacted).not.toBeNull()
     expect(derivedTexts(session).join('\n')).toContain(`### ${OLDER}\nOLDER BODY`)
+  })
+
+  it('carries only the newest handoff, first, on a model-requested rollover under structured-handoff', async () => {
+    const { ctx, agent, session, notesBase } = await engineHarness('structured-model', {
+      mode: 'structured-handoff',
+    })
+    const store = new NotesStore(NotesStore.directoryFor(session.id, notesBase))
+    await writeNote(store, OLDER, 'OLDER BODY', 0)
+    await writeNote(store, NEWER, 'NEWER BODY', 10)
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+      ...Array.from({ length: 20 }, (_unused, index) => textResponse(`finding ${index} details`)),
+      newContextCall('{"handoff":"Implement the notes next steps."}'),
+      textResponse('implementing now'),
+    ]))
+    await seedExchanges(agent, 20)
+    await followup(agent, 'Research is done; roll over and implement.')
+
+    expect(countRollovers(session)).toBe(1)
+    const texts = derivedTexts(session).join('\n')
+    expect(texts).toContain(`## Durable notes\n### ${NEWER}\nNEWER BODY`)
+    expect(texts).not.toContain(OLDER)
   })
 })
