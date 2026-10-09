@@ -536,44 +536,21 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * Replace one inclusive surface-position span with a rollover checkpoint.
-   * The caller names the span, so the retention rule does not apply; no model
-   * is in the loop, so this path composes notes.
-   * @param start - inclusive first surface-node seq.
-   * @param end - inclusive last surface-node seq.
-   * @param agent - owner of the target session.
-   * @param signal - optional cancellation signal.
-   * @returns the durable rollover result.
+   * Always refuses: a caller-named span would roll the context over without the
+   * model's own `new_context` call, which is the only handoff rollover. The
+   * parameters are unused; the override exists to satisfy the abstract base
+   * method.
+   * @throws always, with the forced span compaction refusal message.
    */
   override async compactRegion(
-    start: Seq,
-    end: Seq,
-    agent: Agent,
-    signal?: AbortSignal,
+    _start: Seq,
+    _end: Seq,
+    _agent: Agent,
+    _signal?: AbortSignal,
   ): Promise<CompactionResult> {
-    signal?.throwIfAborted()
-    if (this.compactionOwnedElsewhere(agent)) {
-      throw new Error('context rollover refused: session compaction is owned by its agent preset')
-    }
-    const session = agent.session
-    const windowNumber = countRollovers(session) + 1
-    return commitRollover(
-      { meter: this.ctx.tokenMeter },
-      session,
-      start,
-      end,
-      {
-        owner: 'current-turn',
-        replacement: {
-          kind: 'checkpoint',
-          checkpoint: {
-            reason: 'manual',
-            windowNumber,
-            notes: await this.renderNotes(session),
-            handoff: null,
-          },
-        },
-      },
+    throw new Error(
+      'context rollover refused: forced span compaction is disabled; '
+      + 'the model\'s own new_context call is the only handoff rollover',
     )
   }
 

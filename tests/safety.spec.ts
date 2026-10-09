@@ -1,8 +1,8 @@
 /**
  * Runtime-driven safety tests: crossing the rollover point by pressure only
  * warns, a provider context overflow passes through without a rollover or a
- * retry, rollover requested at the turn-stop boundary, and the forced-span
- * `compactRegion` path.
+ * retry, rollover requested at the turn-stop boundary, and the refused
+ * forced-span `compactRegion` call.
  *
  * @module tests/safety.spec
  */
@@ -255,8 +255,8 @@ describe('the size preflight precedes the compaction lock', () => {
   })
 })
 
-describe('forced-span compaction', () => {
-  it('replaces the requested span with a rollover checkpoint', async () => {
+describe('forced-span compaction is refused', () => {
+  it('throws on a live span and leaves the log and the surface untouched', async () => {
     const { engine } = await engineHarness('compact-region')
     const session = closedConversation(8)
     session.append('turn/start', { turn: 5 })
@@ -265,16 +265,22 @@ describe('forced-span compaction', () => {
     const start = nodes[0]
     const end = nodes[nodes.length - 1]
     if (start === undefined || end === undefined) throw new Error('expected surface nodes')
+    const surfaceBefore = [...nodes]
+    const textsBefore = derivedTexts(session)
+    const refusalMessage = 'context rollover refused: forced span compaction is disabled; '
+      + 'the model\'s own new_context call is the only handoff rollover'
 
-    const result = await engine.compactRegion(start, end, fakeAgent)
+    const refusal = await engine.compactRegion(start, end, fakeAgent).then(
+      () => null,
+      (error: unknown) => error,
+    )
 
-    expect(countRollovers(session)).toBe(1)
-    expect(result.shadowedSeqs.length).toBeGreaterThan(0)
-    const texts = derivedTexts(session).join('\n')
-    expect(texts).toContain('<context-rollover checkpoint>')
-    expect(texts).toContain('reason: manual')
-    // The selected span contributes no copied transcript to the checkpoint.
-    expect(texts).not.toContain('assistant: exchange 1')
-    expect(texts).not.toContain('user: exchange 1')
+    expect(refusal).toBeInstanceOf(Error)
+    expect((refusal as Error).message).toBe(refusalMessage)
+    expect(countRollovers(session)).toBe(0)
+    expect(session.snapshotEvents().map(event => event.type).filter(type => type.startsWith('compaction/')))
+      .toEqual([])
+    expect(session.surface.nodes).toEqual(surfaceBefore)
+    expect(derivedTexts(session)).toEqual(textsBefore)
   })
 })

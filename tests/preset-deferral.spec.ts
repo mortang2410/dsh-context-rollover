@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { getTraceable, type Context } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import type { CompactionEngine } from '@deepseek-ai/dsh-compaction'
 import type { SessionSeq } from '@deepseek-ai/dsh-session'
 import { countRollovers } from '../src/rollover.ts'
@@ -51,23 +51,18 @@ describe('preset ownership', () => {
     expect(session.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
   })
 
-  it('refuses host-region commits for a preset-owned session, but not otherwise', async () => {
-    // compactRegion never reaches the commit path here (empty surface), so
-    // this exercises only the ownership gate in both directions.
+  it('refuses forced span compaction whatever the session ownership', async () => {
+    // The refusal runs before any span or ownership check, so the empty
+    // surface and every roster state must refuse the same way.
     const start = 0 as unknown as SessionSeq
     const end = 1 as unknown as SessionSeq
+    const refusal = /forced span compaction is disabled/
     const noRoster = await engineHarness('defer-none')
-    await expect(noRoster.engine.compactRegion(start, end, noRoster.agent)).rejects.toThrow(/not found in surface/)
+    await expect(noRoster.engine.compactRegion(start, end, noRoster.agent)).rejects.toThrow(refusal)
 
     const owned = await engineHarness('defer-region')
     provideRoster(owned.ctx, {} as CompactionEngine)
-    await expect(owned.engine.compactRegion(start, end, owned.agent)).rejects.toThrow(/owned by its agent preset/)
-
-    const selfOwned = await engineHarness('defer-region-self')
-    // Real agent-presets addressing returns the Cordis-traced service, not the
-    // raw constructor instance captured by lifecycle listeners.
-    provideRoster(selfOwned.ctx, getTraceable(selfOwned.ctx, selfOwned.engine))
-    await expect(selfOwned.engine.compactRegion(start, end, selfOwned.agent)).rejects.toThrow(/not found in surface/)
+    await expect(owned.engine.compactRegion(start, end, owned.agent)).rejects.toThrow(refusal)
   })
 
   it('answers new_context honestly instead of promising a boundary', async () => {
