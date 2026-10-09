@@ -43,11 +43,13 @@ export function renderReminderMessage(template: string, percent: number): string
 /** Model-facing configuration surface for the rollover engine. */
 export interface RolloverConfig {
   /**
-   * Automatic rollover pressure point as a fraction of the routed model's
-   * context window. Defaults to `0.9`.
+   * Rollover point as a fraction of the routed model's context window.
+   * Defaults to `0.9`.
    *
-   * This is the emergency fallback: it fires when the earlier reminder was
-   * ignored and the window is about to overflow.
+   * Crossing it does not roll the context over by itself. It logs one warning
+   * per turn, because only the model can write the handoff a rollover needs.
+   * The model's own `new_context` call still rolls over, and a provider-rejected
+   * overflow still rolls over to notes.
    */
   thresholdRatio?: number
   /**
@@ -94,11 +96,16 @@ export interface RolloverConfig {
   /** Base directory for note files; defaults to `<dsh home>/notes/<session id>`. */
   notesDir?: string
   /**
-   * Directory holding durable handoff documents, resolved against the session
-   * working directory. Only the emergency path (ticket 05's scan) reads it.
+   * Directory where the `/handoff-doc` skill writes durable handoff documents,
+   * resolved against the session working directory. No engine path reads it: a
+   * handoff is always the path the model names. Accepted so that existing
+   * presets and profiles keep validating.
    */
   handoffDir?: string
-  /** File-name pattern selecting handoff documents inside {@link handoffDir}. */
+  /**
+   * File-name pattern for handoff documents inside {@link handoffDir}. Accepted
+   * for configuration compatibility; no engine path reads it.
+   */
   handoffPattern?: string
   /**
    * Model-surface registration: `auto` registers tools and guidance only

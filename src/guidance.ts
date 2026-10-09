@@ -33,5 +33,6 @@ tool.
   current context state is not readable from repository files, from the plugin
   source, or from memory: only that tool reports it, and claiming a reading you
   did not receive is a fabrication even when the guess sounds plausible.
-- A reminder near the automatic rollover point appears at most once per window.
+- A reminder appears at most once per window when the context fills. Only your
+  \`new_context\` call starts a handoff rollover.
 `.trim()

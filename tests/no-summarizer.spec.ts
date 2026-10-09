@@ -315,21 +315,17 @@ describe('no summarizer on the model-requested rollover path', () => {
   })
 })
 
-describe('no summarizer on the pressure rollover path', () => {
-  it('starts no stream inside the compaction bracket at the automatic threshold', async () => {
-    const { ctx, agent, session, notesBase } = await engineHarness('no-summarizer-pressure', {
+describe('no summarizer on the pressure path', () => {
+  it('opens no compaction bracket and starts no stream at the threshold', async () => {
+    const { ctx, agent, session } = await engineHarness('no-summarizer-pressure', {
       thresholdRatio: 0.001,
       reminderThresholdRatio: 0.001,
       handoffOnly: true,
     })
     const windows = observeRollovers(ctx, session)
-    // A working notes checkpoint, so the rollover commits rather than being
-    // refused for want of a smaller replacement.
-    const store = new NotesStore(NotesStore.directoryFor(session.id, notesBase))
-    await store.write('state.md', 'goal: prove the pressure path calls no model\n')
 
-    // Two requests in the second turn: the pre-step that crosses the threshold
-    // rolls over, then the step's own request follows on the fresh window.
+    // Two requests in the second turn. Crossing the threshold only warns, so no
+    // compaction bracket may open, and therefore no summarizer stream may start.
     const adapter = new ScriptedAdapter([
       usageResponse(`pressure answer one ${'detail '.repeat(600)}`, 5000),
       toolCall('get_context_remaining', '{}', 'c1'),
@@ -340,12 +336,9 @@ describe('no summarizer on the pressure rollover path', () => {
     await followup(agent, 'turn one')
     await followup(agent, 'turn two')
 
-    assertOrdinalsAreInvocationOrder()
-    const window = soleCommittedWindow(windows, session)
-    assertNoStreamInside(window, session, 1)
-    assertRequestsStraddle(window)
+    expect(windows).toHaveLength(0)
     expect(session.deriveMessages().map(message => JSON.stringify(message)).join('\n'))
-      .toContain('reason: pressure')
+      .not.toContain('reason: pressure')
   })
 })
 

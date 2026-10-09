@@ -628,8 +628,9 @@ describe('the rollover transaction', () => {
   })
 
   it('leaves the notes composition intact for the paths that still use it', async () => {
-    // Ticket 05 keeps the notes checkpoint as the emergency fallback, so the
-    // composition must stay reachable and unchanged beside the handoff one.
+    // The notes checkpoint is what the engine-driven paths (overflow, manual)
+    // compose, so its composition must stay reachable and unchanged beside the
+    // handoff one.
     const meter = await bareMeter()
     const session = closedConversation(4, 10)
     const range = selectRolloverRange(session, meter.measure(session), { kind: 'handoff-only' })

@@ -430,8 +430,9 @@ export function selectRolloverRange(
  * pure read over the selected span and the candidate text, on the meter's
  * current route pricing. Every caller that must decide BEFORE taking the
  * compaction lock uses it: the `new_context` tool, so a candidate that cannot
- * shrink the span is refused while the model can still read the reason, and the
- * emergency path, so a refused candidate leaves no failed transaction behind.
+ * shrink the span is refused while the model can still read the reason
+ * ({@link preflightRolloverReplacement}), so a refused candidate leaves no failed
+ * transaction behind.
  *
  * The returned {@link RolloverSizing} carries the span it measured and the text
  * it priced, and callers pass that value on to {@link commitRollover} as

@@ -172,8 +172,8 @@ function getContextRemainingTool(deps: RolloverToolDependencies) {
   return defineTool({
     name: 'get_context_remaining',
     description:
-      'Get the remaining tokens in the current context window, and the headroom before the automatic '
-      + 'rollover. Takes no arguments; call it to read the measured numbers — the current context state '
+      'Get the remaining tokens in the current context window, and the headroom before the rollover point. '
+      + 'Takes no arguments; call it to read the measured numbers. The current context state '
       + 'is not derivable from repository files or from the plugin source.',
     parameters: {},
     output: {
@@ -191,7 +191,10 @@ function getContextRemainingTool(deps: RolloverToolDependencies) {
             lines.push(`Context window: ~${value.context_window} tokens (${percent}% used).`)
           }
           if (value.auto_rollover_tokens_left !== null) {
-            lines.push(`Remaining before the automatic rollover: ~${value.auto_rollover_tokens_left} tokens.`)
+            lines.push(
+              `Remaining before the rollover point: ~${value.auto_rollover_tokens_left} tokens `
+              + '(crossing it only warns; your new_context call rolls over).',
+            )
           }
         }
         return [{ type: 'text', text: lines.join('\n') }]

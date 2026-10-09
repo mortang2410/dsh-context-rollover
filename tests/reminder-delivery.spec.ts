@@ -18,6 +18,9 @@
  * @module tests/reminder-delivery
  */
 
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { DEFAULT_REMINDER_MESSAGE, resolveConfig } from '../src/config.ts'
@@ -32,9 +35,11 @@ import {
 import {
   engineHarness,
   followup,
+  newContextCall,
   reminderTexts,
   ScriptedAdapter,
-  toolCall,
+  seedExchanges,
+  textResponse,
   usageResponse,
 } from './harness.ts'
 
@@ -103,26 +108,24 @@ describe('pressure reminder delivery', () => {
   })
 
   it('opens a fresh claim slot when a rollover starts a new window', async () => {
-    // The shape tests/safety.spec.ts uses to commit a pressure rollover: a low
-    // threshold, no retained tail, and a second turn that opens with a tool
-    // call so its pre-step sees turn one fully closed.
-    const { ctx, agent, session } = await engineHarness(sessionId('rollover'), {
-      thresholdRatio: 0.001,
-      reminderThresholdRatio: 0.001,
-      retainTokens: 0,
-    })
+    // A model-requested rollover: the model names a handoff document, the
+    // rollover starts window #1, and the reminder identity must follow it.
+    const cwd = await mkdtemp(join(tmpdir(), 'dsh-reminder-window-'))
+    const handoffPath = join(cwd, 'HANDOFF-window.md')
+    await writeFile(handoffPath, '# Handoff\n\nContinue the window test.\n', 'utf8')
+    const { ctx, agent, session } = await engineHarness(sessionId('rollover'), {}, { cwd })
     const adapter = new ScriptedAdapter([
-      usageResponse(`research answer one ${'detail '.repeat(600)}`, 5000),
-      toolCall('get_context_remaining', '{}', 'c1'),
-      usageResponse(`research answer two ${'detail '.repeat(600)}`, 6000),
+      ...Array.from({ length: 20 }, (_unused, index) => textResponse(`finding ${index} details`)),
+      newContextCall(JSON.stringify({ handoff_path: handoffPath })),
+      textResponse('continuing in window one'),
     ])
     ctx.llm.registerAdapter(['mock'], adapter)
 
-    await followup(agent, 'turn one')
+    await seedExchanges(agent, 20)
     expect(countRollovers(session)).toBe(0)
     const firstWindowKey = reminderWindowKey(session)
 
-    await followup(agent, 'turn two')
+    await followup(agent, 'roll over now and continue')
     expect(countRollovers(session)).toBe(1)
 
     // The rollover advanced the window, so the reminder identity changed: a
@@ -172,7 +175,7 @@ describe('the 40% handoff reminder', () => {
     // Deliberately no ratio overrides: this case measures the SHIPPED defaults,
     // where reminderThresholdRatio is 0.40 and thresholdRatio is 0.90, against
     // a 100k window. 45k of usage is past the reminder point and far below the
-    // emergency rollover point, so the only thing that can fire is the reminder.
+    // rollover point, so the only thing that can fire is the reminder.
     const { ctx, agent, session } = await engineHarness(sessionId('forty-once'), {})
     const adapter = new ScriptedAdapter([
       usageResponse('answer 1', 45_000),

@@ -13,6 +13,22 @@ import { describe, expect, it } from 'vitest'
 import { resolveConfig, rolloverPointsFor } from '../src/config.ts'
 import type { RolloverConfig } from '../src/config.ts'
 import { countRollovers } from '../src/rollover.ts'
+
+/** Record every warning the engine logs, while still forwarding it. */
+function captureWarnings(ctx: { logger: { warn: (message: string) => void } }): string[] {
+  const warnings: string[] = []
+  const original = ctx.logger.warn.bind(ctx.logger)
+  ctx.logger.warn = (message: string): void => {
+    warnings.push(message)
+    original(message)
+  }
+  return warnings
+}
+
+/** The once-per-turn warning logged when pressure crosses the rollover point. */
+function isPressureWarning(message: string): boolean {
+  return message.includes('automatic rollover is disabled')
+}
 import {
   engineHarness,
   followup,
@@ -123,11 +139,12 @@ describe('per-model points in the live pipeline', () => {
     expect(reminderTexts(session)).toHaveLength(0)
   })
 
-  it('rolls over at the entry point for the configured model, not at the ratio point', async () => {
+  it('warns at the entry point for the configured model, and never rolls over on pressure', async () => {
     const { ctx, agent, session } = await engineHarness(sessionId('roll-own'), {
       retainTokens: 0,
       modelThresholds: { [MODEL]: { thresholdTokens: 30_000, reminderThresholdTokens: 20_000 } },
     })
+    const warnings = captureWarnings(ctx)
     ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
       usageResponse(`research answer one ${'detail '.repeat(600)}`, 35_000),
       toolCallWithUsage('get_context_remaining', '{}', 35_500),
@@ -136,7 +153,10 @@ describe('per-model points in the live pipeline', () => {
 
     await followup(agent, 'turn one')
     await followup(agent, 'turn two')
-    expect(countRollovers(session)).toBe(1)
+    // 35,000 is above the 30,000 entry point. Both pre-steps of turn two share
+    // one turn, so exactly one warning fires, and nothing rolls over on pressure.
+    expect(countRollovers(session)).toBe(0)
+    expect(warnings.filter(isPressureWarning)).toHaveLength(1)
   })
 
   it('keeps the ratio rollover point when no entry matches', async () => {
@@ -144,6 +164,7 @@ describe('per-model points in the live pipeline', () => {
     const { ctx, agent, session } = await engineHarness(sessionId('roll-ratio'), {
       retainTokens: 0,
     })
+    const warnings = captureWarnings(ctx)
     ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
       usageResponse(`research answer one ${'detail '.repeat(600)}`, 35_000),
       toolCallWithUsage('get_context_remaining', '{}', 35_500),
@@ -153,6 +174,7 @@ describe('per-model points in the live pipeline', () => {
     await followup(agent, 'turn one')
     await followup(agent, 'turn two')
     expect(countRollovers(session)).toBe(0)
+    expect(warnings.filter(isPressureWarning)).toHaveLength(0)
   })
 
   it('reports headroom to the entry rollover point in get_context_remaining', async () => {
@@ -169,7 +191,7 @@ describe('per-model points in the live pipeline', () => {
       await followup(agent, 'turn one')
       await followup(agent, 'turn two')
       const lastRequest = JSON.stringify(adapter.recorded.at(-1)?.messages ?? [])
-      const match = /automatic rollover: ~(\d+) tokens/.exec(lastRequest)
+      const match = /rollover point: ~(\d+) tokens/.exec(lastRequest)
       expect(match).not.toBeNull()
       return Number(match?.[1])
     }

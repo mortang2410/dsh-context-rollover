@@ -1,7 +1,7 @@
 /**
- * Runtime-driven safety tests: automatic pressure rollover, provider-confirmed
- * context-overflow recovery with retry, rollover requested at the turn-stop
- * boundary, and the forced-span `compactRegion` path.
+ * Runtime-driven safety tests: crossing the rollover point by pressure only
+ * warns, provider-confirmed context-overflow recovery with retry, rollover
+ * requested at the turn-stop boundary, and the forced-span `compactRegion` path.
  *
  * @module tests/safety.spec
  */
@@ -42,21 +42,21 @@ import {
   usageResponse,
 } from './harness.ts'
 
-describe('automatic pressure rollover', () => {
-  it('rolls over without copying shadowed user messages when usage crosses the threshold', async () => {
+/** The once-per-turn warning the engine logs when pressure crosses the rollover point. */
+function isPressureWarning(message: string): boolean {
+  return message.includes('automatic rollover is disabled')
+}
+
+describe('pressure above the rollover point', () => {
+  it('does not roll over on its own, and keeps the surface as it is', async () => {
     const { ctx, agent, session } = await engineHarness('pressure-auto', {
       // 100 tokens of a 100k window: the first honest reading crosses it.
       thresholdRatio: 0.001,
       reminderThresholdRatio: 0.001,
-      // Zero tail budget: the trailing message prices at zero, so the budget
-      // is already met there and the shadow covers the whole middle span
-      // (everything but the system head and the tail).
       retainTokens: 0,
     })
-    // Long answers so the shadowed span's priced surface dwarfs the
-    // checkpoint (the shrink guard compares heuristic node pricing). Turn two
-    // opens with a tool call: its pre-step still sees turn one fully closed,
-    // so the span covers it past the system head.
+    // Long answers so the surface is large enough to matter. Turn two opens
+    // with a tool call, so it makes two model requests.
     const adapter = new ScriptedAdapter([
       usageResponse(`research answer one ${'detail '.repeat(600)}`, 5000),
       toolCall('get_context_remaining', '{}', 'c1'),
@@ -67,34 +67,24 @@ describe('automatic pressure rollover', () => {
     await followup(agent, 'turn one')
     expect(countRollovers(session)).toBe(0)
 
+    const diagnostics = captureDiagnostics(ctx, session)
     await followup(agent, 'turn two')
 
-    // The first post-usage pre-step crossed the threshold and rolled over
-    // automatically; the turn then continued on the fresh window.
-    const diagnostics = captureDiagnostics(ctx, session)
-    const rolloverCount = countRollovers(session)
-    if (rolloverCount !== 1) {
-      throw new Error(
-        `expected one committed rollover, got ${rolloverCount}; `
-        + `warnings: ${diagnostics.warnings.join('; ')}; `
-        + `compaction errors: ${diagnostics.compactionErrors.join('; ')}`,
-      )
-    }
+    // Only the model's own new_context call or a provider-confirmed overflow
+    // may roll the context over. Pressure warns once and leaves the surface alone.
+    expect(countRollovers(session)).toBe(0)
     const texts = derivedTexts(session).join('\n')
-    expect(texts).toContain('reason: pressure')
-    expect(texts).not.toContain('Recovery record')
-    // A zero-token tail deliberately leaves the shadowed prior prompt out;
-    // the fresh turn continues from its own queued prompt and result.
-    expect(texts).not.toContain('turn one')
+    expect(texts).not.toContain('reason: pressure')
+    expect(texts).toContain('turn one')
     expect(texts).toContain('research answer two')
+    expect(diagnostics.warnings.filter(isPressureWarning)).toHaveLength(1)
   })
 })
 
-describe('pressure anti-thrash', () => {
-  it('rolls over at most once per turn when usage stays above the threshold', async () => {
+describe('pressure warning cadence', () => {
+  it('warns at most once per turn when usage stays above the rollover point', async () => {
     const { ctx, agent, session } = await engineHarness('pressure-thrash', {
-      // Threshold (200) far below usage: every pre-step would cross it, so
-      // without the guard a multi-step turn rolls over on every step.
+      // Threshold (200) far below usage: every pre-step is above it.
       thresholdRatio: 0.002,
       reminderThresholdRatio: 0.001,
       retainTokens: 40,
@@ -109,19 +99,20 @@ describe('pressure anti-thrash', () => {
       usageResponse(`step answer 2 ${'context '.repeat(80)}`, 2200),
     ])
     ctx.llm.registerAdapter(['mock'], adapter)
+    const diagnostics = captureDiagnostics(ctx, session)
 
     await followup(agent, 'turn one')
     expect(countRollovers(session)).toBe(0)
 
     await followup(agent, 'turn two')
-    // Exactly one pressure rollover for the whole two-pre-step turn: the
-    // second crossing is the treadmill case the guard blocks.
-    expect(countRollovers(session)).toBe(1)
-    expect(derivedTexts(session).join('\n')).toContain('reason: pressure')
+    // Two pre-steps in one turn produce one warning, and still no rollover.
+    expect(countRollovers(session)).toBe(0)
+    expect(diagnostics.warnings.filter(isPressureWarning)).toHaveLength(1)
 
-    // The guard is per turn: the next turn may roll over once more.
+    // The warning is per turn: the next turn warns once more.
     await followup(agent, 'turn three')
-    expect(countRollovers(session)).toBe(2)
+    expect(countRollovers(session)).toBe(0)
+    expect(diagnostics.warnings.filter(isPressureWarning)).toHaveLength(2)
     expect(derivedTexts(session).join('\n')).toContain('step answer 2')
   })
 })

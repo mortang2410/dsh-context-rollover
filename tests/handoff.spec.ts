@@ -3,9 +3,9 @@
  *
  * The module owns one rule with two surfaces: a throwing read for
  * `new_context` (the refusal must reach the model as a tool result) and a
- * non-throwing probe for the emergency scan (a bad candidate is skipped, not
- * fatal). Both are asserted here, per failure case, with the specific failure
- * rather than "something threw".
+ * non-throwing probe (a caller can branch on the reason without catching). Both
+ * are asserted here, per failure case, with the specific failure rather than
+ * "something threw".
  *
  * @module tests/handoff
  */
@@ -215,8 +215,7 @@ describe('throwing and non-throwing callers share one rule', () => {
     const probed = await readHandoffFile(request)
     expect(probed.ok).toBe(false)
 
-    // The emergency scan needs the failure as data, so it can skip one bad
-    // candidate instead of aborting the whole rollover.
+    // The non-throwing probe reports the failure as data for callers that branch on it.
     await expect(readHandoffFileOrThrow(request)).rejects.toBeInstanceOf(HandoffError)
     await expect(readHandoffFileOrThrow(request)).rejects.toThrow(/no handoff document/)
     const error = await readHandoffFileOrThrow(request).catch((reason: unknown) => reason)

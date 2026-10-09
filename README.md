@@ -97,10 +97,10 @@ Responsibilities stay split (the Codex lesson):
    the durable document, and calls `new_context({ handoff_path })` with its
    path. The document replaces the whole prior surface under the
    `handoffOnly` rule.
-2. **Pressure** (safety net): above `thresholdRatio` (0.90) the engine rolls
-   over automatically. Below that, at `reminderThresholdRatio` (0.40), a
-   **one-per-window** reminder tells the model to run `/handoff-doc` and then
-   call `new_context`.
+2. **Pressure** (warning only): above `thresholdRatio` (0.90) the engine logs
+   one warning per turn and does not roll over. Below that, at
+   `reminderThresholdRatio` (0.40), a **one-per-window** reminder tells the model
+   to run `/handoff-doc` and then call `new_context`.
 3. **Overflow**: a provider-confirmed `CONTEXT_WINDOW_EXCEEDED` forces a
    rollover and retries the request.
 4. **Manual**: `/compact` keeps working on an idle agent.
@@ -122,11 +122,10 @@ prior surface inside the span. A deferred pre-step is logged at info level, not
 as a failure, and it leaves the model's request pending so the rollover is
 retried rather than lost.
 
-The engine-driven paths (pressure, overflow, manual) have no model in the loop
-and therefore no document to read; they still compose the deterministic notes
-checkpoint. Ticket 05 teaches the pressure path to prefer a scanned handoff
-document; `handoffDir` and `handoffPattern` are already validated configuration
-keys that nothing reads yet.
+The engine-driven paths (overflow, manual) have no model in the loop and
+therefore no document to name; they compose the deterministic notes checkpoint.
+No engine path reads a handoff directory: `handoffDir` and `handoffPattern` are
+accepted configuration keys that nothing reads.
 
 ## What this plugin touches
 
@@ -325,28 +324,19 @@ other byte identical, and fails loud when either declaration's shape drifts. See
 on a different host line must do, and why a patch that matches no row is a
 silent no-op rather than an error.
 
-### The 0.90 emergency fallback has no model in the loop
+### Crossing 0.90 never picks a handoff
 
-`thresholdRatio` (0.90) fires when the 40% reminder was ignored and the window is
-about to overflow. At that point **no model is available to write anything**, so
-the engine cannot ask for a handoff: it scans `handoffDir` (default
-`.scratch/handoff`, relative to the session working directory) for files matching
-`handoffPattern` (default `HANDOFF-*.md`) and takes the **newest by modification
-time**. So the emergency path lands on the most recently written handoff
-document, not necessarily the one for the current task.
+`thresholdRatio` (0.90) marks a context that is too full to keep going. The
+engine does not compact there. Only the model can write the handoff, so crossing
+0.90 logs one warning per turn and waits for the model's own `new_context` call.
 
-The scan is shrink-aware, and the order matters: the newest candidate that is
-smaller than the span it would replace wins; if no candidate qualifies (none
-exists, all are unreadable, empty, oversized, or too large to shrink the span),
-the engine falls back to the deterministic notes checkpoint so the context is
-still reduced instead of stalling. The sizing decision is made BEFORE the
-compaction lock is taken, so a rejected candidate leaves no transaction and no
-error in the log; the accepted numbers are then reused for the commit, so a
-price change between the decision and the commit cannot turn an accepted
-candidate into a failed transaction.
+An earlier design rolled over at 0.90 with no model in the loop. It scanned
+`handoffDir` (default `.scratch/handoff`, relative to the session working
+directory) for `handoffPattern` files (default `HANDOFF-*.md`) and took the
+**newest by modification time**. Handoff files in a shared folder are not tied to
+a session, so that path could load another session's document into the current
+context. The scan is removed.
 
-If a task's handoff must survive an emergency rollover, keep it as the newest
-file in `handoffDir`, or ignore the 40% reminder at your own risk.
 
 Configuration (cordis.yml `config` on the plugin row):
 
@@ -355,14 +345,14 @@ Configuration (cordis.yml `config` on the plugin row):
     - id: context-rollover
       name: dsh-context-rollover
       config:
-        thresholdRatio: 0.9          # emergency rollover point (fraction of window)
+        thresholdRatio: 0.9          # warning point (fraction of window); never rolls over by itself
         reminderThresholdRatio: 0.4  # one-time /handoff-doc reminder point
         handoffOnly: true            # no tail: the handoff document replaces the surface
         retainRatio: 0.1             # recent verbatim tail when handoffOnly is false
         retainTokens: null           # absolute tail budget; overrides retainRatio
         handoffMaxChars: 20000       # max accepted handoff document size
-        handoffDir: .scratch/handoff # explicit + emergency-scan root, relative to the session cwd
-        handoffPattern: 'HANDOFF-*.md'
+        handoffDir: .scratch/handoff # accepted for compatibility; no engine path reads it
+        handoffPattern: 'HANDOFF-*.md' # accepted for compatibility; no engine path reads it
         notesEnabled: true
         historyEnabled: true
         notesDir: null               # base dir override; default <dsh home>/notes
@@ -498,12 +488,10 @@ first, so `pnpm test` works whether or not `pnpm build` has run.
 - Under `handoffOnly` a rollover replacement contains the handoff document and
   nothing else: no notes, no narration, no older user prompts and no tail. The
   notes checkpoint still exists and is what the engine-driven paths compose.
-- The one exception to "the document and nothing else" is the 0.90 emergency
-  fallback. When no handoff document is available to scan (none exists, or none
-  that would shrink the span), that path has no model in the loop to write one,
-  so it composes the deterministic notes checkpoint instead of leaving the
-  window to overflow. The model-requested path never substitutes notes for the
-  document the model named.
+- Engine-initiated rollovers never write a handoff document. A provider-confirmed
+  overflow and manual `/compact` compose the deterministic notes checkpoint.
+  Crossing `thresholdRatio` only warns. The model-requested path never
+  substitutes notes for the document the model named.
 - Notes survive context rollovers within a session; no cross-session sync,
   embeddings, or cloud storage.
 - Notes are files, not session events: `Session.append` cannot mark a plugin's
