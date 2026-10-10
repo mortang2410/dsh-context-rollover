@@ -437,11 +437,44 @@ export function reminderWindowKey(session: Session): string {
  * @returns true when the event is this engine's pressure reminder, narrowing
  *   the event to a `user/message` for the caller.
  */
+/**
+ * The source fields the reminder check reads, widened from the merge-extensible
+ * message source union so that the legacy and migrated shapes can be inspected.
+ */
+interface ReminderSourceView {
+  readonly kind: string
+  readonly plugin?: unknown
+  readonly form?: unknown
+  readonly summary?: unknown
+}
+
+/**
+ * Whether a message source names this engine as its producer. Three shapes
+ * reach this check, and each one is matched exactly:
+ *
+ * - `PLUGIN_NAME`: what the current sender writes.
+ * - `plugin:<PLUGIN_NAME>`: what the host's V3 to V4 session migration writes
+ *   for a released `plugin` wrapper, because this engine's name is not one of
+ *   the host's released same-name producers.
+ * - `{ kind: 'plugin', plugin: PLUGIN_NAME }`: the wrapper the released engine
+ *   wrote, which a session may still carry.
+ *
+ * A different plugin name, or a kind that only shares a prefix, is a different
+ * producer and does not match.
+ * @param source - the message source to test.
+ * @returns true when the source names this engine.
+ */
+function namesThisEngine(source: ReminderSourceView): boolean {
+  if (source.kind === PLUGIN_NAME || source.kind === `plugin:${PLUGIN_NAME}`) return true
+  return source.kind === 'plugin' && source.plugin === PLUGIN_NAME
+}
+
 export function isPressureReminder(event: SessionEvent): event is SessionEvent<'user/message'> {
   if (event.type !== 'user/message') return false
-  const { source } = event.data
-  if (source.kind !== PLUGIN_NAME) return false
+  const source: ReminderSourceView = event.data.source
+  if (!namesThisEngine(source)) return false
   return source.form === 'notice'
+    && typeof source.summary === 'string'
     && source.summary.startsWith(REMINDER_SUMMARY_PREFIX)
 }
 
