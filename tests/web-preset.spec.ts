@@ -645,7 +645,7 @@ describe('the shipped declaration loads through the real preset registry', () =>
    * @returns the booted context, its registry, the session's agent and
    *   compaction service, the composition inventory, and a disposer.
    */
-  async function bootPreset(presetId: string) {
+  async function bootPreset(presetId: string, declarationEdit?: (text: string) => string) {
     const anchor = builtInstallationAnchor()
     const work = mkdtempSync(join(tmpdir(), 'dsh-web-preset-boot-'))
     bootCleanup.push(() => { rmSync(work, { recursive: true, force: true }) })
@@ -673,6 +673,10 @@ describe('the shipped declaration loads through the real preset registry', () =>
     // declarations: copying only standard-rollover leaves the local-cordis
     // overlay unreadable and `skippedBundles` non-empty.
     cpSync(join(repoRoot, 'presets'), join(engineDir, 'presets'), { recursive: true })
+    if (declarationEdit !== undefined) {
+      const declarationPath = join(engineDir, 'presets', presetId, 'declaration.patch.yml')
+      writeFileSync(declarationPath, declarationEdit(readFileSync(declarationPath, 'utf8')))
+    }
     // The manifest carries the real `peerDependencies`. They are not decoration:
     // the host's linked-root routing reads THE IMPORTING PACKAGE's manifest to
     // decide that a peer of this plugin resolves from the installation closure
@@ -851,6 +855,23 @@ describe('the shipped declaration loads through the real preset registry', () =>
       // The shipped `cordis` preset is unaffected: it still runs the summarizer.
       const cordisRows = inventory.find(row => row.id === 'cordis')?.rows ?? []
       expect(cordisRows.map(row => row.entryId)).toContain('compaction-basic')
+    } finally {
+      await booted.dispose()
+    }
+  }, 300_000)
+
+  it('a custom reminderMessage in the preset row reaches the mounted engine', async () => {
+    // The shipped text equals the engine default, so a row that dropped the key
+    // would look identical. A distinct row text makes the wiring observable.
+    const booted = await bootPreset('local-cordis', (text) => {
+      const edited = text.replace('reminderMessage: "Context is', 'reminderMessage: "Row text is')
+      expect(edited).not.toBe(text)
+      return edited
+    })
+    try {
+      const service = booted.service as CompactionEngine & { config: { reminderMessage: string } }
+      expect(service?.constructor.name).toBe('ContextRolloverEngine')
+      expect(service.config.reminderMessage).toMatch(/^Row text is \{percent\}% full\./)
     } finally {
       await booted.dispose()
     }
