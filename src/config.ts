@@ -53,7 +53,8 @@ export interface RolloverConfig {
   /**
    * Rollover mode. `upstream` keeps the upstream reminder, guidance, and
    * checkpoint wording; `structured-handoff` selects the structured-handoff
-   * wording and rule. Defaults to `upstream`.
+   * wording and rule. Defaults to `upstream`. `structured-handoff` requires
+   * `notesEnabled` to stay true; the pair is rejected at load otherwise.
    */
   mode?: RolloverMode
   /**
@@ -169,6 +170,16 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
       `context-rollover: mode must be 'upstream' or 'structured-handoff', got ${String(mode)}`,
     )
   }
+  // The structured handoff is a note the model writes and the notes tool
+  // carries. With notes disabled the guidance would name a carrier that is
+  // never mounted, so the pair is refused rather than run.
+  const notesEnabled = config.notesEnabled ?? true
+  if (mode === 'structured-handoff' && !notesEnabled) {
+    throw new TypeError(
+      `context-rollover: mode 'structured-handoff' cannot be combined with notesEnabled ${String(notesEnabled)}; `
+      + "the structured handoff is carried in a note, so set notesEnabled to true or mode to 'upstream'",
+    )
+  }
   const modelThresholds = config.modelThresholds ?? {}
   if (typeof modelThresholds !== 'object' || Array.isArray(modelThresholds)) {
     throw new TypeError(
@@ -198,7 +209,7 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
     retainRatio,
     retainTokens,
     handoffMaxChars,
-    notesEnabled: config.notesEnabled ?? true,
+    notesEnabled,
     historyEnabled: config.historyEnabled ?? true,
     notesDir: config.notesDir,
     modelSurface,
