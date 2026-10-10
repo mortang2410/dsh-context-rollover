@@ -12,7 +12,6 @@
  */
 
 import { Context, symbols } from '@deepseek-ai/cordis'
-import z from '@deepseek-ai/schemastery'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
@@ -25,7 +24,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { Seq } from './compat.ts'
-import { renderReminderMessage, resolveConfig, rolloverPointsFor } from './config.ts'
+import { Config as RolloverConfigSchema, renderReminderMessage, resolveConfig, rolloverPointsFor } from './config.ts'
 import type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
 import type { RolloverReplacement } from './checkpoint.ts'
 import { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
@@ -147,25 +146,8 @@ export { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
 export class ContextRolloverEngine extends CompactionEngine {
   static inject = ['llm', 'tokenMeter', 'sessions', 'tools', 'systemPrompt']
 
-  static Config: z<RolloverConfig> = z.object({
-    thresholdRatio: z.number(),
-    reminderThresholdRatio: z.number(),
-    reminderMessage: z.string(),
-    retainRatio: z.number(),
-    retainTokens: z.number().step(1).min(0),
-    handoffOnly: z.boolean(),
-    handoffMaxChars: z.number().step(1).min(0),
-    notesEnabled: z.boolean(),
-    historyEnabled: z.boolean(),
-    notesDir: z.string(),
-    handoffDir: z.string(),
-    handoffPattern: z.string(),
-    modelSurface: z.union(['auto', 'always'] as const),
-    modelThresholds: z.dict(z.object({
-      thresholdTokens: z.number().step(1).min(1),
-      reminderThresholdTokens: z.number().step(1).min(1),
-    })),
-  })
+  /** The one configuration schema, defined beside {@link RolloverConfig}. */
+  static Config = RolloverConfigSchema
 
   /** Resolved and validated configuration. */
   readonly config: ResolvedRolloverConfig
