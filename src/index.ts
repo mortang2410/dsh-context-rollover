@@ -25,7 +25,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { Seq } from './compat.ts'
-import { resolveConfig, ROLLOVER_MODES } from './config.ts'
+import { resolveConfig, ROLLOVER_MODES, rolloverPointsFor } from './config.ts'
 import type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
 import type { RolloverReason } from './checkpoint.ts'
 import { buildContextManagementGuidance } from './guidance.ts'
@@ -108,6 +108,10 @@ export class ContextRolloverEngine extends CompactionEngine {
     notesDir: z.string(),
     modelSurface: z.union(['auto', 'always'] as const),
     mode: z.union(ROLLOVER_MODES),
+    modelThresholds: z.dict(z.object({
+      thresholdTokens: z.number().step(1).min(1),
+      reminderThresholdTokens: z.number().step(1).min(1),
+    })),
   })
 
   /** Resolved and validated configuration. */
@@ -239,17 +243,17 @@ export class ContextRolloverEngine extends CompactionEngine {
    * reminder threshold for the first time in the current window.
    */
   private pendingReminder(session: Session): UserMessage | undefined {
-    const contextWindow = session.requestContext()?.contextWindow
-    if (contextWindow === undefined) return undefined
+    const route = session.requestContext()
+    if (route?.contextWindow === undefined) return undefined
+    const contextWindow = route.contextWindow
     const measurement = this.ctx.tokenMeter.measure(session)
     if (measurement.baseline.kind === 'none') return undefined
-    const reminderTokens = Math.floor(contextWindow * this.config.reminderThresholdRatio)
+    const { reminderTokens, rolloverTokens } = rolloverPointsFor(this.config, contextWindow, route.model)
     if (measurement.totalTokens < reminderTokens) return undefined
     // Claimed synchronously: on a preset deployment the host row and the
     // preset row both observe this pre-step, and neither delivery is in the
     // log yet when the second one decides.
     if (!claimReminder(session)) return undefined
-    const rolloverTokens = Math.floor(contextWindow * this.config.thresholdRatio)
     const percent = Math.min(100, Math.round((measurement.totalTokens / contextWindow) * 100))
     const windowNumber = countRollovers(session) + 1
     return createUserMessage({
@@ -281,16 +285,16 @@ export class ContextRolloverEngine extends CompactionEngine {
    * prefix cache every step. Model-requested and overflow rollovers are exempt.
    */
   private async rollOverOnPressure(agent: Agent, turn: number, signal: AbortSignal): Promise<void> {
-    const contextWindow = agent.session.requestContext()?.contextWindow
-    if (contextWindow === undefined) return
+    const route = agent.session.requestContext()
+    if (route?.contextWindow === undefined) return
     const measurement = this.ctx.tokenMeter.measure(agent.session)
     if (measurement.baseline.kind === 'none') return
-    const rolloverTokens = Math.floor(contextWindow * this.config.thresholdRatio)
+    const { rolloverTokens } = rolloverPointsFor(this.config, route.contextWindow, route.model)
     if (measurement.totalTokens < rolloverTokens) return
     if (this.pressureRolledTurns.has(turnKey(agent.session.id, turn))) {
       this.ctx.logger.warn(
         `context rollover: usage is still above the automatic threshold after this turn's pressure `
-        + `rollover (tail + per-step context likely exceed thresholdRatio * contextWindow); `
+        + `rollover (tail + per-step context likely exceed the rollover point); `
         + 'skipping further automatic rollovers this turn',
       )
       return

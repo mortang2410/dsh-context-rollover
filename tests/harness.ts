@@ -71,7 +71,11 @@ export class TextAdapter extends LlmAdapter {
 export class ScriptedAdapter extends LlmAdapter {
   readonly requests: RequestMessage[][] = []
 
-  constructor(private readonly script: StreamScript) {
+  /** `contextWindow` is the window the adapter advertises; it defaults to {@link CONTEXT_WINDOW}. */
+  constructor(
+    private readonly script: StreamScript,
+    private readonly contextWindow: number = CONTEXT_WINDOW,
+  ) {
     super()
   }
 
@@ -80,7 +84,7 @@ export class ScriptedAdapter extends LlmAdapter {
       provider,
       id: model,
       name: model,
-      context: { contextWindow: CONTEXT_WINDOW },
+      context: { contextWindow: this.contextWindow },
     })
   }
 
@@ -245,15 +249,20 @@ export interface EngineHarness {
   readonly notesBase: string
 }
 
-/** Mount one engine over the standard test stack with a temp notes base. */
+/**
+ * Mount one engine over the standard test stack with a temp notes base. `model`
+ * is the routed model id the session reports (its `requestContext().model`);
+ * the provider stays the scripted one.
+ */
 export async function engineHarness(
   id: string,
   config: Partial<RolloverConfig> = {},
+  model: string = MODEL,
 ): Promise<EngineHarness> {
   const ctx = await mountTestContext()
   const notesBase = await tempNotesDir()
   const engine = new ContextRolloverEngine(ctx, { notesDir: notesBase, retainTokens: 40, ...config })
-  const agent = await ctx.agentLoop.create(SessionId(id), { provider: MODEL, model: MODEL })
+  const agent = await ctx.agentLoop.create(SessionId(id), { provider: MODEL, model })
   return { ctx, engine, agent, session: agent.session, notesBase }
 }
 

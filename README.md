@@ -73,7 +73,8 @@ Responsibilities stay split (the Codex lesson):
 
 1. **Model-driven** (preferred): the model saves notes, calls `new_context`
    with a short handoff at a phase boundary (research → implementation, etc.).
-2. **Pressure** (safety net): above `thresholdRatio` of the window the engine
+2. **Pressure** (safety net): above the automatic rollover point (`thresholdRatio`
+   of the window, or the routed model's `modelThresholds` entry) the engine
    rolls over automatically with durable notes and the recent verbatim tail.
    Below that, a **one-per-window** checkpoint reminder suggests saving notes
    and rolling over.
@@ -218,7 +219,17 @@ Configuration (cordis.yml `config` on the plugin row):
         historyEnabled: true
         notesDir: null               # base dir override; default <dsh home>/notes
         modelSurface: auto           # auto (host rows) | always (preset rows)
+        modelThresholds:             # optional absolute points per routed model
+          'strata/qwen-strata':
+            thresholdTokens: 250000          # automatic rollover point
+            reminderThresholdTokens: 200000  # one-time reminder point; must not exceed thresholdTokens
 ```
+
+`modelThresholds` is keyed by the routed model id, the `model` field of the session's request context. A model with an entry uses its two absolute token points for the reminder and the automatic rollover, and `get_context_remaining` reports the same automatic point. Every other model keeps `thresholdRatio` and `reminderThresholdRatio`, measured against its own window. Both rollover modes use the same points.
+
+The key must match the routed model id exactly. A key that does not match falls back to the ratio points without an error.
+
+An entry is not checked against the model's window. If `thresholdTokens` is at or above the window, the automatic rollover cannot fire before the window fills. Without an advertised context window, the engine evaluates neither the reminder nor the automatic rollover, so an entry has no effect.
 
 ## Local development with HMR
 

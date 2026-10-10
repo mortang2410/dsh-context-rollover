@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type TokenMeter from '@deepseek-ai/dsh-token-meter'
+import { rolloverPointsFor } from './config.ts'
 import type { ResolvedRolloverConfig } from './config.ts'
 import { readHistoryItem, searchHistory } from './history.ts'
 import { NotesStore } from './notes.ts'
@@ -144,10 +145,11 @@ function getContextRemainingTool(deps: RolloverToolDependencies) {
     },
     async execute(_args, exec) {
       const session = requireSession(exec)
-      const contextWindow = session.requestContext()?.contextWindow ?? null
-      const thresholdTokens = contextWindow === null
+      const route = session.requestContext()
+      const contextWindow = route?.contextWindow ?? null
+      const thresholdTokens = contextWindow === null || route === undefined
         ? null
-        : Math.floor(contextWindow * deps.config.thresholdRatio)
+        : rolloverPointsFor(deps.config, contextWindow, route.model).rolloverTokens
       const measurement = deps.meter.measure(session)
       const hasReading = measurement.baseline.kind !== 'none'
       const usedTokens = hasReading ? measurement.totalTokens : null
