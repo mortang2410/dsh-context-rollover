@@ -292,9 +292,14 @@ export class ContextRolloverEngine extends CompactionEngine {
     const { rolloverTokens } = rolloverPointsFor(this.config, route.contextWindow, route.model)
     if (measurement.totalTokens < rolloverTokens) return
     if (this.pressureRolledTurns.has(turnKey(agent.session.id, turn))) {
+      // A ratio-based point keeps the wording this warning has always logged. A
+      // per-model entry supplied its point, so the warning names it as the rollover point.
+      const pointName = Object.hasOwn(this.config.modelThresholds, route.model)
+        ? 'the rollover point'
+        : 'thresholdRatio * contextWindow'
       this.ctx.logger.warn(
         `context rollover: usage is still above the automatic threshold after this turn's pressure `
-        + `rollover (tail + per-step context likely exceed the rollover point); `
+        + `rollover (tail + per-step context likely exceed ${pointName}); `
         + 'skipping further automatic rollovers this turn',
       )
       return
