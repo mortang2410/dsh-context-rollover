@@ -67,7 +67,7 @@ describe('rollover mode setting', () => {
 
     const { engine } = await engineHarness('mode-default')
     expect(engine.config.mode).toBe('upstream')
-    expect(guidanceSpy).toHaveBeenCalledWith('upstream')
+    expect(guidanceSpy).toHaveBeenCalledWith('upstream', 20000)
   })
 
   it('rejects an unknown mode at load with a named TypeError', async () => {
@@ -89,7 +89,7 @@ describe('rollover mode setting', () => {
     const { engine } = await engineHarness('mode-guidance', { mode: 'structured-handoff' })
 
     expect(engine.config.mode).toBe('structured-handoff')
-    expect(guidanceSpy).toHaveBeenCalledWith('structured-handoff')
+    expect(guidanceSpy).toHaveBeenCalledWith('structured-handoff', 20000)
   })
 
   it('passes structured-handoff to the reminder builder', async () => {

@@ -5,6 +5,7 @@
  * @module dsh-context-rollover/guidance
  */
 
+import { formatCharacterCount } from './character-count.ts'
 import type { RolloverMode } from './config.ts'
 
 /** System-prompt section text for the context-management plugin. */
@@ -38,9 +39,13 @@ tool.
 /**
  * Structured-handoff guidance: the upstream text with one sentence replaced,
  * one bullet replaced, and two approved bullets added. The other upstream
- * bullets are kept verbatim, including their em dashes.
+ * bullets are kept verbatim, including their em dashes. The handoff size limit
+ * is the configured budget, formatted with thousands separators.
+ * @param handoffMaxChars - the configured handoff size limit in characters.
+ * @returns the structured-handoff guidance text.
  */
-const STRUCTURED_HANDOFF_GUIDANCE = `
+function structuredHandoffGuidance(handoffMaxChars: number): string {
+  return `
 # Context management
 
 Your active context is temporary working memory. Older conversation leaves your
@@ -57,7 +62,7 @@ tool.
   new_context with no argument, and your handoff note is the carrier.
 - Your continuation is the newest HANDOFF note in your notes folder. Keep that note current, following the /handoff-doc sections.
 - After a rollover you receive that note, your other notes, and the last part of the conversation. History stays available through the history tool.
-- Keep each handoff note under 20,000 characters.
+- Keep each handoff note under ${formatCharacterCount(handoffMaxChars)} characters.
 - get_context_remaining is a tool you invoke with no arguments; it returns the
   measured numbers. When you need to know how much context is left — or when
   you are asked about it — call it and report the numbers it returned. The
@@ -66,18 +71,20 @@ tool.
   did not receive is a fabrication even when the guess sounds plausible.
 - A reminder near the automatic rollover point appears at most once per window.
 `.trim()
+}
 
 /**
  * The guidance text for one rollover mode.
  * @param mode - the resolved rollover mode.
+ * @param handoffMaxChars - the configured handoff size limit in characters; the structured-handoff text states it.
  * @returns the system-prompt section text for that mode.
  */
-export function buildContextManagementGuidance(mode: RolloverMode): string {
-  return GUIDANCE_BY_MODE[mode]
+export function buildContextManagementGuidance(mode: RolloverMode, handoffMaxChars: number): string {
+  return GUIDANCE_BY_MODE[mode](handoffMaxChars)
 }
 
 /** Guidance text keyed by rollover mode. */
-const GUIDANCE_BY_MODE: Readonly<Record<RolloverMode, string>> = {
-  upstream: CONTEXT_MANAGEMENT_GUIDANCE,
-  'structured-handoff': STRUCTURED_HANDOFF_GUIDANCE,
+const GUIDANCE_BY_MODE: Readonly<Record<RolloverMode, (handoffMaxChars: number) => string>> = {
+  upstream: () => CONTEXT_MANAGEMENT_GUIDANCE,
+  'structured-handoff': structuredHandoffGuidance,
 }

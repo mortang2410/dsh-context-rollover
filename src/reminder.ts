@@ -1,11 +1,13 @@
 /**
  * The pressure reminder's wording, keyed by rollover mode. `upstream` keeps the
  * upstream wording. `structured-handoff` asks the model to write its handoff as
- * one dated note and states the window number and the automatic point.
+ * one dated note and states the window number, the handoff size limit, and the
+ * automatic point.
  *
  * @module dsh-context-rollover/reminder
  */
 
+import { formatCharacterCount } from './character-count.ts'
 import type { RolloverMode } from './config.ts'
 
 /** Measured inputs for one pressure reminder. */
@@ -21,6 +23,8 @@ export interface ReminderInput {
   readonly contextWindow: number
   /** Token point at which the automatic rollover starts. */
   readonly rolloverTokens: number
+  /** The configured handoff size limit in characters, which the structured-handoff wording states. */
+  readonly handoffMaxChars: number
 }
 
 /** The upstream reminder wording. */
@@ -32,14 +36,15 @@ function upstreamReminderText(input: ReminderInput): string {
 
 /**
  * The approved structured-handoff wording. The text is fixed; only the
- * percentage, the window number, and the automatic point are substituted. The
- * angle-bracket task description and the HANDOFF-YYYY-MM-DD-HH-MM pattern are
- * literal text for the model to fill in, not placeholders.
+ * percentage, the window number, the handoff size limit, and the automatic
+ * point are substituted. The angle-bracket task description and the
+ * HANDOFF-YYYY-MM-DD-HH-MM pattern are literal text for the model to fill in,
+ * not placeholders.
  */
 function structuredHandoffReminderText(input: ReminderInput): string {
   return `Context is ${input.percent}% full, in window ${input.windowNumber}. `
     + 'Write your handoff as a new note with the notes tool, at HANDOFF-YYYY-MM-DD-HH-MM-<task-description>.md, '
-    + 'using the current date and time to the minute. Follow the /handoff-doc sections, keep the note under 20,000 characters, '
+    + `using the current date and time to the minute. Follow the /handoff-doc sections, keep the note under ${formatCharacterCount(input.handoffMaxChars)} characters, `
     + `and state window ${input.windowNumber} at its top. Then call new_context. `
     + `An automatic rollover starts around ${input.rolloverTokens} tokens.`
 }

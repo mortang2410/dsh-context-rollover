@@ -75,7 +75,7 @@ async function systemTextSentToModel(mode: RolloverMode): Promise<string> {
 }
 
 describe('structured-handoff guidance text', () => {
-  const structured = buildContextManagementGuidance('structured-handoff')
+  const structured = buildContextManagementGuidance('structured-handoff', 20000)
   const pointCases = APPROVED_POINTS.map((point, index): [number, string] => [index + 1, point])
 
   it.each(pointCases)('structured guidance contains approved point %i verbatim', (_number, point) => {
@@ -103,7 +103,7 @@ describe('structured-handoff guidance text', () => {
 
 describe('upstream guidance text', () => {
   it('upstream guidance is byte-identical to the pinned upstream text', () => {
-    const upstream = buildContextManagementGuidance('upstream')
+    const upstream = buildContextManagementGuidance('upstream', 20000)
     expect(upstream).toBe(CONTEXT_MANAGEMENT_GUIDANCE)
     expect(sha256(upstream)).toBe(UPSTREAM_SHA256)
   })

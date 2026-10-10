@@ -150,7 +150,7 @@ export class ContextRolloverEngine extends CompactionEngine {
     this.ctx.systemPrompt.section({
       name: 'context:rollover',
       order: 2350,
-      text: buildContextManagementGuidance(this.config.mode),
+      text: buildContextManagementGuidance(this.config.mode, this.config.handoffMaxChars),
     })
   }
 
@@ -266,6 +266,7 @@ export class ContextRolloverEngine extends CompactionEngine {
           totalTokens: measurement.totalTokens,
           contextWindow,
           rolloverTokens,
+          handoffMaxChars: this.config.handoffMaxChars,
         }),
       }],
       source: {
