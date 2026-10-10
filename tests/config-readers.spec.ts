@@ -6,7 +6,7 @@
  * @module tests/config-readers
  */
 
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -15,7 +15,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { resolveConfig } from '../src/config.ts'
 import { NotesStore } from '../src/notes.ts'
 import { selectionFor } from '../src/rollover.ts'
-import { engineHarness } from './harness.ts'
+import { engineHarness, seedExchanges } from './harness.ts'
 
 describe('retainRatio', () => {
   it('sizes the recent tail from the context window when retainTokens is unset', () => {
@@ -78,5 +78,27 @@ describe('notesEnabled and historyEnabled', () => {
     const { ctx } = await engineHarness('config-history-off', { historyEnabled: false })
     expect(ctx.tools.get('history')).toBeUndefined()
     expect(ctx.tools.get('notes')).toBeDefined()
+  })
+})
+
+describe('notesEnabled in a manual checkpoint', () => {
+  /** Whether a manual checkpoint carries the session's notes text. */
+  async function checkpointCarriesNotes(notesEnabled: boolean, id: string): Promise<boolean> {
+    const { agent, engine, session, notesBase } = await engineHarness(id, { notesEnabled })
+    const dir = NotesStore.directoryFor(session.id, notesBase)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'state.md'), 'NOTES-MARKER goal line')
+    await seedExchanges(agent, 20)
+    const result = await engine.compactNow(agent, new AbortController().signal)
+    expect(result).not.toBeNull()
+    return JSON.stringify(result).includes('NOTES-MARKER')
+  }
+
+  it('includes the notes in a manual checkpoint when notesEnabled is true', async () => {
+    expect(await checkpointCarriesNotes(true, 'config-checkpoint-on')).toBe(true)
+  })
+
+  it('leaves the notes out of a manual checkpoint when notesEnabled is false', async () => {
+    expect(await checkpointCarriesNotes(false, 'config-checkpoint-off')).toBe(false)
   })
 })
