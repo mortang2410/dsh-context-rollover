@@ -424,20 +424,6 @@ export function reminderWindowKey(session: Session): string {
 }
 
 /**
- * The one definition of "this event is a pressure reminder".
- *
- * The source carries the engine's own plugin name as its source kind, which is
- * not the package name: a predicate keyed on `dsh-context-rollover` never
- * matches anything the engine writes, and silently disables whatever depends
- * on it. Both the kind and the summary prefix come from the shared constants
- * the sender uses for the same reason. Every consumer (the delivery check
- * below and the test harness) reads this predicate, so the definition cannot
- * drift again.
- * @param event - one logged session event.
- * @returns true when the event is this engine's pressure reminder, narrowing
- *   the event to a `user/message` for the caller.
- */
-/**
  * The source fields the reminder check reads, widened from the merge-extensible
  * message source union so that the legacy and migrated shapes can be inspected.
  */
@@ -469,6 +455,20 @@ function namesThisEngine(source: ReminderSourceView): boolean {
   return source.kind === 'plugin' && source.plugin === PLUGIN_NAME
 }
 
+/**
+ * The one definition of "this event is a pressure reminder".
+ *
+ * The source carries the engine's own plugin name as its source kind, which is
+ * not the package name: a predicate keyed on `dsh-context-rollover` never
+ * matches anything the engine writes, and silently disables whatever depends
+ * on it. Both the kind and the summary prefix come from the shared constants
+ * the sender uses for the same reason. Every consumer (the delivery check
+ * below and the test harness) reads this predicate, so the definition cannot
+ * drift again.
+ * @param event - one logged session event.
+ * @returns true when the event is this engine's pressure reminder, narrowing
+ *   the event to a `user/message` for the caller.
+ */
 export function isPressureReminder(event: SessionEvent): event is SessionEvent<'user/message'> {
   if (event.type !== 'user/message') return false
   const source: ReminderSourceView = event.data.source
