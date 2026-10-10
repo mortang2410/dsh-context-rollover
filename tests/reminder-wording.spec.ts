@@ -48,13 +48,21 @@ import {
 const WINDOW_ONE_REMINDER = 'Context is 45% full, in window 1. '
   + 'Write your handoff as a new note with the notes tool, at HANDOFF-YYYY-MM-DD-HH-MM-<task-description>.md, '
   + 'using the current date and time to the minute. Follow the /handoff-doc sections, keep the note under 20,000 characters, '
-  + 'and state window 1 at its top. Then call new_context. An automatic rollover starts around 90000 tokens.'
+  + 'and state window 1 at its top. '
+  + 'To register it, call the notes tool with action "write", path "HANDOFF-YYYY-MM-DD-HH-MM-<task-description>.md", '
+  + 'and text set to the complete handoff. Write replaces any file with the same name, so use a new name each window. '
+  + 'Example: action "write", path "HANDOFF-2026-10-10-14-30-parser-fix.md", text "Window 2. Goal: fix the parser null check. Next: add the regression test." '
+  + 'Then call new_context. An automatic rollover starts around 90000 tokens.'
 
 /** The same approved wording in window 2, after one rollover. */
 const WINDOW_TWO_REMINDER = 'Context is 45% full, in window 2. '
   + 'Write your handoff as a new note with the notes tool, at HANDOFF-YYYY-MM-DD-HH-MM-<task-description>.md, '
   + 'using the current date and time to the minute. Follow the /handoff-doc sections, keep the note under 20,000 characters, '
-  + 'and state window 2 at its top. Then call new_context. An automatic rollover starts around 90000 tokens.'
+  + 'and state window 2 at its top. '
+  + 'To register it, call the notes tool with action "write", path "HANDOFF-YYYY-MM-DD-HH-MM-<task-description>.md", '
+  + 'and text set to the complete handoff. Write replaces any file with the same name, so use a new name each window. '
+  + 'Example: action "write", path "HANDOFF-2026-10-10-14-30-parser-fix.md", text "Window 2. Goal: fix the parser null check. Next: add the regression test." '
+  + 'Then call new_context. An automatic rollover starts around 90000 tokens.'
 
 /** The upstream reminder wording; only the measured token count varies. */
 const UPSTREAM_REMINDER_PATTERN = new RegExp(

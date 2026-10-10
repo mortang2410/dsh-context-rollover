@@ -45,7 +45,11 @@ function structuredHandoffReminderText(input: ReminderInput): string {
   return `Context is ${input.percent}% full, in window ${input.windowNumber}. `
     + 'Write your handoff as a new note with the notes tool, at HANDOFF-YYYY-MM-DD-HH-MM-<task-description>.md, '
     + `using the current date and time to the minute. Follow the /handoff-doc sections, keep the note under ${formatCharacterCount(input.handoffMaxChars)} characters, `
-    + `and state window ${input.windowNumber} at its top. Then call new_context. `
+    + `and state window ${input.windowNumber} at its top. `
+    + 'To register it, call the notes tool with action "write", path "HANDOFF-YYYY-MM-DD-HH-MM-<task-description>.md", '
+    + 'and text set to the complete handoff. Write replaces any file with the same name, so use a new name each window. '
+    + 'Example: action "write", path "HANDOFF-2026-10-10-14-30-parser-fix.md", text "Window 2. Goal: fix the parser null check. Next: add the regression test." '
+    + 'Then call new_context. '
     + `An automatic rollover starts around ${input.rolloverTokens} tokens.`
 }
 
