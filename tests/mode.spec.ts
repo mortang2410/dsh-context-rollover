@@ -4,9 +4,10 @@
  * reminder, guidance, and checkpoint-render call sites.
  *
  * The reminder wording differs by mode and is tested in reminder-wording.spec.
- * The guidance and checkpoint wording still emit upstream text in both modes,
- * so the plumbing for those two builders is proven by the inputs each real
- * builder receives, not by different output. Each builder is wrapped in a
+ * The guidance wording differs by mode and is tested in guidance-by-mode.spec.
+ * The checkpoint wording still emits upstream text in both modes, so the
+ * plumbing for that builder is proven by the inputs the real builder receives,
+ * not by different output. Each builder is wrapped in a
  * pass-through spy: it still runs the real code, and the spy only records the
  * arguments of each call.
  *

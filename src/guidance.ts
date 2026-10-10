@@ -36,9 +36,39 @@ tool.
 `.trim()
 
 /**
- * The guidance text for one rollover mode. Both modes emit the upstream text
- * until the structured-handoff wording lands; the mode already reaches this
- * builder, so that wording becomes a table entry rather than a new call path.
+ * Structured-handoff guidance: the upstream text with one sentence replaced,
+ * one bullet replaced, and two approved bullets added. The other upstream
+ * bullets are kept verbatim, including their em dashes.
+ */
+const STRUCTURED_HANDOFF_GUIDANCE = `
+# Context management
+
+Your active context is temporary working memory. Older conversation leaves your
+active context at a context rollover; it stays recoverable through the history
+tool.
+
+- Keep goal, verified progress, important decisions, constraints, files
+  involved, known failures, and next steps in notes. Update notes as facts
+  change; explicitly mark unverified hypotheses as hypotheses.
+- You may call new_context at a natural task boundary when carrying the
+  exploratory working context forward would only add noise — for example after
+  finishing research before starting implementation, or after a major phase
+  before verification. The rollover takes no handoff argument: call
+  new_context with no argument, and your handoff note is the carrier.
+- Your continuation is the newest HANDOFF note in your notes folder. Keep that note current, following the /handoff-doc sections.
+- After a rollover you receive that note, your other notes, and the last part of the conversation. History stays available through the history tool.
+- Keep each handoff note under 20,000 characters.
+- get_context_remaining is a tool you invoke with no arguments; it returns the
+  measured numbers. When you need to know how much context is left — or when
+  you are asked about it — call it and report the numbers it returned. The
+  current context state is not readable from repository files, from the plugin
+  source, or from memory: only that tool reports it, and claiming a reading you
+  did not receive is a fabrication even when the guess sounds plausible.
+- A reminder near the automatic rollover point appears at most once per window.
+`.trim()
+
+/**
+ * The guidance text for one rollover mode.
  * @param mode - the resolved rollover mode.
  * @returns the system-prompt section text for that mode.
  */
@@ -49,5 +79,5 @@ export function buildContextManagementGuidance(mode: RolloverMode): string {
 /** Guidance text keyed by rollover mode. */
 const GUIDANCE_BY_MODE: Readonly<Record<RolloverMode, string>> = {
   upstream: CONTEXT_MANAGEMENT_GUIDANCE,
-  'structured-handoff': CONTEXT_MANAGEMENT_GUIDANCE,
+  'structured-handoff': STRUCTURED_HANDOFF_GUIDANCE,
 }
