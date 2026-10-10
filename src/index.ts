@@ -559,18 +559,22 @@ export class ContextRolloverEngine extends CompactionEngine {
 
   /**
    * Run one idle-agent task under `runMaintenance`, mapping cancellation to
-   * the manual-failure code `/compact` presents.
+   * the manual-failure code `/compact` presents. A failure inside the task
+   * reaches the caller unchanged; only an agent that never became idle maps to
+   * `busy`.
    */
   private async runMaintained<T>(
     agent: Agent,
     task: () => Promise<T>,
     signal: AbortSignal,
   ): Promise<T> {
+    const progress = { started: false }
     try {
       return await agent.runMaintenance(async (agentSignal) => {
         const operationSignal = AbortSignal.any([agentSignal, signal])
         try {
           operationSignal.throwIfAborted()
+          progress.started = true
           return await task()
         } catch (error: unknown) {
           if (agentSignal.aborted && operationSignal.reason === agentSignal.reason) {
@@ -580,7 +584,7 @@ export class ContextRolloverEngine extends CompactionEngine {
         }
       })
     } catch (error: unknown) {
-      if (error instanceof ManualCompactionError) throw error
+      if (error instanceof ManualCompactionError || progress.started) throw error
       throw new ManualCompactionError(
         'busy',
         'manual rollover requires an idle agent with no waking queued work',
