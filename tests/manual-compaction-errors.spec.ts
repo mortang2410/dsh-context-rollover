@@ -33,4 +33,18 @@ describe('manual rollover failure reporting', () => {
     expect(message).toMatch(/not smaller than the shadowed content/)
     expect(message).not.toMatch(/requires an idle agent/)
   })
+
+  it('still reports an agent that never became idle as busy', async () => {
+    const { agent, engine } = await engineHarness('manual-busy-agent', {})
+    // Maintenance is refused before any task runs: the genuine idle-agent case.
+    const notIdle = Object.assign(Object.create(agent), {
+      runMaintenance: () => Promise.reject(new Error('agent has queued work')),
+    }) as typeof agent
+    const failure = await engine.compactNow(notIdle, new AbortController().signal).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    expect((failure as { code?: unknown }).code).toBe('busy')
+    expect((failure as Error).message).toMatch(/requires an idle agent/)
+  })
 })
