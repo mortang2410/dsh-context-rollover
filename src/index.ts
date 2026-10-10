@@ -159,7 +159,10 @@ export class ContextRolloverEngine extends CompactionEngine {
   constructor(ctx: Context, config: RolloverConfig = {}) {
     super(ctx)
     this.config = resolveConfig(config)
-    if (this.config.handoffOnly && (config.retainTokens !== undefined || config.retainRatio !== undefined)) {
+    // resolveConfig reads null as unset, so only a real value counts as set.
+    const tailKeySet = [config.retainTokens, config.retainRatio]
+      .some(value => value !== undefined && value !== null)
+    if (this.config.handoffOnly && tailKeySet) {
       ctx.logger.warn('context-rollover: handoffOnly keeps no recent tail, so retainTokens and retainRatio have no effect')
     }
     this.registerTools()

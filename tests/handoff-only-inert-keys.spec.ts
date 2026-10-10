@@ -34,6 +34,15 @@ describe('handoffOnly with inert tail keys', () => {
     expect(warnings.filter(message => message.includes('retainTokens'))).toHaveLength(0)
   })
 
+  it('stays silent when the tail keys are null, which resolveConfig treats as unset', async () => {
+    const warnings = await constructionWarnings({
+      handoffOnly: true,
+      retainTokens: null as unknown as number,
+      retainRatio: null as unknown as number,
+    })
+    expect(warnings.filter(message => message.includes('retainTokens'))).toHaveLength(0)
+  })
+
   it('stays silent for handoffOnly alone', async () => {
     const warnings = await constructionWarnings({ handoffOnly: true })
     expect(warnings.filter(message => message.includes('retainTokens'))).toHaveLength(0)
