@@ -81,7 +81,6 @@
                   reminderThresholdRatio: 0.4
                   reminderMessage: "Context is {percent}% full. Use `/handoff-doc` to create/update the durable handoff document. Make it fully sufficient for a fresh context to continue the work. After it succeeds, call `new_context`. The handoff document will be the entire continuation context."
                   handoffOnly: true
-                  retainRatio: 0.1
                   handoffMaxChars: 20000
                   handoffDir: '.scratch/handoff'
                   handoffPattern: 'HANDOFF-*.md'

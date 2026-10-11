@@ -12,7 +12,6 @@
  */
 
 import { Context, symbols } from '@deepseek-ai/cordis'
-import z from '@deepseek-ai/schemastery'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
@@ -25,7 +24,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { Seq } from './compat.ts'
-import { renderReminderMessage, resolveConfig, rolloverPointsFor } from './config.ts'
+import { Config as RolloverConfigSchema, renderReminderMessage, resolveConfig, rolloverPointsFor } from './config.ts'
 import type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
 import type { RolloverReplacement } from './checkpoint.ts'
 import { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
@@ -147,25 +146,8 @@ export { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
 export class ContextRolloverEngine extends CompactionEngine {
   static inject = ['llm', 'tokenMeter', 'sessions', 'tools', 'systemPrompt']
 
-  static Config: z<RolloverConfig> = z.object({
-    thresholdRatio: z.number(),
-    reminderThresholdRatio: z.number(),
-    reminderMessage: z.string(),
-    retainRatio: z.number(),
-    retainTokens: z.number().step(1).min(0),
-    handoffOnly: z.boolean(),
-    handoffMaxChars: z.number().step(1).min(0),
-    notesEnabled: z.boolean(),
-    historyEnabled: z.boolean(),
-    notesDir: z.string(),
-    handoffDir: z.string(),
-    handoffPattern: z.string(),
-    modelSurface: z.union(['auto', 'always'] as const),
-    modelThresholds: z.dict(z.object({
-      thresholdTokens: z.number().step(1).min(1),
-      reminderThresholdTokens: z.number().step(1).min(1),
-    })),
-  })
+  /** The one configuration schema, defined beside {@link RolloverConfig}. */
+  static Config = RolloverConfigSchema
 
   /** Resolved and validated configuration. */
   readonly config: ResolvedRolloverConfig
@@ -177,6 +159,12 @@ export class ContextRolloverEngine extends CompactionEngine {
   constructor(ctx: Context, config: RolloverConfig = {}) {
     super(ctx)
     this.config = resolveConfig(config)
+    // resolveConfig reads null as unset, so only a real value counts as set.
+    const tailKeySet = [config.retainTokens, config.retainRatio]
+      .some(value => value !== undefined && value !== null)
+    if (this.config.handoffOnly && tailKeySet) {
+      ctx.logger.warn('context-rollover: handoffOnly keeps no recent tail, so retainTokens and retainRatio have no effect')
+    }
     this.registerTools()
     this.registerGuidance()
     this.registerLifecycle()
@@ -559,18 +547,22 @@ export class ContextRolloverEngine extends CompactionEngine {
 
   /**
    * Run one idle-agent task under `runMaintenance`, mapping cancellation to
-   * the manual-failure code `/compact` presents.
+   * the manual-failure code `/compact` presents. A failure inside the task
+   * reaches the caller unchanged; only an agent that never became idle maps to
+   * `busy`.
    */
   private async runMaintained<T>(
     agent: Agent,
     task: () => Promise<T>,
     signal: AbortSignal,
   ): Promise<T> {
+    const progress = { started: false }
     try {
       return await agent.runMaintenance(async (agentSignal) => {
         const operationSignal = AbortSignal.any([agentSignal, signal])
         try {
           operationSignal.throwIfAborted()
+          progress.started = true
           return await task()
         } catch (error: unknown) {
           if (agentSignal.aborted && operationSignal.reason === agentSignal.reason) {
@@ -580,7 +572,7 @@ export class ContextRolloverEngine extends CompactionEngine {
         }
       })
     } catch (error: unknown) {
-      if (error instanceof ManualCompactionError) throw error
+      if (error instanceof ManualCompactionError || progress.started) throw error
       throw new ManualCompactionError(
         'busy',
         'manual rollover requires an idle agent with no waking queued work',
