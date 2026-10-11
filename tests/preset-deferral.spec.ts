@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { CompactionEngine } from '@deepseek-ai/dsh-compaction'
 import type { SessionSeq } from '@deepseek-ai/dsh-session'
-import { countRollovers, reminderDelivered } from '../src/rollover.ts'
+import { claimReminder, countRollovers, reminderDelivered } from '../src/rollover.ts'
 import { ContextRolloverEngine } from '../src/index.ts'
 import { resolveConfig } from '../src/config.ts'
 import {
@@ -145,6 +145,44 @@ describe('preset ownership', () => {
       usageResponse('answer 2', 26_000),
     ]))
     provideRoster(ctx, engine)
+
+    await followup(agent, 'turn one')
+    await followup(agent, 'turn two')
+    expect(reminderTexts(session)).toHaveLength(1)
+  })
+
+  it('leaves the window claim free for a non-owning row above its reminder point', async () => {
+    // The stood-down row must not take the window's claim: the owning row
+    // decides in the same waterfall, and a claim taken here would refuse it.
+    const { ctx, agent, session } = await engineHarness('defer-claim-free', {
+      thresholdRatio: 0.5,
+      reminderThresholdRatio: 0.01,
+    })
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+      usageResponse('answer 1', 5000),
+      usageResponse('answer 2', 6000),
+    ]))
+    provideRoster(ctx, {} as CompactionEngine)
+
+    await followup(agent, 'turn one')
+    await followup(agent, 'turn two')
+    expect(reminderTexts(session)).toHaveLength(0)
+    expect(claimReminder(session)).toBe(true)
+  })
+
+  it('reminds a preset-owned session through a proxy-wrapped owner at its entry point', async () => {
+    // The roster hands back a traced proxy whose original is the real engine
+    // (cordis `symbols.original`, Symbol.for('cordis.original')). The owner
+    // check must unwrap it to this engine, or the owner stands down silently.
+    const { ctx, engine, agent, session } = await engineHarness('defer-reminder-proxy', {
+      modelThresholds: { [MODEL]: { thresholdTokens: 30_000, reminderThresholdTokens: 20_000 } },
+    })
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+      usageResponse('answer 1', 25_000),
+      usageResponse('answer 2', 26_000),
+    ]))
+    const proxy = { [Symbol.for('cordis.original')]: engine } as unknown as CompactionEngine
+    provideRoster(ctx, proxy)
 
     await followup(agent, 'turn one')
     await followup(agent, 'turn two')
