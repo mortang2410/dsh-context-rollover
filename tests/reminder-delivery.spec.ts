@@ -220,7 +220,7 @@ describe('the 40% handoff reminder', () => {
     expect(text).toContain('`/handoff-doc`')
     expect(text).toContain('`new_context`')
     // The obligation that makes the handoff sufficient for a cold reader.
-    expect(text).toContain('entire continuation context')
+    expect(text).toContain('The handoff document, plus any recent chat kept after the rollover, will be the continuation context.')
 
     // The percent in the body is the one the engine measured, read back from
     // the reminder's own summary rather than recomputed here.
@@ -301,7 +301,8 @@ describe('reminder configuration defaults and validation', () => {
     expect(DEFAULT_REMINDER_MESSAGE).toBe(
       'Context is {percent}% full. Use `/handoff-doc` to create/update the durable handoff document. '
       + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
-      + '`new_context`. The handoff document will be the entire continuation context.',
+      + '`new_context`. The handoff document, plus any recent chat kept after the rollover, will be the '
+      + 'continuation context.',
     )
     const config = resolveConfig({})
     expect(config.reminderMessage).toBe(DEFAULT_REMINDER_MESSAGE)

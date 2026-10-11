@@ -516,6 +516,13 @@ describe('make-web-preset', () => {
     expect(message).toContain('/handoff-doc')
     expect(message).toContain('new_context')
     expect(message).toContain('{percent}')
+    // The literal, not the constant: pins the shipped text against the engine default.
+    expect(message).toBe(
+      'Context is {percent}% full. Use `/handoff-doc` to create/update the durable handoff document. '
+      + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
+      + '`new_context`. The handoff document, plus any recent chat kept after the rollover, will be the '
+      + 'continuation context.',
+    )
   })
 
   it('derives a cordis-sourced preset under a new id, keeping Creator Mode tools', () => {
