@@ -63,10 +63,10 @@ function newContextTool(deps: RolloverToolDependencies) {
     description:
       'Start a new context window at the next safe boundary, continuing from a durable handoff document. '
       + 'Does not clear, reset, or otherwise affect environment state. The handoff document you name becomes '
-      + 'the entire continuation context: earlier conversation, including this tool call and its result, '
-      + 'leaves the active context with nothing carried over. Write the document first (for example with '
-      + '`/handoff-doc`) and make it fully sufficient for a reader with zero context. Only the document '
-      + 'crosses the boundary; full history stays recoverable via the history tool.',
+      + 'the start of the continuation context: earlier conversation leaves the active context, except any '
+      + 'recent messages the rollover keeps. Write the document first (for example with '
+      + '`/handoff-doc`) and make it fully sufficient for a reader with zero context. Only the document, and '
+      + 'any recent messages kept, cross the boundary; full history stays recoverable via the history tool.',
     parameters: {
       handoff_path: {
         type: 'string',

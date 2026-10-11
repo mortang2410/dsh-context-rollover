@@ -395,7 +395,7 @@ export class ContextRolloverEngine extends CompactionEngine {
    * The replacement content one model-requested rollover writes.
    *
    * The model names one durable handoff document, and that document's bytes
-   * become the entire continuation context: no narration, no notes section and
+   * become the continuation context: no narration, no notes section and
    * no wrapper is added around it. Manual `/compact` never reaches this method.
    * It has no model in the loop and no document to name, so it composes the
    * deterministic notes checkpoint itself.

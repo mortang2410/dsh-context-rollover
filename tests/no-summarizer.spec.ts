@@ -478,7 +478,7 @@ describe('the assembled guidance teaches the handoff workflow', () => {
     expect(text).toContain('/handoff-doc')
     expect(text).toContain('`new_context`')
     expect(text).toContain('handoff_path')
-    expect(text).toContain('the entire continuation context')
+    expect(text).toContain('the start of the continuation context')
     expect(text).toContain('never injected automatically')
 
     // The instruction ticket 04 removed: a short inline handoff at a natural

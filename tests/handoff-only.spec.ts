@@ -27,6 +27,7 @@ import { resolveConfig } from '../src/config.ts'
 import { sessionEventAt, sessionEvents } from '../src/compat.ts'
 import { commitRollover, countRollovers, selectRolloverRange } from '../src/rollover.ts'
 import { NotesStore } from '../src/notes.ts'
+import { CONTEXT_MANAGEMENT_GUIDANCE } from '../src/guidance.ts'
 import {
   appendExchange,
   closedConversation,
@@ -505,7 +506,8 @@ describe('the tool surface after the change', () => {
     // inline handoff string.
     const description = definition?.description ?? ''
     expect(description).toContain('/handoff-doc')
-    expect(description).toContain('entire continuation context')
+    expect(description).toContain('except any recent messages the rollover keeps')
+    expect(description).not.toContain('entire continuation context')
     expect(description).not.toContain('recent verbatim')
     // `notes`, `history` and `get_context_remaining` stay mounted.
     for (const name of ['notes', 'history', 'get_context_remaining']) {
@@ -703,5 +705,15 @@ describe('handoffOnly with an explicit retainTokens budget', () => {
     // The handoff document leads the kept tail, and the tail matches tail mode exactly.
     expect(handoffOnlyRun.types[1]).toBe('user/message')
     expect(handoffOnlyRun).toEqual(tailRun)
+  })
+
+  it('tells the model that recent messages survive, in the tool text and the system guidance', async () => {
+    const { ctx } = await engineHarness('model-facing-tail', { handoffOnly: true, retainTokens: 2000 })
+    const definition = ctx.tools.get('new_context')
+    const description = definition?.description ?? ''
+    expect(description).toContain('except any recent messages the rollover keeps')
+    expect(description).not.toContain('entire continuation context')
+    expect(CONTEXT_MANAGEMENT_GUIDANCE).toContain('any recent messages the rollover keeps')
+    expect(CONTEXT_MANAGEMENT_GUIDANCE).not.toContain('Nothing else from the earlier conversation carries over')
   })
 })

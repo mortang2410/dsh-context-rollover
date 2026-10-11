@@ -20,10 +20,10 @@ tool.
   or update the durable handoff document, and make that document fully
   sufficient for a fresh context to continue the work. Then call
   \`new_context\` with the path of that document as its \`handoff_path\` argument.
-- The handoff document is the entire continuation context: after the rollover
-  your active context is the standing instructions plus that document. Nothing
-  else from the earlier conversation carries over, so anything the next context
-  needs must be in the document.
+- The handoff document is the start of the continuation context: after the
+  rollover your active context is the standing instructions, that document, and
+  any recent messages the rollover keeps. Older conversation carries over only
+  through the document, so anything the next context needs must be in the document.
 - After a rollover, continue from the handoff document and live repository
   state. The earlier conversation is never injected automatically; use history
   only to recover one specific missing detail.
