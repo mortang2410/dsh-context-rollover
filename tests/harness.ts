@@ -364,7 +364,10 @@ export async function engineHarness(
     await ctx.plugin(AgentInstructions, { maxBytes: 65536 })
   }
   const notesBase = await tempNotesDir()
-  const engine = new ContextRolloverEngine(ctx, { notesDir: notesBase, retainTokens: 40, ...config })
+  // The default budget is for tail-mode tests. A handoffOnly test keeps no tail
+  // unless it names retainTokens, so the default must not reach it.
+  const tailDefault = config.handoffOnly === true ? {} : { retainTokens: 40 }
+  const engine = new ContextRolloverEngine(ctx, { notesDir: notesBase, ...tailDefault, ...config })
   const agent = await ctx.agentLoop.create(SessionId(id), { provider: MODEL, model: MODEL }, meta)
   return { ctx, engine, agent, session: agent.session, notesBase }
 }

@@ -402,7 +402,7 @@ describe('make-web-preset', () => {
     }
   })
 
-  it('emits no tail key under handoffOnly, where a tail budget has no effect', () => {
+  it('emits no tail key under handoffOnly when no tail budget is requested', () => {
     const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
     try {
       run(['--presets-dir', presetsDir, '--out-dir', outDir])
@@ -418,12 +418,26 @@ describe('make-web-preset', () => {
     }
   })
 
-  it('refuses an explicit tail flag under handoffOnly, where it would be silently inert', () => {
+  it('refuses --retain-ratio under handoffOnly, where the engine never reads it', () => {
     const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
     const base = ['--presets-dir', presetsDir, '--out-dir', outDir]
     try {
       expect(() => run([...base, '--retain-ratio', '0.2'])).toThrow(/no effect with --handoff-only true/)
-      expect(() => run([...base, '--retain-tokens', '8192'])).toThrow(/no effect with --handoff-only true/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('writes an explicit --retain-tokens under handoffOnly, where the engine reads it', () => {
+    const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
+    try {
+      run(['--presets-dir', presetsDir, '--out-dir', outDir, '--retain-tokens', '8192'])
+      const config = declaredChild(
+        readFileSync(join(outDir, 'standard-rollover', 'declaration.patch.yml'), 'utf8'),
+        'context-rollover',
+      )?.config
+      expect(config).toMatchObject({ handoffOnly: true, retainTokens: 8192 })
+      expect(config).not.toHaveProperty('retainRatio')
     } finally {
       cleanup()
     }

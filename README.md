@@ -109,13 +109,13 @@ Responsibilities stay split (the Codex lesson):
    at least as large and fails too. The user runs `/compact`.
 4. **Manual**: `/compact` keeps working on an idle agent.
 
-Under `handoffOnly` (what the shipped preset sets) every path replaces the span
-from the first non-system surface node through the **last** surface node, so no
-priced tail survives. `retainTokens: 0` is deliberately NOT how that is
-expressed: a zero token budget still retains the last node and the tool-pairing
-walk keeps more, which is exactly the old material the handoff-only rule exists
-to drop. `retainRatio` / `retainTokens` remain available for a deployment that
-wants a verbatim tail (`handoffOnly: false`).
+Under `handoffOnly` (what the shipped preset sets) every path, including manual
+`/compact`, replaces the span from the first non-system surface node through the
+**last** surface node, so no priced tail survives unless `retainTokens` is set.
+When it is set, the handoff document leads the recent tail that budget selects,
+by the same rule `handoffOnly: false` uses. A budget of `0` still keeps the last
+node there, as it does without `handoffOnly`. `retainRatio` is never read under
+`handoffOnly`; use `handoffOnly: false` for a ratio-sized tail.
 
 Nothing old survives, in every case, including a rollover that fires while a
 step is mid-tool-call with no result yet. The host requires a tool-pairing
@@ -351,9 +351,10 @@ Configuration (cordis.yml `config` on the plugin row):
       config:
         thresholdRatio: 0.9          # warning point (fraction of window); never rolls over by itself
         reminderThresholdRatio: 0.4  # one-time /handoff-doc reminder point
-        handoffOnly: true            # no tail: the handoff document replaces the surface
-        # retainRatio / retainTokens (recent verbatim tail) apply only when handoffOnly is
-        # false. With handoffOnly true the generator refuses them and the engine warns at load.
+        handoffOnly: true            # the handoff document replaces the surface
+        # retainTokens (recent verbatim tail) is read under handoffOnly too; without it no tail
+        # is kept. retainRatio is read only when handoffOnly is false: with handoffOnly true the
+        # generator refuses it and the engine warns when constructed.
         handoffMaxChars: 20000       # max accepted handoff document size
         handoffDir: .scratch/handoff # accepted for compatibility; no engine path reads it
         handoffPattern: 'HANDOFF-*.md' # accepted for compatibility; no engine path reads it
@@ -489,8 +490,9 @@ first, so `pnpm test` works whether or not `pnpm build` has run.
 
 ## Scope and limits
 
-- Under `handoffOnly` a rollover replacement contains the handoff document and
-  nothing else: no notes, no narration, no older user prompts and no tail.
+- Under `handoffOnly` with no `retainTokens`, a rollover replacement contains the
+  handoff document and nothing else: no notes, no narration, no older user prompts
+  and no tail. With `retainTokens`, the recent tail that budget selects follows it.
 - The only rollovers are the model's own `new_context` call and manual `/compact`.
   Crossing `thresholdRatio` only warns, and a provider-confirmed overflow does not
   roll over: the provider error reaches the user unchanged.

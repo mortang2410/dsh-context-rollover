@@ -160,10 +160,12 @@ export class ContextRolloverEngine extends CompactionEngine {
     super(ctx)
     this.config = resolveConfig(config)
     // resolveConfig reads null as unset, so only a real value counts as set.
-    const tailKeySet = [config.retainTokens, config.retainRatio]
-      .some(value => value !== undefined && value !== null)
-    if (this.config.handoffOnly && tailKeySet) {
-      ctx.logger.warn('context-rollover: handoffOnly keeps no recent tail, so retainTokens and retainRatio have no effect')
+    // handoffOnly reads retainTokens but never retainRatio.
+    if (this.config.handoffOnly && config.retainRatio !== undefined && config.retainRatio !== null) {
+      ctx.logger.warn(
+        'context-rollover: handoffOnly ignores retainRatio, so it has no effect; '
+        + 'set retainTokens to keep a recent tail',
+      )
     }
     this.registerTools()
     this.registerGuidance()
@@ -378,10 +380,10 @@ export class ContextRolloverEngine extends CompactionEngine {
    *
    * The rule itself lives in `selectionFor` so the engine and the
    * `new_context` size preflight cannot disagree about which span a document is
-   * priced against. `handoffOnly` is a distinct mode rather than
-   * `retainTokens: 0`: a zero token budget still keeps the last surface node,
-   * and walks further back for tool pairing, which is exactly the old-session
-   * material the handoff-only contract forbids.
+   * priced against. Without `retainTokens`, `handoffOnly` is a distinct mode
+   * rather than `retainTokens: 0`: a zero token budget still keeps the last
+   * surface node, and walks further back for tool pairing, which is exactly the
+   * old-session material that mode drops.
    * @param session - session whose configured tail budget is priced.
    * @returns the retention rule for this deployment.
    */

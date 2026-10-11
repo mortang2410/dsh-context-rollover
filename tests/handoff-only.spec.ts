@@ -4,7 +4,8 @@
  *
  * These tests exist to hold one claim down: after the rollover the
  * model-visible context is the standing system prompt plus the handoff
- * document, and NOTHING else from the old conversation. A test that only
+ * document, and NOTHING else from the old conversation, when no retainTokens is
+ * set (the budgeted case is pinned in the last block of this file). A test that only
  * looked for surviving sentinel text would miss a surviving assistant
  * tool-call block, whose visible content is a tool name and JSON arguments, so
  * every claim about what survived is also asserted by surface node type.
@@ -653,5 +654,54 @@ describe('the rollover transaction', () => {
     expect(visible).toContain('## Durable notes')
     expect(visible).toContain('keep the notes path alive')
     expect(visible).toContain('reason: manual')
+  })
+})
+
+describe('handoffOnly with an explicit retainTokens budget', () => {
+  it('keeps the same recent tail that tail mode keeps for the same budget', async () => {
+    // The tail rule is shared, so the two runs differ only in the handoffOnly
+    // flag and must leave the same surface behind.
+    const budget = 2000
+    const sentinels = Array.from({ length: 20 }, (_unused, index) => `<exchange-${index}>`)
+    const padding = 'x'.repeat(2000)
+
+    /** Run the same 20-exchange rollover, and report the surface and exchanges it kept. */
+    async function rolloverSurface(id: string, handoffOnly: boolean): Promise<{ types: string[]; kept: string[] }> {
+      const cwd = await scratch('dsh-handoff-tail-')
+      const documentPath = join(cwd, 'HANDOFF-tail.md')
+      await writeFile(documentPath, '# Handoff\n\nContinue from the document.\n', 'utf8')
+      const { ctx, agent, session } = await engineHarness(id, { handoffOnly, retainTokens: budget }, { cwd })
+      const snapshots = surfaceAtRolloverEnd(ctx, session)
+      const adapter = new ScriptedAdapter([
+        ...sentinels.map(line => textResponse(`${line} ${padding}`)),
+        newContextCall(JSON.stringify({ handoff_path: documentPath })),
+        textResponse('continuing on the fresh window'),
+      ])
+      ctx.llm.registerAdapter(['mock'], adapter)
+
+      await seedExchanges(agent, sentinels.length)
+      await followup(agent, 'the last old request before the boundary')
+
+      expect(countRollovers(session)).toBe(1)
+      const visible = session.deriveMessages().map(message => message.content
+        .map(block => block.type === 'text' ? block.text : `[${block.type}]`)
+        .join(''))
+        .join('\n')
+      return {
+        types: snapshots[0] ?? [],
+        kept: sentinels.filter(line => visible.includes(line)),
+      }
+    }
+
+    const handoffOnlyRun = await rolloverSurface('handoff-only-tail', true)
+    const tailRun = await rolloverSurface('tail-mode-tail', false)
+
+    // The budget keeps a recent suffix of the exchanges: some, but not all.
+    expect(handoffOnlyRun.kept.length).toBeGreaterThan(0)
+    expect(handoffOnlyRun.kept.length).toBeLessThan(sentinels.length)
+    expect(handoffOnlyRun.kept).toEqual(sentinels.slice(sentinels.length - handoffOnlyRun.kept.length))
+    // The handoff document leads the kept tail, and the tail matches tail mode exactly.
+    expect(handoffOnlyRun.types[1]).toBe('user/message')
+    expect(handoffOnlyRun).toEqual(tailRun)
   })
 })

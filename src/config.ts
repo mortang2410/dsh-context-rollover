@@ -66,25 +66,28 @@ export interface RolloverConfig {
   reminderMessage?: string
   /**
    * Recent verbatim tail retained across a rollover, as a fraction of the
-   * context window. Defaults to `0.1`.
+   * context window. Defaults to `0.1`. Not read when `handoffOnly` is set.
    */
   retainRatio?: number
   /**
    * Absolute recent-tail budget in tokens; overrides `retainRatio` when set.
+   * Under `handoffOnly` it sets the tail the handoff document leads.
    */
   retainTokens?: number
   /**
-   * Replace the whole prior surface with the handoff document, keeping no
-   * priced recent tail at all. Defaults to `false`.
+   * Replace the whole prior surface with the handoff document. Defaults to
+   * `false`.
    *
-   * This is deliberately NOT `retainTokens: 0`: a zero budget still retains the
-   * last surface node (and walks further back for tool pairing), which is
-   * exactly the old-session material this mode exists to drop. When true the
+   * With `retainTokens` unset, nothing of the prior surface is kept: the
    * replaced span runs from the first non-`system/message` node through the
    * last surface node, and only when the cut after that node is tool-pairing
    * balanced. A pre-step whose tail cut is unbalanced (a tool call with no
    * result yet) selects nothing and defers to the next pre-step rather than
    * retaining the incomplete unit.
+   *
+   * With `retainTokens` set, the handoff document leads the recent tail that
+   * budget selects, by the same rule tail mode uses. `retainRatio` is not read
+   * under this flag.
    */
   handoffOnly?: boolean
   /** Maximum accepted handoff document size in characters. Defaults to `20000`. */
@@ -159,7 +162,7 @@ export interface ResolvedRolloverConfig {
   readonly retainRatio: number
   /** `null` keeps the ratio-based tail budget. */
   readonly retainTokens: number | null
-  /** Replace the whole prior surface with the handoff document; keep no tail. */
+  /** Replace the whole prior surface with the handoff document; keep no tail unless `retainTokens` is set. */
   readonly handoffOnly: boolean
   readonly handoffMaxChars: number
   readonly notesEnabled: boolean

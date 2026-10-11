@@ -4,8 +4,8 @@
  * `user/message` with full source provenance, and `compaction/end` close as
  * `dsh-compaction-basic` — but the replacement is either the durable handoff
  * document's own bytes or a deterministic notes checkpoint, never an LLM call.
- * Raw events stay persisted; under `handoffOnly` no part of the old
- * conversation stays on the surface either.
+ * Raw events stay persisted; under `handoffOnly` with no `retainTokens` no part
+ * of the old conversation stays on the surface either.
  *
  * @module dsh-context-rollover/rollover
  */
@@ -194,8 +194,11 @@ export function selectionFor(
   config: ResolvedRolloverConfig,
   session: Session,
 ): RolloverSelection {
-  if (config.handoffOnly) return { kind: 'handoff-only' }
+  // An explicit budget wins under handoffOnly too: the handoff document then
+  // leads the same recent tail tail mode keeps. retainRatio is never read here
+  // when handoffOnly is set, so it stays inert there.
   if (config.retainTokens !== null) return { kind: 'tail', retainTokens: config.retainTokens }
+  if (config.handoffOnly) return { kind: 'handoff-only' }
   const contextWindow = session.requestContext()?.contextWindow
   return {
     kind: 'tail',

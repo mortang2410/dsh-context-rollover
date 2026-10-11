@@ -27,6 +27,31 @@ describe('retainRatio', () => {
   })
 })
 
+describe('retainTokens under handoffOnly', () => {
+  const session = {
+    requestContext: () => ({ contextWindow: 100_000, model: 'test' }),
+  } as unknown as Session
+
+  it('keeps a tail of that budget, through the same rule tail mode uses', () => {
+    expect(selectionFor(resolveConfig({ handoffOnly: true, retainTokens: 10_000 }), session))
+      .toEqual({ kind: 'tail', retainTokens: 10_000 })
+  })
+
+  it('hands a zero budget to the tail rule, which still keeps the last node', () => {
+    expect(selectionFor(resolveConfig({ handoffOnly: true, retainTokens: 0 }), session))
+      .toEqual({ kind: 'tail', retainTokens: 0 })
+  })
+
+  it('keeps no tail when handoffOnly names no retainTokens', () => {
+    expect(selectionFor(resolveConfig({ handoffOnly: true }), session)).toEqual({ kind: 'handoff-only' })
+  })
+
+  it('still ignores retainRatio under handoffOnly', () => {
+    expect(selectionFor(resolveConfig({ handoffOnly: true, retainRatio: 0.5 }), session))
+      .toEqual({ kind: 'handoff-only' })
+  })
+})
+
 describe('handoffMaxChars', () => {
   it('refuses a handoff document longer than the configured limit', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'rollover-max-chars-'))
