@@ -19,6 +19,7 @@ import {
   followup,
   mountTestContext,
   newContextCall,
+  MODEL,
   reminderTexts,
   ScriptedAdapter,
   seedExchanges,
@@ -126,6 +127,24 @@ describe('preset ownership', () => {
       usageResponse('answer 1', 5000),
       usageResponse('answer 2', 6000),
     ]))
+
+    await followup(agent, 'turn one')
+    await followup(agent, 'turn two')
+    expect(reminderTexts(session)).toHaveLength(1)
+  })
+
+  it('reminds a preset-owned session at its own entry point, not the ratio point', async () => {
+    // The 100,000-token harness window gives a 40,000-token ratio reminder. The
+    // entry point is 20,000 tokens, and usage stays below 40,000, so a reminder
+    // here can only come from the entry point of the engine that owns the session.
+    const { ctx, engine, agent, session } = await engineHarness('defer-reminder-entry', {
+      modelThresholds: { [MODEL]: { thresholdTokens: 30_000, reminderThresholdTokens: 20_000 } },
+    })
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+      usageResponse('answer 1', 25_000),
+      usageResponse('answer 2', 26_000),
+    ]))
+    provideRoster(ctx, engine)
 
     await followup(agent, 'turn one')
     await followup(agent, 'turn two')
