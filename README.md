@@ -352,8 +352,8 @@ Configuration (cordis.yml `config` on the plugin row):
         thresholdRatio: 0.9          # warning point (fraction of window); never rolls over by itself
         reminderThresholdRatio: 0.4  # one-time /handoff-doc reminder point
         handoffOnly: true            # no tail: the handoff document replaces the surface
-        retainRatio: 0.1             # recent verbatim tail when handoffOnly is false
-        retainTokens: null           # absolute tail budget; overrides retainRatio
+        # retainRatio / retainTokens (recent verbatim tail) apply only when handoffOnly is
+        # false. With handoffOnly true the generator refuses them and the engine warns at load.
         handoffMaxChars: 20000       # max accepted handoff document size
         handoffDir: .scratch/handoff # accepted for compatibility; no engine path reads it
         handoffPattern: 'HANDOFF-*.md' # accepted for compatibility; no engine path reads it

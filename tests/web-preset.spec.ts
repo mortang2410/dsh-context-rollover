@@ -261,7 +261,7 @@ describe('make-web-preset', () => {
   it('derives standard-rollover in the host inline format, with the engine row and untouched surroundings', () => {
     const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
     try {
-      run(['--presets-dir', presetsDir, '--out-dir', outDir, '--retain-tokens', '12000'])
+      run(['--presets-dir', presetsDir, '--out-dir', outDir, '--handoff-only', 'false', '--retain-tokens', '12000'])
       const generated = readFileSync(join(outDir, 'standard-rollover', 'declaration.patch.yml'), 'utf8')
       // The engine replaces the host's summarizer; the preset id stays put.
       expect(generated).not.toContain(`name: '@deepseek-ai/dsh-compaction-basic'`)
@@ -277,7 +277,7 @@ describe('make-web-preset', () => {
       expect(declaredChild(generated, 'context-rollover')?.config).toMatchObject({
         thresholdRatio: 0.9,
         reminderThresholdRatio: 0.4,
-        handoffOnly: true,
+        handoffOnly: false,
         retainTokens: 12000,
         handoffDir: '.scratch/handoff',
         handoffPattern: 'HANDOFF-*.md',
@@ -393,9 +393,37 @@ describe('make-web-preset', () => {
       expect(() => run([...base, '--handoff-pattern', ''])).toThrow(/handoff-pattern must be a non-empty string/)
       expect(() => run([...base, '--handoff-only', 'yes'])).toThrow(/--handoff-only must be true or false/)
       expect(() => run([...base, '--handoff-max-chars', '0'])).toThrow(/handoff-max-chars must be a positive integer/)
-      expect(() => run([...base, '--retain-tokens', '1', '--retain-ratio', '0.5'])).toThrow(/exclusive/)
+      expect(() => run([...base, '--handoff-only', 'false', '--retain-tokens', '1', '--retain-ratio', '0.5']))
+        .toThrow(/exclusive/)
       expect(() => run([...base, '--engine-name', '  '])).toThrow(/engine-name must be a non-empty string/)
       expect(() => run([...base, '--preset-id', 'Not Valid'])).toThrow(/--preset-id must match/)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('emits no tail key under handoffOnly, where a tail budget has no effect', () => {
+    const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
+    try {
+      run(['--presets-dir', presetsDir, '--out-dir', outDir])
+      const config = declaredChild(
+        readFileSync(join(outDir, 'standard-rollover', 'declaration.patch.yml'), 'utf8'),
+        'context-rollover',
+      )?.config
+      expect(config).toMatchObject({ handoffOnly: true })
+      expect(config).not.toHaveProperty('retainRatio')
+      expect(config).not.toHaveProperty('retainTokens')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('refuses an explicit tail flag under handoffOnly, where it would be silently inert', () => {
+    const { presetsDir, outDir, cleanup } = scratch(hostDeclaration())
+    const base = ['--presets-dir', presetsDir, '--out-dir', outDir]
+    try {
+      expect(() => run([...base, '--retain-ratio', '0.2'])).toThrow(/no effect with --handoff-only true/)
+      expect(() => run([...base, '--retain-tokens', '8192'])).toThrow(/no effect with --handoff-only true/)
     } finally {
       cleanup()
     }
@@ -410,13 +438,14 @@ describe('make-web-preset', () => {
         'context-rollover',
       )?.config
       run(base)
-      expect(read()).toMatchObject({ handoffOnly: true, retainRatio: 0.1, handoffMaxChars: 20000 })
+      expect(read()).toMatchObject({ handoffOnly: true, handoffMaxChars: 20000 })
+      expect(read()).not.toHaveProperty('retainRatio')
       run([...base, '--handoff-only', 'false'])
-      expect(read()).toMatchObject({ handoffOnly: false })
+      expect(read()).toMatchObject({ handoffOnly: false, retainRatio: 0.1 })
       run([
         ...base, '--threshold-ratio', '0.8', '--reminder-ratio', '0.3', '--handoff-max-chars', '4096',
         '--handoff-dir', 'docs/handoff', '--handoff-pattern', 'NOTE-*.md', '--reminder-message', 'custom {percent}',
-        '--retain-tokens', '8192', '--engine-name', 'other-engine',
+        '--handoff-only', 'false', '--retain-tokens', '8192', '--engine-name', 'other-engine',
       ])
       expect(read()).toMatchObject({
         thresholdRatio: 0.8,
