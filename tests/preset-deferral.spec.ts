@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { CompactionEngine } from '@deepseek-ai/dsh-compaction'
 import type { SessionSeq } from '@deepseek-ai/dsh-session'
-import { countRollovers } from '../src/rollover.ts'
+import { countRollovers, reminderDelivered } from '../src/rollover.ts'
 import { ContextRolloverEngine } from '../src/index.ts'
 import { resolveConfig } from '../src/config.ts'
 import {
@@ -19,10 +19,12 @@ import {
   followup,
   mountTestContext,
   newContextCall,
+  reminderTexts,
   ScriptedAdapter,
   seedExchanges,
   tempNotesDir,
   textResponse,
+  usageResponse,
 } from './harness.ts'
 
 /** Install a fake preset roster whose composition owns `compaction`. */
@@ -91,6 +93,43 @@ describe('preset ownership', () => {
     const resultText = JSON.stringify(tailResult?.data)
     expect(resultText).toContain('agent preset')
     expect(resultText).not.toContain('no handoff document')
+  })
+
+  it('gives a preset-owned session no pressure reminder from this engine', async () => {
+    // The reminder names this engine's tools. A session whose compaction
+    // another backend owns must not receive it from this row, or the reminder
+    // would arrive with a threshold this row computed from the default ratio.
+    const { ctx, agent, session } = await engineHarness('defer-reminder-owned', {
+      thresholdRatio: 0.5,
+      reminderThresholdRatio: 0.01,
+    })
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+      usageResponse('answer 1', 5000),
+      usageResponse('answer 2', 6000),
+    ]))
+    provideRoster(ctx, {} as CompactionEngine)
+
+    await followup(agent, 'turn one')
+    await followup(agent, 'turn two')
+    expect(reminderTexts(session)).toHaveLength(0)
+    expect(reminderDelivered(session)).toBe(false)
+  })
+
+  it('still gives a rosterless session its pressure reminder', async () => {
+    // Control for the case above: the same usage without a roster must still
+    // produce one reminder, so the owned case cannot pass by never reminding.
+    const { ctx, agent, session } = await engineHarness('defer-reminder-rosterless', {
+      thresholdRatio: 0.5,
+      reminderThresholdRatio: 0.01,
+    })
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+      usageResponse('answer 1', 5000),
+      usageResponse('answer 2', 6000),
+    ]))
+
+    await followup(agent, 'turn one')
+    await followup(agent, 'turn two')
+    expect(reminderTexts(session)).toHaveLength(1)
   })
 
   it('registers no global tools where a preset roster exists', async () => {

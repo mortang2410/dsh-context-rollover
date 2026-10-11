@@ -249,6 +249,9 @@ export class ContextRolloverEngine extends CompactionEngine {
       }
       const decision = await next()
       if (decision.kind === 'reject') return decision
+      // The reminder names this engine's own tools, so a session whose
+      // compaction another backend owns gets none from this row.
+      if (this.compactionOwnedElsewhere(agent)) return decision
       const reminder = this.pendingReminder(agent.session)
       if (reminder === undefined) return decision
       return { kind: 'enter', messages: [...decision.messages, reminder] }
