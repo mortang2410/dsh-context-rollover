@@ -102,3 +102,25 @@ describe('notesEnabled in a manual checkpoint', () => {
     expect(await checkpointCarriesNotes(false, 'config-checkpoint-off')).toBe(false)
   })
 })
+
+describe('handoffMaxChars on a manual checkpoint', () => {
+  /** Whether a manual checkpoint carries the notes' trailing marker, under a given size limit. */
+  async function checkpointCarriesTail(handoffMaxChars: number, id: string): Promise<boolean> {
+    const { agent, engine, session, notesBase } = await engineHarness(id, { handoffMaxChars })
+    const dir = NotesStore.directoryFor(session.id, notesBase)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'state.md'), `${'x'.repeat(400)} TAIL-MARKER`)
+    await seedExchanges(agent, 20)
+    const result = await engine.compactNow(agent, new AbortController().signal)
+    expect(result).not.toBeNull()
+    return JSON.stringify(result).includes('TAIL-MARKER')
+  }
+
+  it('keeps the trailing notes when the limit is the default', async () => {
+    expect(await checkpointCarriesTail(20000, 'config-checkpoint-cap-default')).toBe(true)
+  })
+
+  it('caps the notes in a manual checkpoint at handoffMaxChars', async () => {
+    expect(await checkpointCarriesTail(120, 'config-checkpoint-cap-small')).toBe(false)
+  })
+})
