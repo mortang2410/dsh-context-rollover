@@ -4,8 +4,8 @@
  *
  * Responsibilities stay split (the Codex lesson): the `new_context` tool only
  * requests a boundary, the pre-step / turn-stopping listeners decide when the
- * boundary is actually crossed, the token meter measures pressure and delivers
- * one reminder per window, and {@link commitRollover} performs the surface
+ * boundary is actually crossed, the token meter measures pressure and paces the
+ * reminder (see claimReminder), and {@link commitRollover} performs the surface
  * replacement inside DSH's normal compaction transaction.
  *
  * @module dsh-context-rollover
@@ -242,7 +242,7 @@ export class ContextRolloverEngine extends CompactionEngine {
       // The reminder names this engine's own tools, so a session whose
       // compaction another backend owns gets none from this row.
       if (this.compactionOwnedElsewhere(agent)) return decision
-      const reminder = this.pendingReminder(agent.session)
+      const reminder = this.pendingReminder(agent.session, Date.now())
       if (reminder === undefined) return decision
       return { kind: 'enter', messages: [...decision.messages, reminder] }
     })
@@ -271,14 +271,16 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * The one-per-window handoff reminder, when this step crosses the reminder
-   * threshold for the first time in the current window.
+   * The handoff reminder, when this step is at or above the reminder point and
+   * the five-minute cadence allows one (see claimReminder).
    *
    * The text is the configured {@link RolloverConfig.reminderMessage} with
    * `{percent}` replaced by the measured percentage. The threshold is what
    * gates delivery: nothing about the text is hardcoded here.
+   * @param session - session whose latest routed request is measured.
+   * @param now - epoch milliseconds of this pre-step, read once by the caller.
    */
-  private pendingReminder(session: Session): UserMessage | undefined {
+  private pendingReminder(session: Session, now: number): UserMessage | undefined {
     const route = session.requestContext()
     if (route?.contextWindow === undefined) return undefined
     const contextWindow = route.contextWindow
@@ -289,7 +291,7 @@ export class ContextRolloverEngine extends CompactionEngine {
     // Claimed synchronously: on a preset deployment the host row and the
     // preset row both observe this pre-step, and neither delivery is in the
     // log yet when the second one decides.
-    if (!claimReminder(session)) return undefined
+    if (!claimReminder(session, now)) return undefined
     const percent = Math.min(100, Math.round((measurement.totalTokens / contextWindow) * 100))
     return createUserMessage({
       content: [{
@@ -305,8 +307,9 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * Pressure evaluation: one reminder per window below the rollover point, and
-   * a warning above it. The engine never rolls over on pressure by itself.
+   * Pressure evaluation: a warning above the rollover point, once per turn. The
+   * reminder is paced separately (see pendingReminder). The engine never rolls
+   * over on pressure by itself.
    *
    * An automatic rollover has no model to name its handoff, so it could only
    * take the newest handoff file in a shared directory, which may belong to a

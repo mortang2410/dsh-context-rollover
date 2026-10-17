@@ -12,8 +12,9 @@
  *
  * A module-scoped claim therefore cannot be the whole answer, and a
  * per-instance Set is not an answer at all. The durable log is what both rows
- * share, so `reminderDelivered` decides, and `claimReminder` adds the
- * synchronous claim that the same module instance needs inside one waterfall.
+ * share, so the logged time of the last reminder decides the cadence (see
+ * `claimReminder`), and the synchronous claim covers one waterfall before either
+ * delivery is logged.
  *
  * @module tests/reminder-delivery
  */
@@ -21,13 +22,14 @@
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { DEFAULT_REMINDER_MESSAGE, resolveConfig } from '../src/config.ts'
 import {
   claimReminder,
   countRollovers,
   isPressureReminder,
+  REMINDER_REPEAT_MS,
   reminderDelivered,
   reminderWindowKey,
   resetReminderClaims,
@@ -47,6 +49,14 @@ import {
 // per session, and these ids must not collide across cases in one process.
 let caseId = 0
 const sessionId = (label: string): string => `reminder-${label}-${(caseId += 1)}`
+
+/** Fake-clock start for the cases that drive the five-minute cadence (epoch ms). */
+const T0 = Date.parse('2026-10-17T12:00:00.000Z')
+
+// Cases that fake the clock restore real time afterwards.
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 describe('pressure reminder delivery', () => {
   it('is refused by a second module instance once the log carries the reminder', async () => {
@@ -73,16 +83,18 @@ describe('pressure reminder delivery', () => {
     // is the module's own, which is the point: a distinct module instance.
     const fresh = await import('../src/rollover.ts?fresh-module-instance') as typeof import('../src/rollover.ts')
     expect(fresh.claimReminder).not.toBe(claimReminder)
-    expect(fresh.claimReminder(session)).toBe(false)
+    expect(fresh.claimReminder(session, Date.now())).toBe(false)
 
     // Clearing the in-process claims does not reopen the window: the log is
     // the durable authority, and it still carries the delivered reminder.
     resetReminderClaims(session)
-    expect(claimReminder(session)).toBe(false)
-    expect(fresh.claimReminder(session)).toBe(false)
+    expect(claimReminder(session, Date.now())).toBe(false)
+    expect(fresh.claimReminder(session, Date.now())).toBe(false)
   })
 
-  it('claims once per window, not once per session', async () => {
+  it('holds the five-minute cadence inside one window, not once per session', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(T0)
     const { ctx, agent, session } = await engineHarness(sessionId('window'), {
       thresholdRatio: 0.5,
       reminderThresholdRatio: 0.01,
@@ -99,11 +111,18 @@ describe('pressure reminder delivery', () => {
     await followup(agent, 'turn two')
     expect(reminderTexts(session)).toHaveLength(1)
 
-    // Same window: neither a repeat call nor a later turn may claim again.
+    // Same window, inside the cadence: a claim just short of five minutes is refused.
     const key = reminderWindowKey(session)
-    expect(claimReminder(session)).toBe(false)
+    expect(claimReminder(session, T0 + REMINDER_REPEAT_MS - 1)).toBe(false)
+    vi.setSystemTime(T0 + 60_000)
     await followup(agent, 'turn three')
     expect(reminderTexts(session)).toHaveLength(1)
+    expect(reminderWindowKey(session)).toBe(key)
+
+    // Five minutes after the first delivery, the same window delivers again.
+    vi.setSystemTime(T0 + REMINDER_REPEAT_MS)
+    await followup(agent, 'turn four')
+    expect(reminderTexts(session)).toHaveLength(2)
     expect(reminderWindowKey(session)).toBe(key)
   })
 
@@ -171,7 +190,9 @@ function deliveredPercent(session: Session): number | undefined {
 }
 
 describe('the 40% handoff reminder', () => {
-  it('fires exactly once after usage crosses 40% and not again in the same window', async () => {
+  it('fires once after usage crosses 40%, then repeats only after five minutes', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(T0)
     // Deliberately no ratio overrides: this case measures the SHIPPED defaults,
     // where reminderThresholdRatio is 0.40 and thresholdRatio is 0.90, against
     // a 100k window. 45k of usage is past the reminder point and far below the
@@ -193,11 +214,17 @@ describe('the 40% handoff reminder', () => {
     expect(reminderTexts(session)).toHaveLength(1)
     expect(reminderDelivered(session)).toBe(true)
 
-    // Same window, later turn: the reminder must not repeat.
+    // A minute later, same window: still inside the five-minute cadence.
+    vi.setSystemTime(T0 + 60_000)
     await followup(agent, 'turn three')
     expect(reminderTexts(session)).toHaveLength(1)
     // No rollover happened, so the window never advanced.
     expect(countRollovers(session)).toBe(0)
+
+    // Five minutes after the first delivery, the reminder repeats.
+    vi.setSystemTime(T0 + REMINDER_REPEAT_MS)
+    await followup(agent, 'turn four')
+    expect(reminderTexts(session)).toHaveLength(2)
   })
 
   it('delivers text naming /handoff-doc and new_context, with the measured percent substituted', async () => {

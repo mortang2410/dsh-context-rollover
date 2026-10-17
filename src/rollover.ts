@@ -705,29 +705,76 @@ export function rolloverSummarySeqs(session: Session): Seq[] {
  */
 const CLAIM_KEY = Symbol.for('dsh.context-rollover.reminder-claims')
 
-/** The claimed window numbers on one session, created on first use. */
-function claimsOn(session: Session): Set<number> {
-  const carrier = session as unknown as Record<symbol, unknown>
-  const existing = carrier[CLAIM_KEY]
-  if (existing instanceof Set) return existing as Set<number>
-  const created = new Set<number>()
-  try {
-    Object.defineProperty(session, CLAIM_KEY, {
-      value: created,
-      enumerable: false,
-      configurable: true,
-      writable: false,
-    })
-  } catch {
-    // A frozen session still works: fall back to a process-local set, which
-    // covers single-row deployments and loses only the cross-row case.
-    fallbackClaims.set(session, created)
-  }
-  return created
+/**
+ * The newest in-memory reminder claim on one session.
+ *
+ * A plain object holding a window number and an epoch-millisecond time. It is
+ * read with property and `typeof` checks only, never with `instanceof`, because
+ * the two engine rows may create and read it in different realms.
+ */
+interface ReminderClaim {
+  /** The rollover count of the window the claim was made in. */
+  readonly window: number
+  /** Epoch milliseconds of the pre-step that made the claim. */
+  readonly at: number
+}
+
+/** Whether a value has the claim shape, whichever realm created it. */
+function isReminderClaim(value: unknown): value is ReminderClaim {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { window?: unknown, at?: unknown }
+  return typeof candidate.window === 'number' && typeof candidate.at === 'number'
 }
 
 /** Claims for sessions that refuse the symbol property. */
-const fallbackClaims = new WeakMap<Session, Set<number>>()
+const fallbackClaims = new WeakMap<Session, ReminderClaim>()
+
+/** The newest claim on one session, from the session itself or the fallback. */
+function claimOn(session: Session): ReminderClaim | undefined {
+  const carrier = session as unknown as Record<symbol, unknown>
+  const stored: unknown = carrier[CLAIM_KEY] ?? fallbackClaims.get(session)
+  return isReminderClaim(stored) ? stored : undefined
+}
+
+/** Replace the newest claim on one session. */
+function storeClaim(session: Session, claim: ReminderClaim): void {
+  try {
+    Object.defineProperty(session, CLAIM_KEY, {
+      value: claim,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    })
+  } catch {
+    // A frozen session still works: fall back to a process-local record, which
+    // covers single-row deployments and loses only the cross-row case.
+    fallbackClaims.set(session, claim)
+  }
+}
+
+/**
+ * When the newest pressure reminder of one window was logged or claimed, in
+ * epoch milliseconds.
+ *
+ * Two sources, and the later time wins. The durable log survives a restart. The
+ * in-memory claim covers a waterfall in which neither row's delivery has reached
+ * the log yet, and it counts only when it was made in this window.
+ * @param session - session to inspect.
+ * @param windowNumber - the current window number (see countRollovers).
+ * @returns the newest such time, or undefined when this window has no reminder yet.
+ */
+function lastReminderAt(session: Session, windowNumber: number): number | undefined {
+  const windowStart = (rolloverSummarySeqs(session).at(-1) ?? -1) + 1
+  let logged: number | undefined
+  for (const event of sessionEvents(session)) {
+    if (event.seq >= windowStart && isPressureReminder(event)) logged = event.time
+  }
+  const claim = claimOn(session)
+  const claimed = claim?.window === windowNumber ? claim.at : undefined
+  if (logged === undefined) return claimed
+  if (claimed === undefined) return logged
+  return Math.max(logged, claimed)
+}
 
 /**
  * Identity of the context window a reminder would belong to: the session plus
@@ -765,10 +812,9 @@ export function isPressureReminder(event: SessionEvent): event is SessionEvent<'
  * Whether a pressure reminder was already delivered in the session's current
  * window, according to the durable log.
  *
- * This is the authority for "once per window" across turns and restarts: every
- * engine row reads the same log, and an in-memory claim cannot survive a
- * process restart. It cannot cover two rows deciding within one waterfall —
- * see the claim registry above for that.
+ * The cadence gate in {@link claimReminder} reads the time of this reminder, not
+ * this flag, so this predicate no longer decides delivery. It stays exported
+ * for the test harness.
  * @param session - session to inspect.
  * @returns true when the current window already carries a reminder.
  */
@@ -779,30 +825,50 @@ export function reminderDelivered(session: Session): boolean {
 }
 
 /**
- * Claim the current window's reminder slot, if nobody has yet.
+ * The minimum wall-clock gap between two pressure reminders in one window.
  *
- * Claiming is synchronous on purpose: two engine rows can decide within one
- * waterfall, before either delivery reaches the log.
- * @param session - session whose window to claim.
- * @returns true when this caller owns the reminder for the window.
+ * Fixed on purpose: the cadence is part of what a reminder means, and a config
+ * key would need a default in every profile. A reminder can only be delivered
+ * inside a pre-step, so the gap is checked at each pre-step, not by a timer.
  */
-export function claimReminder(session: Session): boolean {
-  if (reminderDelivered(session)) return false
-  const claimed = claimsOn(session)
+export const REMINDER_REPEAT_MS = 5 * 60 * 1000
+
+/**
+ * Decide whether a pressure reminder may be delivered at this pre-step, and
+ * claim the delivery when it may.
+ *
+ * The caller has already checked the usage boundary (measured usage at or above
+ * the reminder point). This gate checks only the cadence. Let `last` be the
+ * newest reminder of the current window, logged or claimed. Then:
+ *   1. No reminder yet in the current window: deliver.
+ *   2. The newest reminder is at least REMINDER_REPEAT_MS old: deliver.
+ *   3. A rollover started a new window: only that window's reminders count, so
+ *      the first delivery in the new window is immediate.
+ * Otherwise refuse. A `last` later than `now` (the clock moved backward) gives a
+ * negative elapsed time, which is below the gap, so the gate refuses.
+ *
+ * The claim is stored synchronously, so two engine rows that decide within one
+ * waterfall see it before either delivery reaches the log.
+ * @param session - session whose current window to check.
+ * @param now - epoch milliseconds of this pre-step, read once by the caller.
+ * @returns true when this caller owns the reminder for this pre-step.
+ */
+export function claimReminder(session: Session, now: number): boolean {
   const windowNumber = countRollovers(session)
-  if (claimed.has(windowNumber)) return false
-  claimed.add(windowNumber)
+  const last = lastReminderAt(session, windowNumber)
+  if (last !== undefined && now - last < REMINDER_REPEAT_MS) return false
+  storeClaim(session, { window: windowNumber, at: now })
   return true
 }
 
 /**
- * Drop every in-process claim for one session.
+ * Drop the in-process claim for one session.
  *
- * Only tests need this: they reuse session ids across cases in one process,
- * while production scopes each claim to the session it was made on.
- * @param session - session whose claims to drop.
+ * Only tests need this: they reuse session ids across cases in one process. A
+ * host restart clears the claim by itself, and the log is not touched.
+ * @param session - session whose claim to drop.
  */
 export function resetReminderClaims(session: Session): void {
-  claimsOn(session).clear()
+  delete (session as unknown as Record<symbol, unknown>)[CLAIM_KEY]
   fallbackClaims.delete(session)
 }

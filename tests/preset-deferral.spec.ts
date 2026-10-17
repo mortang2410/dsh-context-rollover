@@ -167,7 +167,7 @@ describe('preset ownership', () => {
     await followup(agent, 'turn one')
     await followup(agent, 'turn two')
     expect(reminderTexts(session)).toHaveLength(0)
-    expect(claimReminder(session)).toBe(true)
+    expect(claimReminder(session, Date.now())).toBe(true)
   })
 
   it('reminds a preset-owned session through a proxy-wrapped owner at its entry point', async () => {
