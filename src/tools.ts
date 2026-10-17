@@ -6,6 +6,7 @@
  * @module dsh-context-rollover/tools
  */
 
+import { resolve } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
@@ -74,7 +75,9 @@ function newContextTool(deps: RolloverToolDependencies) {
         description:
           'Path of the durable handoff document the new window continues from: an absolute path, or one '
           + 'relative to the session working directory. Run `/handoff-doc` first and pass the file it wrote '
-          + '(its contract saves under `.scratch/handoff/HANDOFF-<topic-or-date>.md`). The file is read at the '
+          + '(in a DSH session the handoff is a notes entry, so pass the absolute path that the notes tool\'s '
+          + 'write or list reply gives; outside DSH it saves under `.scratch/handoff/HANDOFF-<topic-or-date>.md`). '
+          + 'The file is read at the '
           + 'moment you call this tool, so a missing, unreadable, empty or oversized document is refused here '
           + 'instead of leaving you with a context that silently never rolled over.',
       },
@@ -275,7 +278,9 @@ function notesTool(deps: RolloverToolDependencies) {
           if (listings.length === 0) return { action: 'list', text: 'No notes stored yet.' }
           return {
             action: 'list',
-            text: listings.map(listing => `${listing.path} (${listing.size} bytes)`).join('\n'),
+            text: listings
+              .map(listing => `${listing.path} (${listing.size} bytes) at ${resolve(store.root, listing.path)}`)
+              .join('\n'),
           }
         }
         case 'read': {
@@ -287,14 +292,16 @@ function notesTool(deps: RolloverToolDependencies) {
             throw new Error('write requires "path" and "text"')
           }
           await store.write(args.path, args.text)
-          return { action: 'write', text: `Wrote ${args.path} (${args.text.length} characters).` }
+          const absolute = resolve(store.root, args.path)
+          return { action: 'write', text: `Wrote ${args.path} (${args.text.length} characters) at ${absolute}.` }
         }
         case 'append': {
           if (args.path === undefined || args.text === undefined) {
             throw new Error('append requires "path" and "text"')
           }
           await store.append(args.path, args.text)
-          return { action: 'append', text: `Appended to ${args.path}.` }
+          const absolute = resolve(store.root, args.path)
+          return { action: 'append', text: `Appended to ${args.path} at ${absolute}.` }
         }
         case 'search': {
           if (args.query === undefined) throw new Error('search requires "query"')

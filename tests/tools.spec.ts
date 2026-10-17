@@ -7,16 +7,21 @@
  * @module tests/tools.spec
  */
 
+import { readFile } from 'node:fs/promises'
+import { isAbsolute, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
+import { CONTEXT_MANAGEMENT_GUIDANCE } from '../src/guidance.ts'
+import { NotesStore } from '../src/notes.ts'
 import { countRollovers } from '../src/rollover.ts'
 import {
   engineHarness,
   followup,
   ScriptedAdapter,
   seedExchanges,
+  tempNotesDir,
   textResponse,
 } from './harness.ts'
 
@@ -120,5 +125,98 @@ describe('history tool rendering', () => {
     expect(readText).toContain('[seq ')
     expect(readText).not.toContain('undefined')
     expect(read.value).toMatchObject({ action: 'read' })
+  })
+})
+
+/** The absolute path a notes reply or list line names after " at ", when it has one. */
+function absolutePathAfterAt(text: string): string | undefined {
+  return / at (\/.+?)\.?$/.exec(text)?.[1]
+}
+
+describe('notes replies carry the absolute path new_context accepts', () => {
+  const handoffName = 'HANDOFF-row-p.md'
+  const handoffText = '# Handoff\n\nContinue from the notes entry.\n'
+
+  /** A session with closed exchanges, so a rollover has a span to replace. */
+  async function seededSession(id: string) {
+    const harness = await engineHarness(id)
+    harness.ctx.llm.registerAdapter(['mock'], new ScriptedAdapter(
+      Array.from({ length: 12 }, (_unused, index) => textResponse(`notes filler ${index}`)),
+    ))
+    await seedExchanges(harness.agent, 12)
+    return harness
+  }
+
+  it('a write reply names an absolute path that new_context accepts', async () => {
+    const { ctx, agent, session, notesBase } = await seededSession('notes-accept-write')
+    const expected = resolve(NotesStore.directoryFor(session.id, notesBase), handoffName)
+
+    const write = await executeTool(
+      ctx,
+      agent,
+      'notes',
+      { action: 'write', path: handoffName, text: handoffText },
+      'rp-a1',
+    )
+    expect(renderedText(write)).toContain(expected)
+    const written = absolutePathAfterAt(renderedText(write))
+    if (written === undefined) throw new Error('expected an absolute path in the write reply')
+    expect(isAbsolute(written)).toBe(true)
+
+    const accepted = await executeTool(ctx, agent, 'new_context', { handoff_path: written }, 'rp-a2')
+    expect(accepted.value).toMatchObject({ accepted: true })
+  })
+
+  it('a relative notesDir still gives an absolute write reply that points at the written file', async () => {
+    // The base is a temp directory reached through a path relative to the
+    // process working directory, so the store root is relative too.
+    const relativeBase = relative(process.cwd(), await tempNotesDir())
+    expect(isAbsolute(relativeBase)).toBe(false)
+    const { ctx, agent, session } = await engineHarness('notes-relative-dir', { notesDir: relativeBase })
+    const expected = resolve(NotesStore.directoryFor(session.id, relativeBase), handoffName)
+
+    const write = await executeTool(
+      ctx,
+      agent,
+      'notes',
+      { action: 'write', path: handoffName, text: handoffText },
+      'rp-b1',
+    )
+    const written = absolutePathAfterAt(renderedText(write))
+    if (written === undefined) throw new Error('expected an absolute path in the write reply')
+    expect(isAbsolute(written)).toBe(true)
+    expect(written).toBe(expected)
+    expect(await readFile(written, 'utf8')).toBe(handoffText)
+  })
+
+  it('a list line carries the absolute path, and new_context accepts that path', async () => {
+    const { ctx, agent, session, notesBase } = await seededSession('notes-accept-list')
+    const expected = resolve(NotesStore.directoryFor(session.id, notesBase), handoffName)
+    await executeTool(ctx, agent, 'notes', { action: 'write', path: handoffName, text: handoffText }, 'rp-c1')
+
+    const list = await executeTool(ctx, agent, 'notes', { action: 'list' }, 'rp-c2')
+    const line = renderedText(list).split('\n').find(candidate => candidate.startsWith(`${handoffName} (`))
+    if (line === undefined) throw new Error('expected a list line for the handoff note')
+    expect(line).toContain(expected)
+    const listed = absolutePathAfterAt(line)
+    if (listed === undefined) throw new Error('expected an absolute path on the list line')
+
+    const accepted = await executeTool(ctx, agent, 'new_context', { handoff_path: listed }, 'rp-c3')
+    expect(accepted.value).toMatchObject({ accepted: true })
+  })
+
+  it('the guidance tells the model to pass the absolute path its notes reply gave', () => {
+    expect(CONTEXT_MANAGEMENT_GUIDANCE).toContain('absolute path')
+    expect(CONTEXT_MANAGEMENT_GUIDANCE).toContain('notes')
+  })
+
+  it('the handoff_path description names the notes reply as the source of that absolute path', async () => {
+    const { ctx } = await engineHarness('notes-accept-description')
+    const definition = ctx.tools.get('new_context') as unknown as {
+      parameters?: { properties?: Record<string, { description?: string }> }
+    }
+    const description = definition.parameters?.properties?.handoff_path?.description ?? ''
+    expect(description).toContain('absolute path that the notes tool')
+    expect(description).toContain('outside DSH it saves under `.scratch/handoff/HANDOFF-<topic-or-date>.md`')
   })
 })

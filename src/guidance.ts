@@ -20,6 +20,8 @@ tool.
   or update the durable handoff document, and make that document fully
   sufficient for a fresh context to continue the work. Then call
   \`new_context\` with the path of that document as its \`handoff_path\` argument.
+  If you wrote the handoff with the notes tool, pass the absolute path its write
+  reply gave, or the one \`notes list\` shows for it.
 - The handoff document is the start of the continuation context: after the
   rollover your active context is the standing instructions, that document, and
   any recent messages the rollover keeps. Older conversation carries over only
