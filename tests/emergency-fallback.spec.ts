@@ -191,7 +191,10 @@ describe('crossing the rollover point by pressure only warns', () => {
     expect(warnings.filter(isPressureWarning)).toHaveLength(2)
 
     // Positive control: pressure was measured, and the reminder point delivered
-    // its one reminder for this window.
+    // one reminder. A window may carry more than one, each at least five minutes
+    // after the previous one (REMINDER_REPEAT_MS, src/rollover.ts:844). The
+    // harness has no clock control, so turn two's reminder is held back only
+    // because turn two runs less than five minutes after turn one.
     expect(reminderTexts(session)).toHaveLength(1)
     expect(countRollovers(session)).toBe(0)
     expect(session.surface.replaceGeneration).toBe(generation)
