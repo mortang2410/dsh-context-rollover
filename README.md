@@ -98,10 +98,19 @@ Responsibilities stay split (the Codex lesson):
    the durable document, and calls `new_context({ handoff_path })` with its
    path. The document replaces the whole prior surface under the
    `handoffOnly` rule.
-2. **Pressure** (warning only): above `thresholdRatio` (0.90) the engine logs
-   one warning per turn and does not roll over. Below that, at
-   `reminderThresholdRatio` (0.40), a **one-per-window** reminder tells the model
-   to run `/handoff-doc` and then call `new_context`.
+2. **Pressure** (no automatic rollover): once measured usage is at or
+   above the reminder point, the reminder tells the model, by default, to
+   run `/handoff-doc` and then call `new_context`. The reminder point is
+   `reminderThresholdRatio` (default 0.40) of the context window, or, for a
+   model with a `modelThresholds` entry, that entry's token count. The first
+   reminder in a window is delivered at the next step after usage reaches the
+   point. After that, a repeat is delivered no sooner than five minutes after
+   the previous reminder, and only while usage stays at or above the point. A
+   rollover opens a new window, and that window's first reminder is not held
+   back by the old one. Above the rollover point (`thresholdRatio`, default
+   0.90 of the window, or the model's `modelThresholds` entry), the reminder
+   keeps the same five-minute cadence, and the engine logs one warning per
+   turn. The engine does not roll over by itself there.
 3. **Overflow** (never a rollover): the engine does not roll over on a
    provider-confirmed `CONTEXT_WINDOW_EXCEEDED` and does not retry. The provider
    error reaches the user unchanged. The model usually cannot reach
