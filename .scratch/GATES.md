@@ -96,7 +96,7 @@ G1-G7. No requirement is satisfied only by a comment or a doc sentence.
 ### G8 requirement map
 
 1. 40%: `src/config.ts` `reminderThresholdRatio ?? 0.4`; 0.90 `thresholdRatio ?? 0.9` documented as the emergency fallback.
-2. Configurable message: `DEFAULT_REMINDER_MESSAGE` + `renderReminderMessage` in `src/config.ts`; the preset carries the literal text; `{percent}` is the only placeholder.
+2. Configurable message: `DEFAULT_REMINDER_MESSAGE` + `renderReminderMessage` in `src/config.ts`; the preset carries the literal text; placeholders: `{percent}`, `{used_tokens}`, `{window_tokens}`, `{handoff_point_tokens}`, `{rollover_point_tokens}`, `{tokens_to_rollover}`.
 3. Durable `/handoff-doc` file: `DEFAULT_HANDOFF_DIR = '.scratch/handoff'`, `DEFAULT_HANDOFF_PATTERN = 'HANDOFF-*.md'`, matching the skill's stated save path.
 4. Handoff replaces everything: `selectRolloverRange` `handoff-only` arm in `src/rollover.ts`; `buildReplacementText` in `src/checkpoint.ts` adds nothing to the document.
 5. No summarizer: `tests/no-summarizer.spec.ts`, one bracket assertion per path; the engine never calls `ctx.llm` anywhere in `src/`.
