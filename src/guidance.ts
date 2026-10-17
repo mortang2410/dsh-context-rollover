@@ -33,6 +33,7 @@ tool.
   current context state is not readable from repository files, from the plugin
   source, or from memory: only that tool reports it, and claiming a reading you
   did not receive is a fabrication even when the guess sounds plausible.
-- A reminder appears at most once per window when the context fills. Only your
+- A reminder appears when the context fills, and repeats no sooner than five minutes
+  after the previous one while usage stays at or above the reminder point. Only your
   \`new_context\` call starts a handoff rollover.
 `.trim()

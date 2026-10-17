@@ -158,7 +158,7 @@ describe('history', () => {
     // (the shrink guard refuses a replacement that is not strictly smaller).
     const session = closedConversation(2, 10)
     // A pressure-reminder-shaped plugin notice on the surface, like the
-    // engine's one-per-window checkpoint reminder.
+    // engine's pressure reminder.
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'Context window: 80% used reminder marker xyz' }],
       source: { kind: PLUGIN_NAME, form: 'notice', summary: 'context pressure reminder' },

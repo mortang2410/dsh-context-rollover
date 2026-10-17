@@ -23,6 +23,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { RolloverConfig } from '../src/config.ts'
+import { CONTEXT_MANAGEMENT_GUIDANCE } from '../src/guidance.ts'
+import { ContextRolloverEngine } from '../src/index.ts'
 import {
   claimReminder,
   countRollovers,
@@ -164,7 +166,7 @@ describe('pressure reminder repeat cadence', () => {
     expect(reminderTimes(session)).toEqual([T0])
   })
 
-  it('(e) two module instances observing one pre-step deliver exactly once', async () => {
+  it('(e) two module instances claim one slot in one pre-step (claim layer)', async () => {
     const { session } = await pressureSession('two-rows', [45_000])
     // @ts-expect-error a cache-busted specifier has no declaration; the shape
     // is the module's own, which is the point: a distinct module instance.
@@ -182,6 +184,53 @@ describe('pressure reminder repeat cadence', () => {
     await turnAt(engine.agent, T0, 'turn two')
     expect(reminderTimes(engine.session)).toEqual([T0])
     expect(other.claimReminder(engine.session, T0)).toBe(false)
+  })
+
+  it('(e2) two engine rows on one session reach agent/pre-step together and deliver exactly one reminder', async () => {
+    const { ctx, engine, agent, session, notesBase } = await engineHarness(sessionId('two-engine-rows'), {
+      thresholdRatio: 0.9,
+      reminderThresholdRatio: 0.4,
+    })
+    const adapter = new ScriptedAdapter([
+      usageResponse('answer 1', 45_000),
+      usageResponse('answer 2', 45_000),
+    ])
+    ctx.llm.registerAdapter(['mock'], adapter)
+    // The first row's tools are registered already. A roster that names no
+    // owner for this session keeps both rows active, and its presence stops the
+    // second row from registering the same tools again.
+    const provider = ctx as unknown as { provide(name: string, value: unknown): void }
+    provider.provide('agentPresets', { serviceFor: () => undefined })
+    // The second row is a second engine instance on an isolated child context.
+    // On the root context a second engine fails with `service "compaction" has
+    // been registered`, so the row gets its own `compaction` slot. Both rows
+    // listen on the same agent/pre-step waterfall.
+    const secondRow = new ContextRolloverEngine(ctx.isolate('compaction'), {
+
+      notesDir: notesBase,
+      thresholdRatio: 0.9,
+      reminderThresholdRatio: 0.4,
+    })
+    expect(secondRow).not.toBe(engine)
+    const measure = vi.spyOn(ctx.tokenMeter, 'measure')
+
+    await turnAt(agent, T0, 'turn one')
+    expect(reminderTexts(session)).toHaveLength(0)
+    measure.mockClear()
+    await turnAt(agent, T0, 'turn two')
+
+    // Each row measures twice per pre-step (the rollover-point warning check and
+    // the reminder check), and the agent loop does not measure. A single row
+    // therefore makes two calls, so more than two shows that the second row ran
+    // and reached the claim.
+    expect(measure.mock.calls.length).toBeGreaterThan(2)
+    // Exactly one reminder is logged for that pre-step...
+    const reminders = reminderTexts(session)
+    expect(reminders).toHaveLength(1)
+    // ...and exactly one copy of it reached the model's messages for that request.
+    const delivered = adapter.recorded.at(-1)?.messages.filter(message => message.content
+      .some(block => block.type === 'text' && block.text === reminders[0])) ?? []
+    expect(delivered).toHaveLength(1)
   })
 
   it('(f) restart survival: with the in-memory claims cleared, the log still holds the cadence', async () => {
@@ -296,5 +345,13 @@ describe('pressure reminder repeat cadence', () => {
     resetReminderClaims(session)
     expect(reminderTexts(session)).toHaveLength(1)
     expect(claimReminder(session, T0 + 1)).toBe(false)
+  })
+})
+
+describe('model-facing guidance', () => {
+  it('guidance states the five-minute repeat', () => {
+    // The model reads this text, so it must state the cadence the engine enforces.
+    expect(CONTEXT_MANAGEMENT_GUIDANCE).toContain('repeats no sooner than five minutes')
+    expect(CONTEXT_MANAGEMENT_GUIDANCE).not.toContain('at most once per window')
   })
 })

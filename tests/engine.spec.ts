@@ -1,7 +1,7 @@
 /**
  * Engine integration tests over the real agent loop: model-requested rollover
- * through the `new_context` tool, notes carry-over, one-per-window pressure
- * reminders, and manual rollover behind the compaction command.
+ * through the `new_context` tool, notes carry-over, pressure reminders on their
+ * five-minute repeat, and manual rollover behind the compaction command.
  *
  * @module tests/engine.spec
  */
@@ -72,7 +72,7 @@ describe('ContextRolloverEngine', () => {
     expect(texts).toContain('implementing now')
   })
 
-  it('delivers the pressure reminder at most once per window', async () => {
+  it('delivers the pressure reminder once, and a second turn inside the five-minute cadence does not repeat it', async () => {
     const { ctx, agent, session } = await engineHarness('reminder', {
       thresholdRatio: 0.5,
       reminderThresholdRatio: 0.01,

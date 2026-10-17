@@ -9,8 +9,9 @@
 import z from '@deepseek-ai/schemastery'
 
 /**
- * The shipped reminder text: the model's one-per-window instruction to write
- * the durable handoff and then cross the boundary.
+ * The shipped reminder text: the model's reminder instruction, repeated no
+ * sooner than five minutes apart while usage stays at or above the reminder
+ * point, to write the durable handoff and then cross the boundary.
  *
  * `{percent}` is the only placeholder. A deployment that restates the value
  * takes over the wording entirely; the engine substitutes nothing else.
@@ -60,9 +61,9 @@ export interface RolloverConfig {
    */
   reminderThresholdRatio?: number
   /**
-   * Text of the one-per-window reminder. `{percent}` is substituted with the
-   * measured percentage at send time and is the only placeholder.
-   * Defaults to {@link DEFAULT_REMINDER_MESSAGE}.
+   * Text of the reminder, repeated no sooner than five minutes apart. `{percent}`
+   * is substituted with the measured percentage at send time and is the only
+   * placeholder. Defaults to {@link DEFAULT_REMINDER_MESSAGE}.
    */
   reminderMessage?: string
   /**

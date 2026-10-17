@@ -753,6 +753,16 @@ function storeClaim(session: Session, claim: ReminderClaim): void {
 }
 
 /**
+ * The first event sequence of the current window: the event after the newest
+ * rollover summary, or 0 while no rollover has happened.
+ * @param session - session to inspect.
+ * @returns the lowest event sequence that belongs to the current window.
+ */
+function currentWindowStart(session: Session): number {
+  return (rolloverSummarySeqs(session).at(-1) ?? -1) + 1
+}
+
+/**
  * When the newest pressure reminder of one window was logged or claimed, in
  * epoch milliseconds.
  *
@@ -764,7 +774,7 @@ function storeClaim(session: Session, claim: ReminderClaim): void {
  * @returns the newest such time, or undefined when this window has no reminder yet.
  */
 function lastReminderAt(session: Session, windowNumber: number): number | undefined {
-  const windowStart = (rolloverSummarySeqs(session).at(-1) ?? -1) + 1
+  const windowStart = currentWindowStart(session)
   let logged: number | undefined
   for (const event of sessionEvents(session)) {
     if (event.seq >= windowStart && isPressureReminder(event)) logged = event.time
@@ -819,7 +829,7 @@ export function isPressureReminder(event: SessionEvent): event is SessionEvent<'
  * @returns true when the current window already carries a reminder.
  */
 export function reminderDelivered(session: Session): boolean {
-  const windowStart = (rolloverSummarySeqs(session).at(-1) ?? -1) + 1
+  const windowStart = currentWindowStart(session)
   return sessionEvents(session)
     .some(event => event.seq >= windowStart && isPressureReminder(event))
 }
