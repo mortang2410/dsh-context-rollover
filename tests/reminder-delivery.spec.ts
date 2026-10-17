@@ -24,7 +24,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { DEFAULT_REMINDER_MESSAGE, resolveConfig } from '../src/config.ts'
+import { DEFAULT_REMINDER_MESSAGE, renderReminderMessage, resolveConfig } from '../src/config.ts'
+import type { ReminderValues, RolloverConfig } from '../src/config.ts'
 import {
   claimReminder,
   countRollovers,
@@ -320,16 +321,128 @@ describe('the 40% handoff reminder', () => {
   })
 })
 
+/**
+ * Output tokens that `usageResponse` reports. The token meter counts input plus
+ * output (`usageTokens` in packages/llm/token-meter/src/index.ts), so a test
+ * that wants `N` measured tokens scripts `N - REPORTED_OUTPUT_TOKENS` as input.
+ */
+const REPORTED_OUTPUT_TOKENS = 5
+
+/**
+ * The reminder a routed model gets at turn two, with `used` tokens measured on
+ * turn one. The scripted adapter advertises `window` for that model, so each
+ * case reads its own window and its own points.
+ * @param label - distinct session label.
+ * @param route - routed model id, the window it advertises, and the measured tokens used.
+ * @param config - engine configuration overrides for this case.
+ * @returns the one reminder the session delivered.
+ */
+async function reminderOn(
+  label: string,
+  route: { model: string; window: number; used: number },
+  config: Partial<RolloverConfig> = {},
+): Promise<string> {
+  const { ctx, agent, session } = await engineHarness(sessionId(label), config, {}, {}, { model: route.model })
+  const input = route.used - REPORTED_OUTPUT_TOKENS
+  ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+    usageResponse('answer 1', input),
+    usageResponse('answer 2', input),
+  ], route.window))
+  await followup(agent, 'turn one')
+  await followup(agent, 'turn two')
+  const reminders = reminderTexts(session)
+  expect(reminders).toHaveLength(1)
+  return reminders[0] ?? ''
+}
+
+describe('the reminder states the absolute numbers for the routed model', () => {
+  // Case 1: a generic 1,000,000-token route with no entry, so the ratios apply.
+  // Handoff point 400,000 and rollover point 900,000. Used: 400,000 tokens.
+  it('a generic 1M route gets the ratio points and reads 40% of its window', async () => {
+    const text = await reminderOn('nag-generic', { model: 'generic-1m', window: 1_000_000, used: 400_000 })
+    expect(text).toBe(
+      'Context is 40% full. 400000 of 1000000 tokens are used. '
+      + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
+      + 'The handoff point, where these reminders start, is 400000 tokens. '
+      + 'The rollover point is 900000 tokens, leaving 500000 tokens before the rollover point. '
+      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+      + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
+      + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
+      + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
+      + 'chat kept after the rollover, will be the continuation context.',
+    )
+  })
+
+  // Case 2: strata/qwen-strata, a 262,144-token window, with its own entry:
+  // handoff point 200,000 and rollover point 250,000. Used: 200,000 tokens.
+  it('strata/qwen-strata gets its entry points and reads 76% of its window', async () => {
+    const text = await reminderOn('nag-qwen', { model: 'strata/qwen-strata', window: 262_144, used: 200_000 }, {
+      modelThresholds: { 'strata/qwen-strata': { thresholdTokens: 250_000, reminderThresholdTokens: 200_000 } },
+    })
+    expect(text).toBe(
+      'Context is 76% full. 200000 of 262144 tokens are used. '
+      + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
+      + 'The handoff point, where these reminders start, is 200000 tokens. '
+      + 'The rollover point is 250000 tokens, leaving 50000 tokens before the rollover point. '
+      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+      + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
+      + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
+      + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
+      + 'chat kept after the rollover, will be the continuation context.',
+    )
+  })
+
+  // Case 3: claude-haiku-5-5, a 1,000,000-token window, with the same entry
+  // points as case 2. Used: 200,000 tokens. Cases 2 and 3 differ only in window.
+  it('claude haiku gets the same entry points as strata and reads 20% of its window', async () => {
+    const text = await reminderOn('nag-haiku', { model: 'claude-haiku-5-5', window: 1_000_000, used: 200_000 }, {
+      modelThresholds: { 'claude-haiku-5-5': { thresholdTokens: 250_000, reminderThresholdTokens: 200_000 } },
+    })
+    expect(text).toBe(
+      'Context is 20% full. 200000 of 1000000 tokens are used. '
+      + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
+      + 'The handoff point, where these reminders start, is 200000 tokens. '
+      + 'The rollover point is 250000 tokens, leaving 50000 tokens before the rollover point. '
+      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+      + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
+      + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
+      + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
+      + 'chat kept after the rollover, will be the continuation context.',
+    )
+  })
+})
+
+describe('renderReminderMessage', () => {
+  const values: ReminderValues = {
+    percent: 76,
+    used_tokens: 200_000,
+    window_tokens: 262_144,
+    handoff_point_tokens: 200_000,
+    rollover_point_tokens: 250_000,
+    tokens_to_rollover: 50_000,
+  }
+
+  it('fills every named placeholder, repeats a repeated one, and leaves other braces verbatim', () => {
+    expect(renderReminderMessage('{percent}% of {window_tokens} ({used_tokens}); {nope} {percent}', values))
+      .toBe('76% of 262144 (200000); {nope} 76')
+  })
+})
+
 describe('reminder configuration defaults and validation', () => {
   it('pins the shipped default message and the 40% / 90% defaults', () => {
     // The acceptance criterion is that the DEFAULT is exactly this text, so
     // the literal is pinned here rather than derived from the constant under
     // test. The backticks are part of the required text.
     expect(DEFAULT_REMINDER_MESSAGE).toBe(
-      'Context is {percent}% full. Use `/handoff-doc` to create/update the durable handoff document. '
+      'Context is {percent}% full. {used_tokens} of {window_tokens} tokens are used. '
+      + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
+      + 'The handoff point, where these reminders start, is {handoff_point_tokens} tokens. '
+      + 'The rollover point is {rollover_point_tokens} tokens, leaving {tokens_to_rollover} tokens before the rollover point. '
+      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+      + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
       + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
-      + '`new_context`. The handoff document, plus any recent chat kept after the rollover, will be the '
-      + 'continuation context.',
+      + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
+      + 'chat kept after the rollover, will be the continuation context.',
     )
     const config = resolveConfig({})
     expect(config.reminderMessage).toBe(DEFAULT_REMINDER_MESSAGE)

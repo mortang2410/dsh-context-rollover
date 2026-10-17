@@ -9,18 +9,32 @@
 import z from '@deepseek-ai/schemastery'
 
 /**
- * The shipped reminder text: the model's reminder instruction, repeated no
- * sooner than five minutes apart while usage stays at or above the reminder
- * point, to write the durable handoff and then cross the boundary.
+ * The shipped reminder text: the absolute numbers for the routed model, then
+ * the model's instruction to write the durable handoff and cross the boundary.
+ * It repeats no sooner than five minutes apart while usage stays at or above
+ * the handoff point.
  *
- * `{percent}` is the only placeholder. A deployment that restates the value
- * takes over the wording entirely; the engine substitutes nothing else.
+ * Placeholders, filled at send time from {@link ReminderValues}:
+ * - `{percent}`: tokens used as a percent of the routed model's context window.
+ * - `{used_tokens}`: tokens used by the latest measured request.
+ * - `{window_tokens}`: the routed model's context window, in tokens.
+ * - `{handoff_point_tokens}`: the handoff point, where reminders start.
+ * - `{rollover_point_tokens}`: the rollover point, where the warning starts.
+ * - `{tokens_to_rollover}`: tokens left before the rollover point, never below 0.
+ *
+ * Any other `{...}` text is not a placeholder and is delivered verbatim. A
+ * deployment that restates the value takes over the wording entirely.
  */
 export const DEFAULT_REMINDER_MESSAGE =
-  'Context is {percent}% full. Use `/handoff-doc` to create/update the durable handoff document. '
+  'Context is {percent}% full. {used_tokens} of {window_tokens} tokens are used. '
+  + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
+  + 'The handoff point, where these reminders start, is {handoff_point_tokens} tokens. '
+  + 'The rollover point is {rollover_point_tokens} tokens, leaving {tokens_to_rollover} tokens before the rollover point. '
+  + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+  + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
   + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
-  + '`new_context`. The handoff document, plus any recent chat kept after the rollover, will be the '
-  + 'continuation context.'
+  + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
+  + 'chat kept after the rollover, will be the continuation context.'
 
 /** Default base directory, relative to the session working directory, holding durable handoffs. */
 export const DEFAULT_HANDOFF_DIR = '.scratch/handoff'
@@ -29,17 +43,41 @@ export const DEFAULT_HANDOFF_DIR = '.scratch/handoff'
 export const DEFAULT_HANDOFF_PATTERN = 'HANDOFF-*.md'
 
 /**
- * Substitute the measured percentage into a reminder template.
+ * The figures a reminder template can name. Each key is a placeholder:
+ * `{percent}` stands for `percent`, and so on. {@link DEFAULT_REMINDER_MESSAGE}
+ * documents what each one means.
+ */
+export interface ReminderValues {
+  /** Tokens used as a percent of the context window, already rounded and capped at 100. */
+  readonly percent: number
+  /** Tokens used by the latest measured request. */
+  readonly used_tokens: number
+  /** The routed model's context window, in tokens. */
+  readonly window_tokens: number
+  /** The handoff point for the routed model, in tokens. */
+  readonly handoff_point_tokens: number
+  /** The rollover point for the routed model, in tokens. */
+  readonly rollover_point_tokens: number
+  /** Tokens left before the rollover point, never below 0. */
+  readonly tokens_to_rollover: number
+}
+
+/**
+ * Substitute the measured figures into a reminder template.
  *
- * `{percent}` is deliberately the only placeholder: this is not a template
- * language, so an unknown placeholder survives verbatim rather than silently
- * expanding to nothing.
+ * Only the {@link ReminderValues} names are placeholders. This is deliberately
+ * not a template language: an unknown placeholder survives verbatim rather than
+ * silently expanding to nothing.
  * @param template - configured reminder text.
- * @param percent - measured percentage of the context window, already rounded.
+ * @param values - the measured figures for this model, one per placeholder.
  * @returns the text to deliver as the reminder.
  */
-export function renderReminderMessage(template: string, percent: number): string {
-  return template.replaceAll('{percent}', String(percent))
+export function renderReminderMessage(template: string, values: ReminderValues): string {
+  let text = template
+  for (const [name, value] of Object.entries(values)) {
+    text = text.replaceAll(`{${name}}`, String(value))
+  }
+  return text
 }
 
 /** Model-facing configuration surface for the rollover engine. */
@@ -61,9 +99,10 @@ export interface RolloverConfig {
    */
   reminderThresholdRatio?: number
   /**
-   * Text of the reminder, repeated no sooner than five minutes apart. `{percent}`
-   * is substituted with the measured percentage at send time and is the only
-   * placeholder. Defaults to {@link DEFAULT_REMINDER_MESSAGE}.
+   * Text of the reminder, repeated no sooner than five minutes apart. Its
+   * placeholders are listed at {@link DEFAULT_REMINDER_MESSAGE} and are filled
+   * at send time; any other `{...}` text is left as written. Defaults to
+   * {@link DEFAULT_REMINDER_MESSAGE}.
    */
   reminderMessage?: string
   /**

@@ -97,7 +97,7 @@ function pendingHandoff(pending: PendingRollover): string {
   return pending.handoff
 }
 
-export type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
+export type { RolloverConfig, ResolvedRolloverConfig, ReminderValues } from './config.ts'
 export {
   DEFAULT_HANDOFF_DIR,
   DEFAULT_HANDOFF_PATTERN,
@@ -274,8 +274,9 @@ export class ContextRolloverEngine extends CompactionEngine {
    * The handoff reminder, when this step is at or above the reminder point and
    * the five-minute cadence allows one (see claimReminder).
    *
-   * The text is the configured {@link RolloverConfig.reminderMessage} with
-   * `{percent}` replaced by the measured percentage. The threshold is what
+   * The text is the configured {@link RolloverConfig.reminderMessage} with its
+   * placeholders filled from the measured usage and the routed model's own
+   * points (see DEFAULT_REMINDER_MESSAGE for the list). The handoff point is what
    * gates delivery: nothing about the text is hardcoded here.
    * @param session - session whose latest routed request is measured.
    * @param now - epoch milliseconds of this pre-step, read once by the caller.
@@ -286,17 +287,25 @@ export class ContextRolloverEngine extends CompactionEngine {
     const contextWindow = route.contextWindow
     const measurement = this.ctx.tokenMeter.measure(session)
     if (measurement.baseline.kind === 'none') return undefined
-    const { reminderTokens } = rolloverPointsFor(this.config, contextWindow, route.model)
+    const { reminderTokens, rolloverTokens } = rolloverPointsFor(this.config, contextWindow, route.model)
     if (measurement.totalTokens < reminderTokens) return undefined
     // Claimed synchronously: on a preset deployment the host row and the
     // preset row both observe this pre-step, and neither delivery is in the
     // log yet when the second one decides.
     if (!claimReminder(session, now)) return undefined
-    const percent = Math.min(100, Math.round((measurement.totalTokens / contextWindow) * 100))
+    const usedTokens = measurement.totalTokens
+    const percent = Math.min(100, Math.round((usedTokens / contextWindow) * 100))
     return createUserMessage({
       content: [{
         type: 'text',
-        text: renderReminderMessage(this.config.reminderMessage, percent),
+        text: renderReminderMessage(this.config.reminderMessage, {
+          percent,
+          used_tokens: usedTokens,
+          window_tokens: contextWindow,
+          handoff_point_tokens: reminderTokens,
+          rollover_point_tokens: rolloverTokens,
+          tokens_to_rollover: Math.max(0, rolloverTokens - usedTokens),
+        }),
       }],
       source: {
         kind: PLUGIN_NAME,

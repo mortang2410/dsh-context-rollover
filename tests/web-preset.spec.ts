@@ -518,10 +518,15 @@ describe('make-web-preset', () => {
     expect(message).toContain('{percent}')
     // The literal, not the constant: pins the shipped text against the engine default.
     expect(message).toBe(
-      'Context is {percent}% full. Use `/handoff-doc` to create/update the durable handoff document. '
+      'Context is {percent}% full. {used_tokens} of {window_tokens} tokens are used. '
+      + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
+      + 'The handoff point, where these reminders start, is {handoff_point_tokens} tokens. '
+      + 'The rollover point is {rollover_point_tokens} tokens, leaving {tokens_to_rollover} tokens before the rollover point. '
+      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+      + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
       + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
-      + '`new_context`. The handoff document, plus any recent chat kept after the rollover, will be the '
-      + 'continuation context.',
+      + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
+      + 'chat kept after the rollover, will be the continuation context.',
     )
   })
 

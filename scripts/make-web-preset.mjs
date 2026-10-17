@@ -86,10 +86,15 @@ const DEFAULT_PRESET_ID = 'standard-rollover'
  * import that module, and a generated preset that omitted the message would
  * silently drop back to whatever default the engine happened to carry.
  */
-const DEFAULT_REMINDER_MESSAGE = 'Context is {percent}% full. Use `/handoff-doc` to create/update the durable '
-  + 'handoff document. Make it fully sufficient for a fresh context to continue the work. After it succeeds, '
-  + 'call `new_context`. The handoff document, plus any recent chat kept after the rollover, will be the '
-  + 'continuation context.'
+const DEFAULT_REMINDER_MESSAGE = 'Context is {percent}% full. {used_tokens} of {window_tokens} tokens are used. '
+  + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
+  + 'The handoff point, where these reminders start, is {handoff_point_tokens} tokens. '
+  + 'The rollover point is {rollover_point_tokens} tokens, leaving {tokens_to_rollover} tokens before the rollover point. '
+  + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+  + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
+  + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
+  + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
+  + 'chat kept after the rollover, will be the continuation context.'
 
 /** Handoff defaults, mirroring `DEFAULT_HANDOFF_DIR`/`DEFAULT_HANDOFF_PATTERN` in `src/config.ts`. */
 const DEFAULT_HANDOFF_DIR = '.scratch/handoff'
@@ -488,8 +493,11 @@ Options:
   --engine-name <spec>    module specifier the engine row names
                           (default: this package's own name)
   --threshold-ratio <n>   auto-rollover point, fraction of window (default: 0.9)
-  --reminder-ratio <n>    one-time handoff reminder point (default: 0.4)
-  --reminder-message <t>  reminder text; {percent} is the only placeholder
+  --reminder-ratio <n>    handoff reminder point, fraction of window, repeated
+                          no sooner than five minutes apart (default: 0.4)
+  --reminder-message <t>  reminder text; placeholders {percent}, {used_tokens},
+                          {window_tokens}, {handoff_point_tokens},
+                          {rollover_point_tokens}, {tokens_to_rollover}
                           (default: the shipped /handoff-doc reminder)
   --handoff-dir <dir>     handoff directory, relative to the session cwd
                           (default: ${DEFAULT_HANDOFF_DIR}; written to the row,

@@ -104,6 +104,14 @@ abstract class RecordingAdapter extends LlmAdapter {
   readonly recorded: RecordedRequest[] = []
 
   /**
+   * @param advertisedWindow - the context window this adapter reports for every
+   *   model it serves. Defaults to {@link CONTEXT_WINDOW}.
+   */
+  constructor(private readonly advertisedWindow: number = CONTEXT_WINDOW) {
+    super()
+  }
+
+  /**
    * Record one request on this adapter and on the process-wide stream log.
    *
    * Called at the top of `stream`, which the loop invokes once per model
@@ -131,7 +139,7 @@ abstract class RecordingAdapter extends LlmAdapter {
       provider,
       id: model,
       name: model,
-      context: { contextWindow: CONTEXT_WINDOW },
+      context: { contextWindow: this.advertisedWindow },
     })
   }
 }
@@ -155,8 +163,8 @@ export class TextAdapter extends RecordingAdapter {
  * order; a final entry repeats when the script is exhausted.
  */
 export class ScriptedAdapter extends RecordingAdapter {
-  constructor(private readonly script: StreamScript) {
-    super()
+  constructor(private readonly script: StreamScript, advertisedWindow: number = CONTEXT_WINDOW) {
+    super(advertisedWindow)
   }
 
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -340,6 +348,16 @@ export interface EngineHarnessMount {
   readonly workspaceInstructions?: boolean
 }
 
+/** Which routed model the harness session runs on. */
+export interface EngineHarnessRoute {
+  /**
+   * Model id the session is routed to, under the scripted adapter's `mock`
+   * provider. The adapter's advertised window is set where the test builds it.
+   * Defaults to {@link MODEL}.
+   */
+  readonly model?: string
+}
+
 /**
  * Mount one engine over the standard test stack with a temp notes base.
  * @param id - session id for the created agent.
@@ -347,12 +365,14 @@ export interface EngineHarnessMount {
  * @param meta - session creation metadata; pass `cwd` to give the session a
  *   real working directory (relative handoff paths resolve against it).
  * @param mount - opt-in extra mounts; see {@link EngineHarnessMount}.
+ * @param route - the routed model the session runs on; see {@link EngineHarnessRoute}.
  */
 export async function engineHarness(
   id: string,
   config: Partial<RolloverConfig> = {},
   meta: Pick<SessionHeader, 'cwd'> = {},
   mount: EngineHarnessMount = {},
+  route: EngineHarnessRoute = {},
 ): Promise<EngineHarness> {
   const ctx = await mountTestContext()
   if (mount.workspaceInstructions === true) {
@@ -368,7 +388,7 @@ export async function engineHarness(
   // unless it names retainTokens, so the default must not reach it.
   const tailDefault = config.handoffOnly === true ? {} : { retainTokens: 40 }
   const engine = new ContextRolloverEngine(ctx, { notesDir: notesBase, ...tailDefault, ...config })
-  const agent = await ctx.agentLoop.create(SessionId(id), { provider: MODEL, model: MODEL }, meta)
+  const agent = await ctx.agentLoop.create(SessionId(id), { provider: MODEL, model: route.model ?? MODEL }, meta)
   return { ctx, engine, agent, session: agent.session, notesBase }
 }
 
