@@ -110,7 +110,9 @@ Responsibilities stay split (the Codex lesson):
    back by the old one. Above the rollover point (`thresholdRatio`, default
    0.90 of the window, or the model's `modelThresholds` entry), the reminder
    keeps the same five-minute cadence, and the engine logs one warning per
-   turn. The engine does not roll over by itself there.
+   turn. The engine does not roll over by itself there. When another backend
+   owns compaction for a session, this engine does not send the reminder and
+   does not log the pressure warnings for that session.
 3. **Overflow** (never a rollover): the engine does not roll over on a
    provider-confirmed `CONTEXT_WINDOW_EXCEEDED` and does not retry. The provider
    error reaches the user unchanged. The model usually cannot reach
@@ -359,7 +361,7 @@ Configuration (cordis.yml `config` on the plugin row):
       name: dsh-context-rollover
       config:
         thresholdRatio: 0.9          # warning point (fraction of window); never rolls over by itself
-        reminderThresholdRatio: 0.4  # one-time /handoff-doc reminder point
+        reminderThresholdRatio: 0.4  # /handoff-doc reminder point, repeated no sooner than 5 min apart
         handoffOnly: true            # the handoff document replaces the surface
         # retainTokens (recent verbatim tail) is read under handoffOnly too; without it no tail
         # is kept. retainRatio is read only when handoffOnly is false: with handoffOnly true the
@@ -374,7 +376,7 @@ Configuration (cordis.yml `config` on the plugin row):
         modelThresholds:             # optional absolute points per routed model
           'strata/qwen-strata':
             thresholdTokens: 200000        # rollover point (warning only; new_context rolls over)
-            reminderThresholdTokens: 157286 # one-time reminder point; must not exceed thresholdTokens
+            reminderThresholdTokens: 157286 # reminder point, repeated no sooner than 5 min apart; must not exceed thresholdTokens
 ```
 
 `modelThresholds` is keyed by the routed model id, the `model` field of the session's request context. A model with an entry uses its two token points. Every other model keeps `thresholdRatio` and `reminderThresholdRatio`, measured against its own window. A patch row replaces its whole config, so restate every other key when you add this one.

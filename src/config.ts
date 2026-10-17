@@ -55,7 +55,7 @@ export interface RolloverConfig {
    */
   thresholdRatio?: number
   /**
-   * One-time handoff-reminder point as a fraction of the context window, well
+   * Handoff-reminder point as a fraction of the context window, well
    * below {@link thresholdRatio} so the handoff is written while there is
    * still room for it. Defaults to `0.4`.
    */
@@ -131,7 +131,7 @@ export interface RolloverConfig {
 export interface ModelThresholds {
   /** Rollover point in tokens (warning only; new_context rolls over). */
   thresholdTokens: number
-  /** One-time reminder point in tokens; must not exceed {@link thresholdTokens}. */
+  /** Reminder point in tokens; must not exceed {@link thresholdTokens}. */
   reminderThresholdTokens: number
 }
 
