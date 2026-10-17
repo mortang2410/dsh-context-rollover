@@ -205,9 +205,24 @@ describe('notes replies carry the absolute path new_context accepts', () => {
     expect(accepted.value).toMatchObject({ accepted: true })
   })
 
+  it('an append reply names the absolute path of the note it appended to', async () => {
+    const { ctx, agent, session, notesBase } = await seededSession('notes-accept-append')
+    const expected = resolve(NotesStore.directoryFor(session.id, notesBase), handoffName)
+    await executeTool(ctx, agent, 'notes', { action: 'write', path: handoffName, text: handoffText }, 'rp-d1')
+
+    const append = await executeTool(
+      ctx,
+      agent,
+      'notes',
+      { action: 'append', path: handoffName, text: 'Next: run the tests.' },
+      'rp-d2',
+    )
+    expect(renderedText(append)).toContain(expected)
+  })
+
   it('the guidance tells the model to pass the absolute path its notes reply gave', () => {
     expect(CONTEXT_MANAGEMENT_GUIDANCE).toContain('absolute path')
-    expect(CONTEXT_MANAGEMENT_GUIDANCE).toContain('notes')
+    expect(CONTEXT_MANAGEMENT_GUIDANCE).toMatch(/notes[^.]*absolute path/)
   })
 
   it('the handoff_path description names the notes reply as the source of that absolute path', async () => {
