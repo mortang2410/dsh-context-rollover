@@ -410,6 +410,28 @@ describe('the reminder states the absolute numbers for the routed model', () => 
       + 'chat kept after the rollover, will be the continuation context.',
     )
   })
+
+  // Case 4: usage past both points. The window is 262,144 tokens, so the ratio
+  // points are 104,857 (40%) and 235,929 (90%). Used: 300,000 tokens, above the
+  // rollover point and above the window. Without the two clamps the text would
+  // read "Context is 114% full" and "leaving -64071 tokens".
+  it('clamps the percent at 100 and the tokens left at 0 once usage passes the window', async () => {
+    const text = await reminderOn('nag-over-window', { model: 'generic-262k', window: 262_144, used: 300_000 }, {
+      thresholdRatio: 0.9,
+      reminderThresholdRatio: 0.4,
+    })
+    expect(text).toBe(
+      'Context is 100% full. 300000 of 262144 tokens are used. '
+      + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
+      + 'The handoff point, where these reminders start, is 104857 tokens. '
+      + 'The rollover point is 235929 tokens, leaving 0 tokens before the rollover point. '
+      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+      + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
+      + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
+      + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
+      + 'chat kept after the rollover, will be the continuation context.',
+    )
+  })
 })
 
 describe('renderReminderMessage', () => {
