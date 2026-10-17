@@ -1,6 +1,6 @@
 # Spec: handoff-only context rollover
 
-Superseded in part: the once-per-window reminder rule described here was replaced by a reminder that repeats every five minutes while usage stays at or above the reminder point. The current record is row N of `~/.dsh/overseer/WORKSTREAMS.md`.
+Superseded in part: the once-per-window reminder rule described here was replaced by a reminder that repeats no sooner than five minutes after the previous reminder while usage stays at or above the reminder point. The current record is row N of `~/.dsh/overseer/WORKSTREAMS.md`.
 
 Fork under change: `dsh-context-handoff` (a clone of `athif23/dsh-context-rollover`, npm name
 `dsh-context-rollover`).
