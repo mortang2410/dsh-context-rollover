@@ -9,17 +9,20 @@
 import z from '@deepseek-ai/schemastery'
 
 /**
- * The shipped reminder text: the absolute numbers for the routed model, then
- * the model's instruction to write the durable handoff and cross the boundary.
- * It repeats no sooner than five minutes apart while usage stays at or above
- * the handoff point.
+ * The shipped cadence reminder text: the absolute numbers for the routed model,
+ * then the model's instruction to write the durable handoff and cross the
+ * boundary. It repeats no sooner than `reminderRepeatMs` apart while usage
+ * stays at or above the handoff point, and stops once usage reaches the
+ * rollover point, where {@link DEFAULT_ROLLOVER_REMINDER_MESSAGE} takes over.
  *
  * Placeholders, filled at send time from {@link ReminderValues}:
  * - `{percent}`: tokens used as a percent of the routed model's context window.
  * - `{used_tokens}`: tokens used by the latest measured request.
  * - `{window_tokens}`: the routed model's context window, in tokens.
  * - `{handoff_point_tokens}`: the handoff point, where reminders start.
- * - `{rollover_point_tokens}`: the rollover point, where the warning starts.
+ * - `{rollover_point_tokens}`: the rollover point, where the hard per-turn
+ *   reminder starts and the automatic rollover commits when
+ *   {@link RolloverConfig.automaticRollover} is on.
  * - `{tokens_to_rollover}`: tokens left before the rollover point, never below 0.
  *
  * Any other `{...}` text is not a placeholder and is delivered verbatim. A
@@ -30,11 +33,37 @@ export const DEFAULT_REMINDER_MESSAGE =
   + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
   + 'The handoff point, where these reminders start, is {handoff_point_tokens} tokens. '
   + 'The rollover point is {rollover_point_tokens} tokens, leaving {tokens_to_rollover} tokens before the rollover point. '
-  + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+  + 'Crossing the rollover point is not silent: the engine sends a hard reminder every turn from there, '
+  + 'and with `automaticRollover` on it rolls the context over by itself. '
   + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
   + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
   + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
   + 'chat kept after the rollover, will be the continuation context.'
+
+/**
+ * The shipped hard reminder text: the order delivered once per turn at or above
+ * the rollover point, whatever the cadence, until the model crosses the
+ * boundary itself.
+ *
+ * Placeholders are the {@link ReminderValues} names, filled at send time; this
+ * text uses `{percent}`, `{used_tokens}`, `{window_tokens}` and
+ * `{rollover_point_tokens}`. Any other `{...}` text is delivered verbatim.
+ */
+export const DEFAULT_ROLLOVER_REMINDER_MESSAGE =
+  'You are at or above the rollover point: {used_tokens} of {window_tokens} tokens are used, '
+  + '{percent}% of the window, and the rollover point is {rollover_point_tokens} tokens. '
+  + 'This is the final order and it repeats every turn until you comply: stop the current task now, '
+  + 'write the handoff document with `/handoff-doc` (the `handoff-doc` skill), make it fully sufficient '
+  + 'for a fresh context to continue the work, and call `new_context` with the path of that document as '
+  + '`handoff_path`. Start no other work before that call. If you do not roll over, the engine rolls over '
+  + 'for you when `automaticRollover` is on, keeping only the notes snapshot and a recent tail, so '
+  + 'anything you left out of the handoff is lost.'
+
+/**
+ * The shipped minimum gap between two cadence reminders in one window, in
+ * milliseconds: the default of the `reminderRepeatMs` configuration key.
+ */
+export const DEFAULT_REMINDER_REPEAT_MS = 5 * 60 * 1000
 
 /** Default base directory, relative to the session working directory, holding durable handoffs. */
 export const DEFAULT_HANDOFF_DIR = '.scratch/handoff'
@@ -122,12 +151,29 @@ export interface RolloverConfig {
    */
   reminderThresholdRatio?: number
   /**
-   * Text of the reminder, repeated no sooner than five minutes apart. Its
-   * placeholders are listed at {@link DEFAULT_REMINDER_MESSAGE} and are filled
-   * at send time; any other `{...}` text is left as written. Defaults to
+   * Text of the cadence reminder, repeated no sooner than
+   * {@link reminderRepeatMs} apart while usage stays below the rollover point.
+   * Its placeholders are listed at {@link DEFAULT_REMINDER_MESSAGE} and are
+   * filled at send time; any other `{...}` text is left as written. Defaults to
    * {@link DEFAULT_REMINDER_MESSAGE}.
    */
   reminderMessage?: string
+  /**
+   * Minimum wall-clock gap between two cadence reminders in one window, in
+   * milliseconds. Defaults to `300000` (five minutes), the shipped value in
+   * {@link DEFAULT_REMINDER_REPEAT_MS}. The hard
+   * {@link rolloverReminderMessage} does not read it: that reminder is claimed
+   * once per turn, not on a cadence.
+   */
+  reminderRepeatMs?: number
+  /**
+   * Text of the hard reminder, delivered to the model once per turn at or above
+   * the rollover point whatever the cadence says, until the model crosses the
+   * boundary. Its placeholders are the {@link ReminderValues} names and are
+   * filled at send time; any other `{...}` text is left as written. Defaults to
+   * {@link DEFAULT_ROLLOVER_REMINDER_MESSAGE}.
+   */
+  rolloverReminderMessage?: string
   /**
    * Recent verbatim tail retained across a rollover, as a fraction of the
    * context window. Defaults to `0.1`. Not read when `handoffOnly` is set.
@@ -204,6 +250,8 @@ export const Config: z<RolloverConfig> = z.object({
   automaticRolloverRetainTokens: z.number().step(1).min(1),
   reminderThresholdRatio: z.number(),
   reminderMessage: z.string(),
+  reminderRepeatMs: z.number().step(1).min(1),
+  rolloverReminderMessage: z.string(),
   retainRatio: z.number(),
   retainTokens: z.number().step(1).min(0),
   handoffOnly: z.boolean(),
@@ -229,6 +277,10 @@ export interface ResolvedRolloverConfig {
   readonly automaticRolloverRetainTokens: number
   readonly reminderThresholdRatio: number
   readonly reminderMessage: string
+  /** Minimum gap between two cadence reminders in one window, in milliseconds. */
+  readonly reminderRepeatMs: number
+  /** Hard per-turn reminder delivered at or above the rollover point. */
+  readonly rolloverReminderMessage: string
   readonly retainRatio: number
   /** `null` keeps the ratio-based tail budget. */
   readonly retainTokens: number | null
@@ -298,6 +350,12 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
   }
   const reminderMessage = config.reminderMessage ?? DEFAULT_REMINDER_MESSAGE
   validateNonEmptyString('reminderMessage', reminderMessage)
+  const reminderRepeatMs = config.reminderRepeatMs ?? DEFAULT_REMINDER_REPEAT_MS
+  if (!Number.isSafeInteger(reminderRepeatMs) || reminderRepeatMs <= 0) {
+    throw new TypeError(`context-rollover: reminderRepeatMs must be a positive integer, got ${String(reminderRepeatMs)}`)
+  }
+  const rolloverReminderMessage = config.rolloverReminderMessage ?? DEFAULT_ROLLOVER_REMINDER_MESSAGE
+  validateNonEmptyString('rolloverReminderMessage', rolloverReminderMessage)
   const handoffDir = config.handoffDir ?? DEFAULT_HANDOFF_DIR
   validateNonEmptyString('handoffDir', handoffDir)
   const handoffPattern = config.handoffPattern ?? DEFAULT_HANDOFF_PATTERN
@@ -338,6 +396,8 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
     automaticRolloverRetainTokens,
     reminderThresholdRatio,
     reminderMessage,
+    reminderRepeatMs,
+    rolloverReminderMessage,
     retainRatio,
     retainTokens,
     handoffOnly,

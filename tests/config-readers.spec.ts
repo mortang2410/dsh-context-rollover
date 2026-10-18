@@ -12,7 +12,8 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { resolveConfig } from '../src/config.ts'
+import { DEFAULT_REMINDER_REPEAT_MS, DEFAULT_ROLLOVER_REMINDER_MESSAGE, resolveConfig } from '../src/config.ts'
+import { ContextRolloverEngine } from '../src/index.ts'
 import { NotesStore } from '../src/notes.ts'
 import { selectionFor } from '../src/rollover.ts'
 import { engineHarness, seedExchanges } from './harness.ts'
@@ -147,5 +148,51 @@ describe('handoffMaxChars on a manual checkpoint', () => {
 
   it('caps the notes in a manual checkpoint at handoffMaxChars', async () => {
     expect(await checkpointCarriesTail(120, 'config-checkpoint-cap-small')).toBe(false)
+  })
+})
+
+describe('reminderRepeatMs and rolloverReminderMessage', () => {
+  it('defaults to the shipped five-minute gap and the shipped hard text', () => {
+    const config = resolveConfig({})
+    expect(config.reminderRepeatMs).toBe(DEFAULT_REMINDER_REPEAT_MS)
+    expect(config.reminderRepeatMs).toBe(300_000)
+    expect(config.rolloverReminderMessage).toBe(DEFAULT_ROLLOVER_REMINDER_MESSAGE)
+    // The hard text is the order the model reads, so it names the commands and
+    // the document path argument rather than paraphrasing them.
+    expect(config.rolloverReminderMessage).toContain('`/handoff-doc`')
+    expect(config.rolloverReminderMessage).toContain('`new_context`')
+    expect(config.rolloverReminderMessage).toContain('`handoff_path`')
+  })
+
+  it('takes a configured gap and a configured hard text', () => {
+    const config = resolveConfig({ reminderRepeatMs: 1_000, rolloverReminderMessage: 'Go now.' })
+    expect(config.reminderRepeatMs).toBe(1_000)
+    expect(config.rolloverReminderMessage).toBe('Go now.')
+  })
+
+  it('rejects a gap that is not a positive safe integer, and a blank hard text', () => {
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => resolveConfig({ reminderRepeatMs: bad }))
+        .toThrow(/reminderRepeatMs must be a positive integer/)
+    }
+    expect(() => resolveConfig({ rolloverReminderMessage: '' }))
+      .toThrow(/rolloverReminderMessage must be a non-empty string/)
+    expect(() => resolveConfig({ rolloverReminderMessage: '   \n' }))
+      .toThrow(/rolloverReminderMessage must be a non-empty string/)
+  })
+
+  it('declares both keys in the load-time schema, which validates them', () => {
+    // A key the schema does not declare is merged into the resolved config
+    // unvalidated (schemastery's object resolver), which is the load risk: an
+    // invalid value would reach the engine instead of failing the mount. So the
+    // proof that each key is declared is that the schema itself refuses a value
+    // only a declared key can refuse.
+    const schema = ContextRolloverEngine.Config
+    expect(() => schema({ reminderRepeatMs: 1.5 })).toThrow()
+    expect(() => schema({ reminderRepeatMs: 0 })).toThrow()
+    expect(() => schema({ rolloverReminderMessage: 42 as unknown as string })).toThrow()
+    // And both values survive a valid load unchanged.
+    expect(schema({ reminderRepeatMs: 1_000, rolloverReminderMessage: 'Go.' }))
+      .toMatchObject({ reminderRepeatMs: 1_000, rolloverReminderMessage: 'Go.' })
   })
 })

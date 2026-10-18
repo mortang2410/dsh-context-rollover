@@ -316,7 +316,7 @@ import * as AgentInstructions from '@deepseek-ai/dsh-agent-instructions'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ContextRolloverEngine } from '../src/index.ts'
-import { isPressureReminder } from '../src/rollover.ts'
+import { isPressureReminder, isRolloverReminder } from '../src/rollover.ts'
 import type { RolloverConfig } from '../src/config.ts'
 
 /** A notes base directory for one test. */
@@ -415,6 +415,21 @@ export function errorFinish(message: string, code: string): StreamChunk[] {
 export function reminderTexts(session: Session): string[] {
   return session.snapshotEvents()
     .filter(isPressureReminder)
+    .map(event => event.data.content[0])
+    .filter(block => block?.type === 'text')
+    .map(block => block?.type === 'text' ? block.text : '')
+}
+
+/**
+ * The plugin-attributed hard rollover-point reminder texts in the durable log.
+ *
+ * Same contract as {@link reminderTexts}, through the engine's own
+ * `isRolloverReminder` predicate: the hard reminder carries its own summary
+ * prefix so the cadence clock never counts it.
+ */
+export function rolloverReminderTexts(session: Session): string[] {
+  return session.snapshotEvents()
+    .filter(isRolloverReminder)
     .map(event => event.data.content[0])
     .filter(block => block?.type === 'text')
     .map(block => block?.type === 'text' ? block.text : '')

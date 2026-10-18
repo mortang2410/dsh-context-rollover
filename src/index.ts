@@ -25,17 +25,19 @@ import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { Seq } from './compat.ts'
 import { Config as RolloverConfigSchema, renderReminderMessage, resolveConfig, rolloverPointsFor } from './config.ts'
-import type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
+import type { ReminderValues, RolloverConfig, ResolvedRolloverConfig } from './config.ts'
 import type { RolloverReplacement } from './checkpoint.ts'
 import { contextManagementGuidance } from './guidance.ts'
 import { NotesStore } from './notes.ts'
 import { sessionEventAt } from './compat.ts'
 import {
   claimReminder,
+  claimRolloverReminder,
   commitRollover,
   countRollovers,
   PLUGIN_NAME,
   REMINDER_SUMMARY_PREFIX,
+  ROLLOVER_REMINDER_SUMMARY_PREFIX,
   selectRolloverRange,
   selectionFor,
 } from './rollover.ts'
@@ -139,11 +141,13 @@ export { CONTEXT_MANAGEMENT_GUIDANCE, contextManagementGuidance } from './guidan
  * checkpoint + token-budgeted recent verbatim tail.
  *
  * The model's own `new_context` request replaces the context with its handoff
- * document, and manual `/compact` composes the notes checkpoint. Crossing the
- * rollover point by pressure logs one warning per turn, and with
- * `automaticRollover` on it also commits the notes checkpoint plus a recent
- * tail at the next pre-step. A provider-rejected overflow ends the turn with the
- * provider's own error.
+ * document, and manual `/compact` composes the notes checkpoint. Pressure is
+ * announced to the model: a cadence reminder at or above the handoff point, and
+ * a hard reminder every turn at or above the rollover point. Crossing the
+ * rollover point also logs one journal warning per turn while
+ * `automaticRollover` is off, and with it on the engine commits the notes
+ * checkpoint plus a recent tail at the next pre-step instead. A
+ * provider-rejected overflow ends the turn with the provider's own error.
  */
 export class ContextRolloverEngine extends CompactionEngine {
   static inject = ['llm', 'tokenMeter', 'sessions', 'tools', 'systemPrompt']
@@ -217,6 +221,14 @@ export class ContextRolloverEngine extends CompactionEngine {
       { agent, turn, signal },
       next,
     ): Promise<PreStepDecision> => {
+      // Whether this very pre-step committed a rollover, either the model's own
+      // request or the engine's automatic safety net. A pre-step that crossed
+      // the boundary has a fresh context and needs no hard reminder for that
+      // step: the model just complied, or the engine already did the work the
+      // reminder asks for. The flag is per pre-step, not per turn: a later step
+      // of the same turn cannot commit again (one commit per turn) and does
+      // remind.
+      let crossedThisStep = false
       // A preset-owned session belongs to that preset's backend. Without this
       // guard, the host engine would also log its pressure warning and commit
       // any pending handoff rollover into that session.
@@ -234,14 +246,17 @@ export class ContextRolloverEngine extends CompactionEngine {
               handoff: pendingHandoff(pending),
               handoffPath: pending.handoffPath,
             }, signal)
-            if (result !== null) this.pendingRollovers.delete(agent.session.id)
+            if (result !== null) {
+              this.pendingRollovers.delete(agent.session.id)
+              crossedThisStep = true
+            }
           } else if (this.config.automaticRollover) {
             // No request is pending, so this is the engine's own safety net: at
             // or above the rollover point it crosses the boundary itself. A
             // deferral inside the attempt commits nothing and is retried at the
             // next pre-step, which is why it is not reported as a warning here:
             // the warning below belongs to the gate being off.
-            await this.performAutomaticRollover(agent, turn, signal)
+            crossedThisStep = await this.performAutomaticRollover(agent, turn, signal) !== null
           } else {
             this.warnAboveRolloverPoint(agent, turn)
           }
@@ -255,7 +270,7 @@ export class ContextRolloverEngine extends CompactionEngine {
       // The reminder names this engine's own tools, so a session whose
       // compaction another backend owns gets none from this row.
       if (this.compactionOwnedElsewhere(agent)) return decision
-      const reminder = this.pendingReminder(agent.session, Date.now())
+      const reminder = this.pendingReminder(agent.session, turn, Date.now(), crossedThisStep)
       if (reminder === undefined) return decision
       return { kind: 'enter', messages: [...decision.messages, reminder] }
     })
@@ -284,54 +299,102 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * The handoff reminder, when this step is at or above the reminder point and
-   * the five-minute cadence allows one (see claimReminder).
+   * The model-visible reminder for this pre-step, when usage and the claim
+   * gates allow one.
    *
-   * The text is the configured {@link RolloverConfig.reminderMessage} with its
-   * placeholders filled from the measured usage and the routed model's own
-   * points (see DEFAULT_REMINDER_MESSAGE for the list). The handoff point is what
-   * gates delivery: nothing about the text is hardcoded here.
+   * Two reminders, one decision:
+   * - at or above the rollover point, the hard
+   *   {@link RolloverConfig.rolloverReminderMessage} with the measured figures
+   *   filled in, claimed once per turn (see claimRolloverReminder), unless this
+   *   pre-step already committed a rollover (`crossedThisStep`);
+   * - below the rollover point and at or above the handoff point, the cadence
+   *   {@link RolloverConfig.reminderMessage}, claimed on the configured
+   *   `reminderRepeatMs` gap (see claimReminder).
+   *
+   * Both are delivered as the same kind of message: a `user/message` with the
+   * engine's notice source, appended to the `enter` decision the caller returns,
+   * which is what puts them in the next model request. The handoff and rollover
+   * points are what gate delivery; nothing about either text is hardcoded here.
    * @param session - session whose latest routed request is measured.
+   * @param turn - the turn of this pre-step, the hard reminder's claim key.
    * @param now - epoch milliseconds of this pre-step, read once by the caller.
+   * @param crossedThisStep - whether this pre-step committed a rollover.
    */
-  private pendingReminder(session: Session, now: number): UserMessage | undefined {
+  private pendingReminder(
+    session: Session,
+    turn: number,
+    now: number,
+    crossedThisStep: boolean,
+  ): UserMessage | undefined {
     const route = session.requestContext()
     if (route?.contextWindow === undefined) return undefined
     const contextWindow = route.contextWindow
     const measurement = this.ctx.tokenMeter.measure(session)
     if (measurement.baseline.kind === 'none') return undefined
     const { reminderTokens, rolloverTokens } = rolloverPointsFor(this.config, contextWindow, route.model)
-    if (measurement.totalTokens < reminderTokens) return undefined
+    const usedTokens = measurement.totalTokens
+    const percent = Math.min(100, Math.round((usedTokens / contextWindow) * 100))
+    const values = {
+      percent,
+      used_tokens: usedTokens,
+      window_tokens: contextWindow,
+      handoff_point_tokens: reminderTokens,
+      rollover_point_tokens: rolloverTokens,
+      tokens_to_rollover: Math.max(0, rolloverTokens - usedTokens),
+    }
+    if (usedTokens >= rolloverTokens && !crossedThisStep) {
+      // Claimed synchronously, like the cadence claim, so two engine rows that
+      // observe one pre-step deliver one copy between them.
+      if (!claimRolloverReminder(session, turn)) return undefined
+      return this.noticeMessage(
+        this.config.rolloverReminderMessage,
+        values,
+        `${ROLLOVER_REMINDER_SUMMARY_PREFIX} (${percent}% used)`,
+      )
+    }
+    if (usedTokens < reminderTokens) return undefined
     // Claimed synchronously: on a preset deployment the host row and the
     // preset row both observe this pre-step, and neither delivery is in the
     // log yet when the second one decides.
-    if (!claimReminder(session, now)) return undefined
-    const usedTokens = measurement.totalTokens
-    const percent = Math.min(100, Math.round((usedTokens / contextWindow) * 100))
+    if (!claimReminder(session, now, this.config.reminderRepeatMs)) return undefined
+    return this.noticeMessage(
+      this.config.reminderMessage,
+      values,
+      `${REMINDER_SUMMARY_PREFIX} (${percent}% used)`,
+    )
+  }
+
+  /**
+   * One reminder message: the template with its placeholders filled, carrying
+   * the engine's notice source so `isPressureReminder` and
+   * `isRolloverReminder` can find it in the durable log.
+   * @param template - the configured reminder text.
+   * @param values - the measured figures for this model, one per placeholder.
+   * @param summary - the one-line account, whose prefix names the reminder kind.
+   */
+  private noticeMessage(
+    template: string,
+    values: ReminderValues,
+    summary: string,
+  ): UserMessage {
     return createUserMessage({
-      content: [{
-        type: 'text',
-        text: renderReminderMessage(this.config.reminderMessage, {
-          percent,
-          used_tokens: usedTokens,
-          window_tokens: contextWindow,
-          handoff_point_tokens: reminderTokens,
-          rollover_point_tokens: rolloverTokens,
-          tokens_to_rollover: Math.max(0, rolloverTokens - usedTokens),
-        }),
-      }],
+      content: [{ type: 'text', text: renderReminderMessage(template, values) }],
       source: {
         kind: PLUGIN_NAME,
         form: 'notice',
-        summary: boundContextSummary(`${REMINDER_SUMMARY_PREFIX} (${percent}% used)`),
+        summary: boundContextSummary(summary),
       },
     })
   }
 
   /**
-   * Pressure evaluation with the automatic rollover off: a warning above the
-   * rollover point, once per turn. The reminder is paced separately (see
-   * pendingReminder).
+   * Pressure evaluation with the automatic rollover off: a journal warning
+   * above the rollover point, once per turn.
+   *
+   * The warning is an operator signal, not the model's: the model is told by
+   * the reminders (see pendingReminder), which the hard one repeats every turn
+   * above this point. The warning stays because the log is where an operator
+   * sees that a session crossed the point with the automatic rollover disabled.
    *
    * With no automatic rollover the model owns the handoff: only it knows which
    * document is its own, so above the rollover point the engine says so, once

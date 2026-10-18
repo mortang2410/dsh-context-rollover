@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { CompactionEngine } from '@deepseek-ai/dsh-compaction'
 import type { SessionSeq } from '@deepseek-ai/dsh-session'
-import { claimReminder, countRollovers, reminderDelivered } from '../src/rollover.ts'
+import { claimReminder, countRollovers, reminderDelivered, REMINDER_REPEAT_MS } from '../src/rollover.ts'
 import { ContextRolloverEngine } from '../src/index.ts'
 import { resolveConfig } from '../src/config.ts'
 import {
@@ -167,7 +167,7 @@ describe('preset ownership', () => {
     await followup(agent, 'turn one')
     await followup(agent, 'turn two')
     expect(reminderTexts(session)).toHaveLength(0)
-    expect(claimReminder(session, Date.now())).toBe(true)
+    expect(claimReminder(session, Date.now(), REMINDER_REPEAT_MS)).toBe(true)
   })
 
   it('reminds a preset-owned session through a proxy-wrapped owner at its entry point', async () => {

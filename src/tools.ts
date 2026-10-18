@@ -196,10 +196,12 @@ function getContextRemainingTool(deps: RolloverToolDependencies) {
           if (value.auto_rollover_tokens_left !== null) {
             // The sentence follows the resolved config: with the automatic
             // rollover on, the engine crosses at that point by itself, so
-            // "crossing it only warns" would be false.
+            // "crossing it only warns" would be false. With it off the hard
+            // reminder repeats the order every turn from that point, so the
+            // crossing is not a bare warning there either.
             const crossing = deps.config.automaticRollover
               ? 'crossing it makes the engine roll over at the next step; your new_context call rolls over sooner'
-              : 'crossing it only warns; your new_context call rolls over'
+              : 'crossing it repeats the rollover order every turn; your new_context call rolls over'
             lines.push(
               `Remaining before the rollover point: ~${value.auto_rollover_tokens_left} tokens `
               + `(${crossing}).`,

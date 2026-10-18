@@ -29,6 +29,7 @@ import { nodeHeuristicTokens, replaceSurfaceOp, sessionEventAt, sessionEvents } 
 import type { Seq } from './compat.ts'
 import { buildReplacementText, replacementWindowNumber } from './checkpoint.ts'
 import type { RolloverReplacement } from './checkpoint.ts'
+import { DEFAULT_REMINDER_REPEAT_MS } from './config.ts'
 import type { ResolvedRolloverConfig } from './config.ts'
 
 /**
@@ -819,6 +820,25 @@ export function isPressureReminder(event: SessionEvent): event is SessionEvent<'
 }
 
 /**
+ * The one definition of "this event is the hard rollover-point reminder".
+ *
+ * Same source kind and form as {@link isPressureReminder}, and its own summary
+ * prefix, so a hard reminder is never counted as a cadence reminder by the
+ * window clock. Every consumer — the delivery check in index.ts and the test
+ * harness — reads this predicate, so the definition cannot drift.
+ * @param event - one logged session event.
+ * @returns true when the event is this engine's hard rollover reminder,
+ *   narrowing the event to a `user/message` for the caller.
+ */
+export function isRolloverReminder(event: SessionEvent): event is SessionEvent<'user/message'> {
+  if (event.type !== 'user/message') return false
+  const { source } = event.data
+  if (source.kind !== PLUGIN_NAME) return false
+  return source.form === 'notice'
+    && source.summary.startsWith(ROLLOVER_REMINDER_SUMMARY_PREFIX)
+}
+
+/**
  * Whether a pressure reminder was already delivered in the session's current
  * window, according to the durable log.
  *
@@ -835,23 +855,37 @@ export function reminderDelivered(session: Session): boolean {
 }
 
 /**
- * The minimum wall-clock gap between two pressure reminders in one window.
+ * The shipped default of the `reminderRepeatMs` configuration key, in
+ * milliseconds, under the name this module used when the cadence was a fixed
+ * constant.
  *
- * Fixed on purpose: the cadence is part of what a reminder means, and a config
- * key would need a default in every profile. A reminder can only be delivered
- * inside a pre-step, so the gap is checked at each pre-step, not by a timer.
+ * `claimReminder` no longer reads it: the configured gap arrives as that
+ * function's `repeatMs` parameter, and `resolveConfig` fills the default from
+ * {@link DEFAULT_REMINDER_REPEAT_MS}, the one place the number lives.
  */
-export const REMINDER_REPEAT_MS = 5 * 60 * 1000
+export const REMINDER_REPEAT_MS = DEFAULT_REMINDER_REPEAT_MS
+
+/**
+ * Prefix of the hard rollover-point reminder's message summary.
+ *
+ * Deliberately not {@link REMINDER_SUMMARY_PREFIX}: the cadence gate reads the
+ * newest cadence reminder out of the durable log, and the hard reminder is a
+ * different claim (once per turn, see {@link claimRolloverReminder}). Two
+ * prefixes keep the cadence clock and the per-turn clock from resetting each
+ * other.
+ */
+export const ROLLOVER_REMINDER_SUMMARY_PREFIX = 'context rollover reminder'
 
 /**
  * Decide whether a pressure reminder may be delivered at this pre-step, and
  * claim the delivery when it may.
  *
  * The caller has already checked the usage boundary (measured usage at or above
- * the reminder point). This gate checks only the cadence. Let `last` be the
- * newest reminder of the current window, logged or claimed. Then:
+ * the reminder point and below the rollover point). This gate checks only the
+ * cadence. Let `last` be the newest cadence reminder of the current window,
+ * logged or claimed. Then:
  *   1. No reminder yet in the current window: deliver.
- *   2. The newest reminder is at least REMINDER_REPEAT_MS old: deliver.
+ *   2. The newest reminder is at least `repeatMs` old: deliver.
  *   3. A rollover started a new window: only that window's reminders count, so
  *      the first delivery in the new window is immediate.
  * Otherwise refuse. A `last` later than `now` (the clock moved backward) gives a
@@ -861,24 +895,94 @@ export const REMINDER_REPEAT_MS = 5 * 60 * 1000
  * waterfall see it before either delivery reaches the log.
  * @param session - session whose current window to check.
  * @param now - epoch milliseconds of this pre-step, read once by the caller.
+ * @param repeatMs - the configured minimum gap, the `reminderRepeatMs` key.
  * @returns true when this caller owns the reminder for this pre-step.
  */
-export function claimReminder(session: Session, now: number): boolean {
+export function claimReminder(session: Session, now: number, repeatMs: number): boolean {
   const windowNumber = countRollovers(session)
   const last = lastReminderAt(session, windowNumber)
-  if (last !== undefined && now - last < REMINDER_REPEAT_MS) return false
+  if (last !== undefined && now - last < repeatMs) return false
   storeClaim(session, { window: windowNumber, at: now })
   return true
 }
 
 /**
- * Drop the in-process claim for one session.
+ * Symbol key of the per-turn hard-reminder claim, shared through the session
+ * exactly like {@link CLAIM_KEY} and for the same reason: on a preset
+ * deployment two module instances observe one pre-step waterfall.
+ */
+const ROLLOVER_CLAIM_KEY = Symbol.for('dsh.context-rollover.rollover-reminder-claims')
+
+/** The newest in-memory hard-reminder claim on one session. */
+interface RolloverReminderClaim {
+  /** The turn the hard reminder was delivered in. */
+  readonly turn: number
+}
+
+/** Whether a value has the hard-reminder claim shape, whichever realm made it. */
+function isRolloverReminderClaim(value: unknown): value is RolloverReminderClaim {
+  if (typeof value !== 'object' || value === null) return false
+  return typeof (value as { turn?: unknown }).turn === 'number'
+}
+
+/** Claims for sessions that refuse the symbol property. */
+const fallbackRolloverClaims = new WeakMap<Session, RolloverReminderClaim>()
+
+/** The newest hard-reminder claim on one session, from the session itself or the fallback. */
+function rolloverClaimOn(session: Session): RolloverReminderClaim | undefined {
+  const carrier = session as unknown as Record<symbol, unknown>
+  const stored: unknown = carrier[ROLLOVER_CLAIM_KEY] ?? fallbackRolloverClaims.get(session)
+  return isRolloverReminderClaim(stored) ? stored : undefined
+}
+
+/** Replace the newest hard-reminder claim on one session. */
+function storeRolloverClaim(session: Session, claim: RolloverReminderClaim): void {
+  try {
+    Object.defineProperty(session, ROLLOVER_CLAIM_KEY, {
+      value: claim,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    })
+  } catch {
+    fallbackRolloverClaims.set(session, claim)
+  }
+}
+
+/**
+ * Decide whether the hard rollover-point reminder may be delivered at this
+ * pre-step, and claim the delivery when it may.
+ *
+ * Once per turn, whatever the wall clock says: the claim is keyed on the turn
+ * number, so every step of one turn after the first carries no second copy, and
+ * a fresh turn reminds again until the model crosses the boundary. It is stored
+ * synchronously on the session, so two engine rows deciding in one waterfall
+ * deliver one copy between them.
+ *
+ * The claim is process-local: a host restart mid-turn can deliver one extra
+ * copy. The durable log cannot decide this one, because a `user/message` event
+ * does not carry its turn.
+ * @param session - session whose current turn to check.
+ * @param turn - the turn of this pre-step.
+ * @returns true when this caller owns the hard reminder for this turn.
+ */
+export function claimRolloverReminder(session: Session, turn: number): boolean {
+  if (rolloverClaimOn(session)?.turn === turn) return false
+  storeRolloverClaim(session, { turn })
+  return true
+}
+
+/**
+ * Drop the in-process claims for one session: both the cadence claim and the
+ * hard per-turn claim.
  *
  * Only tests need this: they reuse session ids across cases in one process. A
- * host restart clears the claim by itself, and the log is not touched.
- * @param session - session whose claim to drop.
+ * host restart clears the claims by itself, and the log is not touched.
+ * @param session - session whose claims to drop.
  */
 export function resetReminderClaims(session: Session): void {
   delete (session as unknown as Record<symbol, unknown>)[CLAIM_KEY]
   fallbackClaims.delete(session)
+  delete (session as unknown as Record<symbol, unknown>)[ROLLOVER_CLAIM_KEY]
+  fallbackRolloverClaims.delete(session)
 }

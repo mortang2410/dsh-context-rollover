@@ -40,6 +40,7 @@ import {
   followup,
   newContextCall,
   reminderTexts,
+  rolloverReminderTexts,
   ScriptedAdapter,
   seedExchanges,
   textResponse,
@@ -84,13 +85,13 @@ describe('pressure reminder delivery', () => {
     // is the module's own, which is the point: a distinct module instance.
     const fresh = await import('../src/rollover.ts?fresh-module-instance') as typeof import('../src/rollover.ts')
     expect(fresh.claimReminder).not.toBe(claimReminder)
-    expect(fresh.claimReminder(session, Date.now())).toBe(false)
+    expect(fresh.claimReminder(session, Date.now(), REMINDER_REPEAT_MS)).toBe(false)
 
     // Clearing the in-process claims does not reopen the window: the log is
     // the durable authority, and it still carries the delivered reminder.
     resetReminderClaims(session)
-    expect(claimReminder(session, Date.now())).toBe(false)
-    expect(fresh.claimReminder(session, Date.now())).toBe(false)
+    expect(claimReminder(session, Date.now(), REMINDER_REPEAT_MS)).toBe(false)
+    expect(fresh.claimReminder(session, Date.now(), REMINDER_REPEAT_MS)).toBe(false)
   })
 
   it('holds the five-minute cadence inside one window, not once per session', async () => {
@@ -114,7 +115,7 @@ describe('pressure reminder delivery', () => {
 
     // Same window, inside the cadence: a claim just short of five minutes is refused.
     const key = reminderWindowKey(session)
-    expect(claimReminder(session, T0 + REMINDER_REPEAT_MS - 1)).toBe(false)
+    expect(claimReminder(session, T0 + REMINDER_REPEAT_MS - 1, REMINDER_REPEAT_MS)).toBe(false)
     vi.setSystemTime(T0 + 60_000)
     await followup(agent, 'turn three')
     expect(reminderTexts(session)).toHaveLength(1)
@@ -365,7 +366,8 @@ describe('the reminder states the absolute numbers for the routed model', () => 
       + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
       + 'The handoff point, where these reminders start, is 400000 tokens. '
       + 'The rollover point is 900000 tokens, leaving 500000 tokens before the rollover point. '
-      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+      + 'Crossing the rollover point is not silent: the engine sends a hard reminder every turn from there, '
+      + 'and with `automaticRollover` on it rolls the context over by itself. '
       + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
       + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
       + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
@@ -384,7 +386,8 @@ describe('the reminder states the absolute numbers for the routed model', () => 
       + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
       + 'The handoff point, where these reminders start, is 200000 tokens. '
       + 'The rollover point is 250000 tokens, leaving 50000 tokens before the rollover point. '
-      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+      + 'Crossing the rollover point is not silent: the engine sends a hard reminder every turn from there, '
+      + 'and with `automaticRollover` on it rolls the context over by itself. '
       + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
       + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
       + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
@@ -403,7 +406,8 @@ describe('the reminder states the absolute numbers for the routed model', () => 
       + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
       + 'The handoff point, where these reminders start, is 200000 tokens. '
       + 'The rollover point is 250000 tokens, leaving 50000 tokens before the rollover point. '
-      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+      + 'Crossing the rollover point is not silent: the engine sends a hard reminder every turn from there, '
+      + 'and with `automaticRollover` on it rolls the context over by itself. '
       + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
       + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
       + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
@@ -411,26 +415,32 @@ describe('the reminder states the absolute numbers for the routed model', () => 
     )
   })
 
-  // Case 4: usage past both points. The window is 262,144 tokens, so the ratio
-  // points are 104,857 (40%) and 235,929 (90%). Used: 300,000 tokens, above the
-  // rollover point and above the window. Without the two clamps the text would
-  // read "Context is 114% full" and "leaving -64071 tokens".
-  it('clamps the percent at 100 and the tokens left at 0 once usage passes the window', async () => {
-    const text = await reminderOn('nag-over-window', { model: 'generic-262k', window: 262_144, used: 300_000 }, {
+  // Case 4: usage past the rollover point and past the window. The window is
+  // 262,144 tokens, so the ratio points are 104,857 (40%) and 235,929 (90%).
+  // Used: 300,000 tokens. At or above the rollover point the hard reminder is
+  // the text the model reads, so the percent clamp applies to it: without the
+  // clamp it would read 114%. The cadence text's own tokens-left clamp is
+  // pinned where it is still reachable, in tests/rollover-reminder.spec.ts.
+  it('clamps the hard reminder percent at 100 once usage passes the window', async () => {
+    const { ctx, agent, session } = await engineHarness(sessionId('nag-over-window'), {
       thresholdRatio: 0.9,
       reminderThresholdRatio: 0.4,
     })
-    expect(text).toBe(
-      'Context is 100% full. 300000 of 262144 tokens are used. '
-      + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
-      + 'The handoff point, where these reminders start, is 104857 tokens. '
-      + 'The rollover point is 235929 tokens, leaving 0 tokens before the rollover point. '
-      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
-      + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
-      + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
-      + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '
-      + 'chat kept after the rollover, will be the continuation context.',
-    )
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+      usageResponse('answer 1', 300_000 - REPORTED_OUTPUT_TOKENS),
+      usageResponse('answer 2', 300_000 - REPORTED_OUTPUT_TOKENS),
+    ], 262_144))
+    await followup(agent, 'turn one')
+    await followup(agent, 'turn two')
+
+    const hard = rolloverReminderTexts(session)
+    expect(hard).toHaveLength(1)
+    const text = hard[0] ?? ''
+    expect(text).toContain('300000 of 262144 tokens are used, 100% of the window')
+    expect(text).toContain('the rollover point is 235929 tokens')
+    expect(text).not.toContain('114%')
+    // Above the rollover point the cadence reminder is replaced, not repeated.
+    expect(reminderTexts(session)).toEqual([])
   })
 })
 
@@ -460,7 +470,8 @@ describe('reminder configuration defaults and validation', () => {
       + 'The percent is measured against the whole window of this model, so a low percent on a large window is expected. '
       + 'The handoff point, where these reminders start, is {handoff_point_tokens} tokens. '
       + 'The rollover point is {rollover_point_tokens} tokens, leaving {tokens_to_rollover} tokens before the rollover point. '
-      + 'Nothing rolls over by itself: reaching the rollover point only logs a warning. '
+      + 'Crossing the rollover point is not silent: the engine sends a hard reminder every turn from there, '
+      + 'and with `automaticRollover` on it rolls the context over by itself. '
       + 'Run `/handoff-doc` (the `handoff-doc` skill) to create/update the durable handoff document. '
       + 'Make it fully sufficient for a fresh context to continue the work. After it succeeds, call '
       + '`new_context` with the path of that document as `handoff_path`. The handoff document, plus any recent '

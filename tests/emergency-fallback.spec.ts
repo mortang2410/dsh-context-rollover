@@ -4,9 +4,10 @@
  *
  * The contract held down here:
  *
- * - crossing the rollover point by pressure only logs one warning per turn and
- *   commits nothing, even when a newer HANDOFF-*.md from another session sits in
- *   the shared handoff directory;
+ * - crossing the rollover point by pressure logs one warning per turn, tells
+ *   the model with the hard reminder every turn, and commits nothing, even when
+ *   a newer HANDOFF-*.md from another session sits in the shared handoff
+ *   directory;
  * - the model's own `new_context` call lands exactly the document it names, never
  *   the newest file in the directory (the regression this file guards);
  * - a provider-confirmed context overflow never rolls over, so it commits no
@@ -38,6 +39,7 @@ import {
   followup,
   newContextCall,
   reminderTexts,
+  rolloverReminderTexts,
   ScriptedAdapter,
   seedExchanges,
   textResponse,
@@ -161,7 +163,7 @@ const FOREIGN_MPD = 'MPD-FOREIGN-SENTINEL'
 const FOREIGN_OVERFLOW = 'FOREIGN-OVERFLOW-SENTINEL'
 const FOREIGN_MANUAL = 'FOREIGN-MANUAL-SENTINEL'
 
-describe('crossing the rollover point by pressure only warns', () => {
+describe('crossing the rollover point by pressure warns and reminds, and commits nothing', () => {
   it('commits no rollover above the point, even with a newer foreign handoff in the directory', async () => {
     const cwd = await scratch('dsh-rollover-pressure-')
     const dir = await handoffDirIn(cwd)
@@ -190,12 +192,14 @@ describe('crossing the rollover point by pressure only warns', () => {
     await followup(agent, 'turn two')
     expect(warnings.filter(isPressureWarning)).toHaveLength(2)
 
-    // Positive control: pressure was measured, and the reminder point delivered
-    // one reminder. A window may carry more than one, each at least five minutes
-    // after the previous one (REMINDER_REPEAT_MS, src/rollover.ts:844). The
-    // harness has no clock control, so turn two's reminder is held back only
-    // because turn two runs less than five minutes after turn one.
-    expect(reminderTexts(session)).toHaveLength(1)
+    // Positive control: pressure was measured, and the model was told. The
+    // reminder point is level with the rollover point here, so usage is at or
+    // above the rollover point and the HARD reminder is what the model reads,
+    // once per turn: turn one's second step and turn two's first step each
+    // carry one. The cadence reminder is replaced above the point, not
+    // delivered alongside.
+    expect(rolloverReminderTexts(session)).toHaveLength(2)
+    expect(reminderTexts(session)).toEqual([])
     expect(countRollovers(session)).toBe(0)
     expect(session.surface.replaceGeneration).toBe(generation)
     expect(visibleTexts(session)).not.toContain(FOREIGN_PRESSURE)

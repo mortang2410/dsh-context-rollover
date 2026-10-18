@@ -1,10 +1,12 @@
 /**
  * Pressure-reminder repeat cadence.
  *
- * Within one window a reminder is delivered at most once per REMINDER_REPEAT_MS
- * of wall-clock time, and only while measured usage is at or above the reminder
- * point. Every case drives the real `agent/pre-step` path: each `followup` is
- * one pre-step.
+ * Within one window a cadence reminder is delivered at most once per the
+ * configured `reminderRepeatMs` of wall-clock time, and only while measured
+ * usage is at or above the reminder point and below the rollover point. Every
+ * case drives the real `agent/pre-step` path: each `followup` is one pre-step.
+ * At or above the rollover point the hard per-turn reminder replaces the
+ * cadence one; that branch is pinned in tests/rollover-reminder.spec.ts.
  *
  * Time is controlled with `vi.useFakeTimers({ toFake: ['Date'] })` and
  * `vi.setSystemTime`. Only `Date` is faked. The engine reads `Date.now()` once
@@ -22,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
+import { DEFAULT_REMINDER_REPEAT_MS, resolveConfig } from '../src/config.ts'
 import type { RolloverConfig } from '../src/config.ts'
 import { CONTEXT_MANAGEMENT_GUIDANCE } from '../src/guidance.ts'
 import { ContextRolloverEngine } from '../src/index.ts'
@@ -37,6 +40,7 @@ import {
   followup,
   newContextCall,
   reminderTexts,
+  rolloverReminderTexts,
   ScriptedAdapter,
   seedExchanges,
   textResponse,
@@ -173,17 +177,17 @@ describe('pressure reminder repeat cadence', () => {
     const other = await import('../src/rollover.ts?repeat-second-instance') as typeof import('../src/rollover.ts')
     expect(other.claimReminder).not.toBe(claimReminder)
     // Row A decides first at T0; neither delivery is in the log yet.
-    expect(claimReminder(session, T0)).toBe(true)
+    expect(claimReminder(session, T0, REMINDER_REPEAT_MS)).toBe(true)
     expect(reminderTimes(session)).toEqual([])
     // Row B decides at the same instant in the same waterfall: the shared claim refuses it.
-    expect(other.claimReminder(session, T0)).toBe(false)
+    expect(other.claimReminder(session, T0, REMINDER_REPEAT_MS)).toBe(false)
 
     // Through the real pre-step: the second row's check after the delivery is logged also refuses.
     const engine = await pressureSession('two-rows-engine', [45_000])
     await turnAt(engine.agent, T0, 'turn one')
     await turnAt(engine.agent, T0, 'turn two')
     expect(reminderTimes(engine.session)).toEqual([T0])
-    expect(other.claimReminder(engine.session, T0)).toBe(false)
+    expect(other.claimReminder(engine.session, T0, REMINDER_REPEAT_MS)).toBe(false)
   })
 
   it('(e2) two engine rows on one session reach agent/pre-step together and deliver exactly one reminder', async () => {
@@ -246,17 +250,20 @@ describe('pressure reminder repeat cadence', () => {
     expect(reminderTimes(session)).toEqual([T0, T0 + REMINDER_REPEAT_MS])
   })
 
-  it('(g) above the rollover point, the same five-minute cadence applies', async () => {
+  it('(g) above the rollover point the hard per-turn reminder replaces the cadence one', async () => {
     // A 50k rollover point sits below the 60k reading, so usage is above it throughout.
     const { agent, session } = await pressureSession('above-rollover', [60_000], { thresholdRatio: 0.5 })
     await turnAt(agent, T0, 'turn one')
     await turnAt(agent, T0, 'turn two')
-    expect(reminderTimes(session)).toEqual([T0])
-    await turnAt(agent, T0 + 299_000, 'turn three')
-    expect(reminderTimes(session)).toEqual([T0])
-    await turnAt(agent, T0 + REMINDER_REPEAT_MS, 'turn four')
-    expect(reminderTimes(session)).toEqual([T0, T0 + REMINDER_REPEAT_MS])
-    // Nothing rolled over automatically: the engine only warns above the point.
+    await turnAt(agent, T0 + 1_000, 'turn three')
+    await turnAt(agent, T0 + 2_000, 'turn four')
+    // One hard reminder per measured turn, inside the default five-minute gap:
+    // the hard reminder is claimed per turn, not on the cadence clock.
+    expect(rolloverReminderTexts(session)).toHaveLength(3)
+    // The cadence reminder is replaced above the point, not delivered alongside.
+    expect(reminderTimes(session)).toEqual([])
+    // Nothing rolled over automatically: the gate is off, so the engine warns
+    // and the model is told every turn, but the model still owns the rollover.
     expect(countRollovers(session)).toBe(0)
   })
 
@@ -315,7 +322,7 @@ describe('pressure reminder repeat cadence', () => {
     // The clock moves a minute backward: now minus last is negative, so the gate refuses.
     await turnAt(agent, T0 - MINUTE, 'turn three')
     expect(reminderTimes(session)).toEqual([T0])
-    expect(claimReminder(session, T0 - 1)).toBe(false)
+    expect(claimReminder(session, T0 - 1, REMINDER_REPEAT_MS)).toBe(false)
     // Still refused one millisecond before five minutes from the logged reminder.
     await turnAt(agent, T0 + REMINDER_REPEAT_MS - 1, 'turn four')
     expect(reminderTimes(session)).toEqual([T0])
@@ -344,7 +351,38 @@ describe('pressure reminder repeat cadence', () => {
     expect(reminderTexts(session)).toHaveLength(1)
     resetReminderClaims(session)
     expect(reminderTexts(session)).toHaveLength(1)
-    expect(claimReminder(session, T0 + 1)).toBe(false)
+    expect(claimReminder(session, T0 + 1, REMINDER_REPEAT_MS)).toBe(false)
+  })
+
+  it('(k) reminderRepeatMs shortens the cadence, and the shipped default stays 300000', async () => {
+    // The default the plan fixed, read from the resolver rather than restated.
+    expect(resolveConfig({}).reminderRepeatMs).toBe(300_000)
+    expect(DEFAULT_REMINDER_REPEAT_MS).toBe(300_000)
+    // The old module constant is now that default under its old name.
+    expect(REMINDER_REPEAT_MS).toBe(DEFAULT_REMINDER_REPEAT_MS)
+
+    // Same usage and same turn times as case (c), with a one-minute configured
+    // gap: the second reminder lands at T0 + 60s instead of T0 + 5min.
+    const { agent, session } = await pressureSession('short-cadence', [45_000], { reminderRepeatMs: 60_000 })
+    await turnAt(agent, T0, 'turn one')
+    await turnAt(agent, T0, 'turn two')
+    expect(reminderTimes(session)).toEqual([T0])
+    await turnAt(agent, T0 + 59_999, 'turn three')
+    expect(reminderTimes(session)).toEqual([T0])
+    await turnAt(agent, T0 + 60_000, 'turn four')
+    expect(reminderTimes(session)).toEqual([T0, T0 + 60_000])
+    // The claim layer takes the same gap as a parameter.
+    expect(claimReminder(session, T0 + 60_001, 60_000)).toBe(false)
+
+    // The contrast arm: the identical turn times under the shipped default
+    // deliver nothing after the first, so the short cadence above is the
+    // configured value and not a change in the default.
+    const shipped = await pressureSession('short-cadence-default', [45_000])
+    await turnAt(shipped.agent, T0, 'turn one')
+    await turnAt(shipped.agent, T0, 'turn two')
+    expect(reminderTimes(shipped.session)).toEqual([T0])
+    await turnAt(shipped.agent, T0 + 60_000, 'turn three')
+    expect(reminderTimes(shipped.session)).toEqual([T0])
   })
 })
 
