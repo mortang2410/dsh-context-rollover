@@ -194,9 +194,15 @@ function getContextRemainingTool(deps: RolloverToolDependencies) {
             lines.push(`Context window: ~${value.context_window} tokens (${percent}% used).`)
           }
           if (value.auto_rollover_tokens_left !== null) {
+            // The sentence follows the resolved config: with the automatic
+            // rollover on, the engine crosses at that point by itself, so
+            // "crossing it only warns" would be false.
+            const crossing = deps.config.automaticRollover
+              ? 'crossing it makes the engine roll over at the next step; your new_context call rolls over sooner'
+              : 'crossing it only warns; your new_context call rolls over'
             lines.push(
               `Remaining before the rollover point: ~${value.auto_rollover_tokens_left} tokens `
-              + '(crossing it only warns; your new_context call rolls over).',
+              + `(${crossing}).`,
             )
           }
         }

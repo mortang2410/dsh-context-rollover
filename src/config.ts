@@ -86,12 +86,35 @@ export interface RolloverConfig {
    * Rollover point as a fraction of the routed model's context window.
    * Defaults to `0.9`.
    *
-   * Crossing it does not roll the context over. It logs one warning per turn,
-   * because only the model can write the handoff a rollover needs. The only
-   * rollovers are the model's own `new_context` call and manual `/compact`. A
-   * provider-rejected overflow does not roll over either.
+   * What crossing it does depends on {@link automaticRollover}. With that off
+   * (the default) it logs one warning per turn and commits nothing, because
+   * only the model can write the handoff a rollover needs; the only rollovers
+   * are then the model's own `new_context` call and manual `/compact`. With it
+   * on, the engine also rolls over by itself at the next pre-step. A
+   * provider-rejected overflow does not roll over either way.
    */
   thresholdRatio?: number
+  /**
+   * Roll the context over by itself at the rollover point, whether or not the
+   * model complied. Defaults to `false`, and off means nothing changes.
+   *
+   * With it on, the `agent/pre-step` listener commits the deterministic notes
+   * checkpoint plus a recent verbatim tail once measured usage is at or above
+   * the rollover point, with no model in the loop, no summarizer call, and no
+   * handoff file read. It is a safety net, not a substitute for the model's own
+   * handoff: the checkpoint carries the model's handoff document when the model
+   * wrote one into the notes tool, and the notes snapshot when it did not.
+   */
+  automaticRollover?: boolean
+  /**
+   * Recent verbatim tail, in tokens, that the automatic rollover always keeps,
+   * whatever {@link retainTokens} or {@link handoffOnly} says. Defaults to
+   * `10000`. Read only by the automatic path, as that path's own tail floor, so
+   * a row that keeps no tail (`retainTokens: 0`) cannot leave the automatic
+   * rollover with no carry-over at all. The manual and model-requested paths
+   * never read it.
+   */
+  automaticRolloverRetainTokens?: number
   /**
    * Handoff-reminder point as a fraction of the context window, well
    * below {@link thresholdRatio} so the handoff is written while there is
@@ -168,7 +191,7 @@ export interface RolloverConfig {
 
 /** Absolute token points for one routed model, replacing its ratio-based points. */
 export interface ModelThresholds {
-  /** Rollover point in tokens (warning only; new_context rolls over). */
+  /** Rollover point in tokens; the engine rolls over here only with `automaticRollover` on. */
   thresholdTokens: number
   /** Reminder point in tokens; must not exceed {@link thresholdTokens}. */
   reminderThresholdTokens: number
@@ -177,6 +200,8 @@ export interface ModelThresholds {
 /** Schemastery validation for {@link RolloverConfig}. */
 export const Config: z<RolloverConfig> = z.object({
   thresholdRatio: z.number(),
+  automaticRollover: z.boolean(),
+  automaticRolloverRetainTokens: z.number().step(1).min(1),
   reminderThresholdRatio: z.number(),
   reminderMessage: z.string(),
   retainRatio: z.number(),
@@ -198,6 +223,10 @@ export const Config: z<RolloverConfig> = z.object({
 /** Resolved and validated rollover configuration. */
 export interface ResolvedRolloverConfig {
   readonly thresholdRatio: number
+  /** Roll the context over by itself at the rollover point; off changes nothing. */
+  readonly automaticRollover: boolean
+  /** Tail floor, in tokens, the automatic rollover keeps whatever `retainTokens` says. */
+  readonly automaticRolloverRetainTokens: number
   readonly reminderThresholdRatio: number
   readonly reminderMessage: string
   readonly retainRatio: number
@@ -256,6 +285,17 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
       + `thresholdRatio (${thresholdRatio})`,
     )
   }
+  const automaticRollover = config.automaticRollover ?? false
+  if (typeof automaticRollover !== 'boolean') {
+    throw new TypeError(`context-rollover: automaticRollover must be a boolean, got ${String(automaticRollover)}`)
+  }
+  const automaticRolloverRetainTokens = config.automaticRolloverRetainTokens ?? 10000
+  if (!Number.isSafeInteger(automaticRolloverRetainTokens) || automaticRolloverRetainTokens <= 0) {
+    throw new TypeError(
+      'context-rollover: automaticRolloverRetainTokens must be a positive integer, '
+      + `got ${String(automaticRolloverRetainTokens)}`,
+    )
+  }
   const reminderMessage = config.reminderMessage ?? DEFAULT_REMINDER_MESSAGE
   validateNonEmptyString('reminderMessage', reminderMessage)
   const handoffDir = config.handoffDir ?? DEFAULT_HANDOFF_DIR
@@ -294,6 +334,8 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
   }
   return {
     thresholdRatio,
+    automaticRollover,
+    automaticRolloverRetainTokens,
     reminderThresholdRatio,
     reminderMessage,
     retainRatio,

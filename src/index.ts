@@ -27,7 +27,7 @@ import type { Seq } from './compat.ts'
 import { Config as RolloverConfigSchema, renderReminderMessage, resolveConfig, rolloverPointsFor } from './config.ts'
 import type { RolloverConfig, ResolvedRolloverConfig } from './config.ts'
 import type { RolloverReplacement } from './checkpoint.ts'
-import { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
+import { contextManagementGuidance } from './guidance.ts'
 import { NotesStore } from './notes.ts'
 import { sessionEventAt } from './compat.ts'
 import {
@@ -40,7 +40,7 @@ import {
   selectionFor,
 } from './rollover.ts'
 import type { RolloverSelection } from './rollover.ts'
-import { replacementWindowNumber } from './checkpoint.ts'
+import { checkpointCarriesNothing, replacementWindowNumber } from './checkpoint.ts'
 import { createRolloverTools } from './tools.ts'
 import type { PendingRollover } from './state.ts'
 
@@ -105,7 +105,7 @@ export {
   renderReminderMessage,
   resolveConfig,
 } from './config.ts'
-export { buildCheckpointText, buildReplacementText, replacementWindowNumber } from './checkpoint.ts'
+export { buildCheckpointText, buildReplacementText, checkpointCarriesNothing, replacementWindowNumber } from './checkpoint.ts'
 export type { CheckpointInput, RolloverReason, RolloverReplacement } from './checkpoint.ts'
 export {
   HandoffError,
@@ -132,15 +132,17 @@ export {
 } from './rollover.ts'
 export type { RolloverRange, RolloverSelection, RolloverSizing } from './rollover.ts'
 export { createRolloverTools } from './tools.ts'
-export { CONTEXT_MANAGEMENT_GUIDANCE } from './guidance.ts'
+export { CONTEXT_MANAGEMENT_GUIDANCE, contextManagementGuidance } from './guidance.ts'
 
 /**
  * Summarization-free compaction backend: durable notes + handoff/recovery
- * checkpoint + token-budgeted recent verbatim tail. The only rollovers are the
- * model's own `new_context` request, which replaces context with its handoff
- * document, and manual `/compact`, which composes the notes checkpoint. The
- * engine never rolls over by itself: crossing the rollover point by pressure
- * only warns, and a provider-rejected overflow ends the turn with the
+ * checkpoint + token-budgeted recent verbatim tail.
+ *
+ * The model's own `new_context` request replaces the context with its handoff
+ * document, and manual `/compact` composes the notes checkpoint. Crossing the
+ * rollover point by pressure logs one warning per turn, and with
+ * `automaticRollover` on it also commits the notes checkpoint plus a recent
+ * tail at the next pre-step. A provider-rejected overflow ends the turn with the
  * provider's own error.
  */
 export class ContextRolloverEngine extends CompactionEngine {
@@ -155,6 +157,8 @@ export class ContextRolloverEngine extends CompactionEngine {
   private readonly pendingRollovers = new Map<string, PendingRollover>()
   /** Turns that already logged the above-rollover-point warning. */
   private readonly pressureWarnedTurns = new Set<string>()
+  /** Turns that already committed one automatic rollover. */
+  private readonly automaticRolledTurns = new Set<string>()
 
   constructor(ctx: Context, config: RolloverConfig = {}) {
     super(ctx)
@@ -192,7 +196,9 @@ export class ContextRolloverEngine extends CompactionEngine {
     this.ctx.systemPrompt.section({
       name: 'context:rollover',
       order: 2350,
-      text: CONTEXT_MANAGEMENT_GUIDANCE,
+      // Composed from the resolved config: the section ships with every request,
+      // so it must not promise an automatic rollover this row does not perform.
+      text: contextManagementGuidance({ automaticRollover: this.config.automaticRollover }),
     })
   }
 
@@ -229,6 +235,13 @@ export class ContextRolloverEngine extends CompactionEngine {
               handoffPath: pending.handoffPath,
             }, signal)
             if (result !== null) this.pendingRollovers.delete(agent.session.id)
+          } else if (this.config.automaticRollover) {
+            // No request is pending, so this is the engine's own safety net: at
+            // or above the rollover point it crosses the boundary itself. A
+            // deferral inside the attempt commits nothing and is retried at the
+            // next pre-step, which is why it is not reported as a warning here:
+            // the warning below belongs to the gate being off.
+            await this.performAutomaticRollover(agent, turn, signal)
           } else {
             this.warnAboveRolloverPoint(agent, turn)
           }
@@ -316,15 +329,16 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * Pressure evaluation: a warning above the rollover point, once per turn. The
-   * reminder is paced separately (see pendingReminder). The engine never rolls
-   * over on pressure by itself.
+   * Pressure evaluation with the automatic rollover off: a warning above the
+   * rollover point, once per turn. The reminder is paced separately (see
+   * pendingReminder).
    *
-   * An automatic rollover has no model to name its handoff, so it could only
-   * take the newest handoff file in a shared directory, which may belong to a
-   * different session. The model is the only party that knows which handoff is
-   * its own, so above the rollover point the engine says so, once per turn, and
-   * waits for the model's own `new_context` call.
+   * With no automatic rollover the model owns the handoff: only it knows which
+   * document is its own, so above the rollover point the engine says so, once
+   * per turn, and waits for the model's own `new_context` call. The warning is
+   * reached only when {@link RolloverConfig.automaticRollover} is off, which is
+   * what keeps its wording true. The automatic path commits the notes
+   * checkpoint instead, and neither path reads a handoff file.
    * @param agent - agent whose latest routed request is measured.
    * @param turn - the turn the measurement belongs to, for the once-per-turn warning.
    */
@@ -342,6 +356,103 @@ export class ContextRolloverEngine extends CompactionEngine {
       'context rollover: usage is above the rollover point, and automatic rollover is disabled; '
       + 'the model must write its handoff document and call new_context',
     )
+  }
+
+  /**
+   * The automatic pressure rollover: the engine's own safety net at the
+   * rollover point, with no model in the loop.
+   *
+   * It commits the deterministic notes checkpoint plus a recent verbatim tail,
+   * floors that tail with {@link RolloverConfig.automaticRolloverRetainTokens}
+   * so a row that keeps no tail still carries conversation into the new window,
+   * and never reads a handoff file. It defers, committing nothing, when the
+   * surface has no selectable span and when the checkpoint would carry neither
+   * notes nor a tail; a deferral is retried at the next pre-step and does not
+   * consume the turn's one commit.
+   * @param agent - agent whose latest routed request is measured.
+   * @param turn - the turn the measurement belongs to, for the once-per-turn rule.
+   * @param signal - live turn cancellation signal.
+   * @returns the compaction result, or `null` when this pre-step committed nothing.
+   */
+  private async performAutomaticRollover(
+    agent: Agent,
+    turn: number,
+    signal: AbortSignal,
+  ): Promise<CompactionResult | null> {
+    const session = agent.session
+    const route = session.requestContext()
+    if (route?.contextWindow === undefined) return null
+    const measurement = this.ctx.tokenMeter.measure(session)
+    if (measurement.baseline.kind === 'none') return null
+    const { rolloverTokens } = rolloverPointsFor(this.config, route.contextWindow, route.model)
+    if (measurement.totalTokens < rolloverTokens) return null
+    const key = turnKey(session.id, turn)
+    if (this.automaticRolledTurns.has(key)) return null
+    signal.throwIfAborted()
+    const range = selectRolloverRange(session, measurement, this.automaticSelection(session))
+    if (range === null) {
+      this.ctx.logger.info(
+        'context rollover deferred: no compactable surface span for the automatic rollover yet; '
+        + 'retrying at the next pre-step',
+      )
+      return null
+    }
+    // An empty checkpoint is worse than a deferral, but empty notes alone are
+    // fine: the retained tail carries the continuation, and a session that
+    // complied already wrote its handoff into the notes snapshot.
+    const lastNode = session.surface.nodes[session.surface.nodes.length - 1]
+    const keepsTail = lastNode !== undefined && range.end !== lastNode
+    const notes = await this.renderNotes(session)
+    if (checkpointCarriesNothing(notes, keepsTail)) {
+      this.ctx.logger.info(
+        'context rollover deferred: the automatic checkpoint would carry neither notes nor a recent tail; '
+        + 'retrying at the next pre-step',
+      )
+      return null
+    }
+    const windowNumber = countRollovers(session) + 1
+    const result = await commitRollover(
+      { meter: this.ctx.tokenMeter },
+      session,
+      range.start,
+      range.end,
+      {
+        owner: 'current-turn',
+        replacement: {
+          kind: 'checkpoint',
+          checkpoint: { reason: 'automatic', windowNumber, notes, handoff: null },
+        },
+      },
+    )
+    // Only a committed rollover consumes the turn: every deferral above retries
+    // at the next pre-step of the same turn.
+    this.automaticRolledTurns.add(key)
+    this.ctx.logger.info(
+      `context rollover (automatic): window ${windowNumber} started; `
+      + `shadowed ${result.shadowedSeqs.length} surface nodes (~${result.shadowedTokenCount} tokens)`,
+    )
+    return result
+  }
+
+  /**
+   * The automatic path's retention rule: the configured tail budget, raised to
+   * the automatic floor.
+   *
+   * The floor is the automatic path's own key, read only here, so a row that
+   * keeps no tail (`retainTokens: 0`, or `handoffOnly` with no `retainTokens`)
+   * cannot leave an automatic rollover with nothing of the conversation in the
+   * new window. `selectionFor` is untouched, so the manual and model-requested
+   * paths keep their configured rule.
+   * @param session - session whose configured tail budget is priced.
+   * @returns the retention rule the automatic rollover uses.
+   */
+  private automaticSelection(session: Session): RolloverSelection {
+    const configured = this.selection(session)
+    const configuredTokens = configured.kind === 'tail' ? configured.retainTokens : 0
+    return {
+      kind: 'tail',
+      retainTokens: Math.max(configuredTokens, this.config.automaticRolloverRetainTokens),
+    }
   }
 
   /**
@@ -471,17 +582,22 @@ export class ContextRolloverEngine extends CompactionEngine {
   }
 
   /**
-   * Automatic-compaction entry point, which never rolls over. Above the
-   * rollover point a pressure trigger logs one warning per turn, because the
-   * model owns the handoff. A context-overflow trigger does nothing here, so
-   * the provider's error reaches the turn unchanged.
+   * Automatic-compaction entry point, which never rolls over. With
+   * `automaticRollover` off, a pressure trigger above the rollover point logs
+   * one warning per turn, because the model owns the handoff. With it on, the
+   * pre-step listener is the path that commits, and this entry point stays
+   * silent so the "automatic rollover is disabled" warning is never logged while
+   * it is enabled. A context-overflow trigger does nothing here, so the
+   * provider's error reaches the turn unchanged.
    * @param agent - agent whose latest routed request is measured.
    * @param trigger - step-boundary pressure or provider-confirmed overflow.
    * @returns always `null`: no rollover is performed from this entry point.
    */
   override async compactIfNeeded(agent: Agent, trigger: CompactionTrigger): Promise<CompactionResult | null> {
     if (this.compactionOwnedElsewhere(agent)) return null
-    if (trigger === 'pressure') this.warnAboveRolloverPoint(agent, this.openTurnNumber(agent.session))
+    if (trigger === 'pressure' && !this.config.automaticRollover) {
+      this.warnAboveRolloverPoint(agent, this.openTurnNumber(agent.session))
+    }
     return null
   }
 

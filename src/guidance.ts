@@ -5,8 +5,31 @@
  * @module dsh-context-rollover/guidance
  */
 
-/** System-prompt section text for the context-management plugin. */
-export const CONTEXT_MANAGEMENT_GUIDANCE = `
+/**
+ * Build the system-prompt section text for the context-management plugin.
+ *
+ * The last bullet is composed per engine, because this text ships with every
+ * request: promising an automatic rollover on a deployment where
+ * `automaticRollover` is off would be false, and the model acts on what it
+ * reads. The reminder bullet states no cadence: the repeat interval is the
+ * `reminderRepeatMs` configuration key, so a fixed number here would go stale
+ * the moment a deployment sets it.
+ * @param options - the resolved configuration this text describes.
+ * @returns the section text.
+ */
+export function contextManagementGuidance(options: { automaticRollover?: boolean } = {}): string {
+  const rolloverRule = options.automaticRollover === true
+    ? '- A reminder appears while the context is filling and usage stays at or above\n'
+      + '  the reminder point. At or above the rollover point the engine also rolls the\n'
+      + '  context over by itself: it commits a notes checkpoint plus a recent tail of\n'
+      + '  the conversation, with no summarizer call. That is a safety net, not a\n'
+      + '  substitute for your own handoff. Write the document and call\n'
+      + '  `new_context` as above anyway: your document is what the fresh context\n'
+      + '  continues from, and the engine\'s checkpoint only carries the notes and the\n'
+      + '  recent tail.'
+    : '- A reminder appears while the context is filling and usage stays at or above\n'
+      + '  the reminder point. Only your `new_context` call starts a handoff rollover.'
+  return `
 # Context management
 
 Your active context is temporary working memory. Older conversation leaves your
@@ -35,7 +58,12 @@ tool.
   current context state is not readable from repository files, from the plugin
   source, or from memory: only that tool reports it, and claiming a reading you
   did not receive is a fabrication even when the guess sounds plausible.
-- A reminder appears when the context fills, and repeats no sooner than five minutes
-  after the previous one while usage stays at or above the reminder point. Only your
-  \`new_context\` call starts a handoff rollover.
+${rolloverRule}
 `.trim()
+}
+
+/**
+ * The shipped guidance text, with the automatic rollover off: the state every
+ * deployment that does not set `automaticRollover` runs in.
+ */
+export const CONTEXT_MANAGEMENT_GUIDANCE = contextManagementGuidance()

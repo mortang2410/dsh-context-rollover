@@ -8,7 +8,7 @@
  */
 
 /** Why a context window rolled over. */
-export type RolloverReason = 'model-requested' | 'manual'
+export type RolloverReason = 'model-requested' | 'manual' | 'automatic'
 
 /** Inputs for one deterministic checkpoint. */
 export interface CheckpointInput {
@@ -80,6 +80,22 @@ export function buildReplacementText(replacement: RolloverReplacement): string {
 }
 
 /**
+ * Whether an automatic checkpoint would carry nothing into the fresh context:
+ * no notes and no retained tail. The automatic path defers instead of
+ * committing that, because the replacement would be engine narration with no
+ * state under it.
+ *
+ * Empty notes alone do not defer: the retained tail still carries the
+ * continuation.
+ * @param notes - rendered durable notes snapshot, or `null` when there are none.
+ * @param keepsTail - whether the selected span leaves any recent surface node behind.
+ * @returns true when the checkpoint would carry no state at all.
+ */
+export function checkpointCarriesNothing(notes: string | null, keepsTail: boolean): boolean {
+  return !keepsTail && (notes === null || notes.trim().length === 0)
+}
+
+/**
  * Compose the replacement checkpoint blocks. Content is deterministic for a
  * given input, so the shrink guard's pricing is reproducible.
  *
@@ -95,6 +111,16 @@ export function buildCheckpointText(input: CheckpointInput): string {
     + `The full conversation remains persisted and recoverable with the history tool — `
     + `search for a specific missing detail and read only that; do not reconstruct whole windows.`,
   ]
+  if (input.reason === 'automatic') {
+    // The automatic path is the one rollover with no model in the loop, so the
+    // fresh context has to be told that the engine wrote this, not a model.
+    lines.push(
+      'This checkpoint was composed by the engine, not by a model: measured usage reached the rollover '
+      + 'point and the engine crossed the boundary by itself. No summarizer ran, and no handoff document '
+      + 'was read. The durable notes below are the state that was carried over, and any recent messages '
+      + 'kept after this checkpoint are verbatim.',
+    )
+  }
   lines.push('', '## Durable notes')
   lines.push(input.notes ?? 'No notes were saved for this rollover.')
   if (input.handoff !== null) {

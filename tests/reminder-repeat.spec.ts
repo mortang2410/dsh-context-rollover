@@ -349,9 +349,10 @@ describe('pressure reminder repeat cadence', () => {
 })
 
 describe('model-facing guidance', () => {
-  it('guidance states the five-minute repeat', () => {
-    // The model reads this text, so it must state the cadence the engine enforces.
-    expect(CONTEXT_MANAGEMENT_GUIDANCE).toContain('repeats no sooner than five minutes')
+  it('states no fixed cadence, which reminderRepeatMs owns', () => {
+    // The model reads this text, so it must not promise a repeat interval the
+    // configuration can change. The shipped guidance names no number at all.
+    expect(CONTEXT_MANAGEMENT_GUIDANCE).not.toContain('five minutes')
     expect(CONTEXT_MANAGEMENT_GUIDANCE).not.toContain('at most once per window')
   })
 })
