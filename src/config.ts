@@ -14,8 +14,10 @@ import z from '@deepseek-ai/schemastery'
  * boundary. It repeats no sooner than `reminderRepeatMs` apart while usage
  * stays at or above the handoff point and below the rollover point. At or above
  * the rollover point {@link DEFAULT_ROLLOVER_REMINDER_MESSAGE} is the text the
- * model reads, and a pre-step that committed a rollover carries no reminder at
- * all, so this text is never delivered with nothing left before the point.
+ * model reads, and a pre-step that committed a rollover carries no hard
+ * reminder. That step carries this cadence text only when the commit brought
+ * the measurement back below the rollover point, so this text is never
+ * delivered with nothing left before the point.
  *
  * Placeholders, filled at send time from {@link ReminderValues}:
  * - `{percent}`: tokens used as a percent of the routed model's context window.

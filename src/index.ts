@@ -306,10 +306,12 @@ export class ContextRolloverEngine extends CompactionEngine {
    * - at or above the rollover point, the hard
    *   {@link RolloverConfig.rolloverReminderMessage} with the measured figures
    *   filled in, claimed once per turn (see claimRolloverReminder). A pre-step
-   *   that already committed a rollover (`crossedThisStep`) delivers nothing at
-   *   all here: the engine did the work the order asks for, and the cadence
-   *   text is not a substitute, because its tokens-left line would read 0 in
-   *   that state;
+   *   that already committed a rollover (`crossedThisStep`) delivers no hard
+   *   reminder: the engine did the work the order asks for, and the cadence
+   *   text is not a substitute while the measurement is still at or above the
+   *   rollover point, because its tokens-left line would read 0 in that state.
+   *   If that commit brought the measurement back below the rollover point, the
+   *   next branch delivers the cadence text with a positive tokens-left figure;
    * - below the rollover point and at or above the handoff point, the cadence
    *   {@link RolloverConfig.reminderMessage}, claimed on the configured
    *   `reminderRepeatMs` gap (see claimReminder).
