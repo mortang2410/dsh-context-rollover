@@ -7,6 +7,7 @@ state — with **no summarization**.
 
 ```text
 fresh working context = standing instructions + the durable handoff document you wrote; nothing else
+(model-driven path; the automatic rollover keeps a recent tail and the notes checkpoint)
 ```
 
 Inspired by the context-management architecture in `openai/codex` (the
@@ -50,16 +51,18 @@ must additionally live in the session's agent preset — see
 [Web profiles](#web-profiles-preset-sessions) below. A rollover is a real DSH
 compaction: `compaction/start` → `compaction/summary` → one replacement
 `user/message` with full source provenance → `compaction/end` — but the
-"summary" is the **handoff document's own bytes**, never an LLM call. Raw
-session events stay persisted and the session id is unchanged; `deriveMessages()`
-rebuilds automatically.
+"summary" is the **handoff document's own bytes** on the model-driven path, the
+deterministic notes checkpoint on the manual and automatic paths, and never an
+LLM call. Raw session events stay persisted and the session id is unchanged;
+`deriveMessages()` rebuilds automatically.
 
 After a rollover the model-visible context is the standing system/developer
-instructions plus the handoff document. **No recent tail, no prior messages and
-no tool calls carry over** — including the `new_context` call that requested the
-boundary, and including the workspace `AGENTS.md` chain, which
+instructions plus the replacement. On the model-driven path **no recent tail, no
+prior messages and no tool calls carry over** — including the `new_context` call
+that requested the boundary, and including the workspace `AGENTS.md` chain, which
 `dsh-agent-instructions` re-injects from disk because the surface no longer
-carries it.
+carries it. The automatic rollover is the exception: its replacement is the notes
+checkpoint and it keeps a recent tail (see [Rollover paths](#rollover-paths)).
 
 Responsibilities stay split (the Codex lesson):
 
@@ -84,9 +87,9 @@ Responsibilities stay split (the Codex lesson):
   new context. The boundary is crossed at a safe lifecycle point, never
   mid-tool-batch.
 - **`get_context_remaining()`** — honest headroom: tokens left before the hard
-  window and before the rollover point (with `automaticRollover` off, only
-  `new_context` rolls over; with it on, the engine rolls over there too), or
-  "not measured yet".
+  window and before the rollover point (with `automaticRollover` off, only the
+  model's `new_context` and `/compact` roll over; with it on, the engine rolls
+  over there too), or "not measured yet".
 - **`notes`** — `list | read | write | append | search` over per-session
   markdown files under `<dsh home>/notes/<session id>/`. Nothing is written
   automatically; the model decides what survives.
@@ -111,12 +114,15 @@ Responsibilities stay split (the Codex lesson):
    window's first reminder is not held back by the old one. At or above the
    rollover point (`thresholdRatio`, default 0.90 of the window, or the model's
    `modelThresholds` entry) the engine sends a separate hard reminder once per
-   turn, `rolloverReminderMessage`, and still logs one warning per turn. With
-   `automaticRollover` on (default `false`), the engine also rolls over by
-   itself at the next `agent/pre-step`, whether or not the model complied. That
-   automatic rollover commits the notes checkpoint, which carries the model's
-   own handoff when the model wrote one into the notes tool and the notes
-   snapshot when it did not, plus a recent tail; it never reads a handoff file.
+   turn, `rolloverReminderMessage`, unless that step already committed a
+   rollover. The journal warning is the gate-off signal: one `logger.warn` per
+   turn fires only while `automaticRollover` is off, and the hard reminder is the
+   model-facing signal when it is on. With `automaticRollover` on (default
+   `false`), the engine also rolls over by itself at the next `agent/pre-step`,
+   whether or not the model complied. That automatic rollover commits the notes
+   checkpoint, which carries the model's own handoff when the model wrote one
+   into the notes tool and the notes snapshot when it did not, plus a recent tail;
+   it never reads a handoff file.
    When another backend owns compaction for a session, this engine does not send
    the reminder and does not log the pressure warnings for that session.
 3. **Overflow** (never a rollover): the engine does not roll over on a
@@ -130,8 +136,8 @@ Under `handoffOnly` (what the shipped preset sets) every path except the automat
 rollover, including manual `/compact`, replaces the span from the first
 non-system surface node through the **last** surface node, so no priced tail
 survives unless `retainTokens` is set.
-When it is set, the handoff document leads the recent tail that budget selects,
-by the same rule `handoffOnly: false` uses. A budget of `0` still keeps the last
+When it is set, the replacement leads the recent tail that budget selects, by the
+same rule `handoffOnly: false` uses. A budget of `0` still keeps the last
 node there, as it does without `handoffOnly`. `retainRatio` is never read under
 `handoffOnly`; use `handoffOnly: false` for a ratio-sized tail. The automatic
 rollover is the one exception to a zero tail: it always keeps the tail its own
@@ -524,9 +530,12 @@ first, so `pnpm test` works whether or not `pnpm build` has run.
 
 ## Scope and limits
 
-- Under `handoffOnly` with no `retainTokens`, a rollover replacement contains the
-  handoff document and nothing else: no notes, no narration, no older user prompts
-  and no tail. With `retainTokens`, the recent tail that budget selects follows it.
+- Under `handoffOnly` with no `retainTokens`, a model-driven rollover replacement
+  contains the handoff document and nothing else: no notes, no narration, no older
+  user prompts and no tail. With `retainTokens`, the recent tail that budget
+  selects follows it. The automatic rollover is the exception: it composes the
+  notes checkpoint and always keeps its `automaticRolloverRetainTokens` tail
+  (default 10000).
 - With `automaticRollover` off (the default), the only rollovers are the model's
   own `new_context` call and manual `/compact`; with it on, the engine also rolls
   over at the rollover point, committing the notes checkpoint plus a recent tail.
