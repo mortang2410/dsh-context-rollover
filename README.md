@@ -84,8 +84,9 @@ Responsibilities stay split (the Codex lesson):
   new context. The boundary is crossed at a safe lifecycle point, never
   mid-tool-batch.
 - **`get_context_remaining()`** — honest headroom: tokens left before the hard
-  window and before the rollover point (warning only; `new_context` rolls over),
-  or "not measured yet".
+  window and before the rollover point (with `automaticRollover` off, only
+  `new_context` rolls over; with it on, the engine rolls over there too), or
+  "not measured yet".
 - **`notes`** — `list | read | write | append | search` over per-session
   markdown files under `<dsh home>/notes/<session id>/`. Nothing is written
   automatically; the model decides what survives.
@@ -98,21 +99,26 @@ Responsibilities stay split (the Codex lesson):
    the durable document, and calls `new_context({ handoff_path })` with its
    path. The document replaces the whole prior surface under the
    `handoffOnly` rule.
-2. **Pressure** (no automatic rollover): once measured usage is at or
-   above the reminder point, the reminder tells the model, by default, to
-   run `/handoff-doc` and then call `new_context`. The reminder point is
-   `reminderThresholdRatio` (default 0.40) of the context window, or, for a
+2. **Pressure** (reminders, then an optional automatic rollover): once measured
+   usage is at or above the reminder point, the reminder tells the model, by
+   default, to run `/handoff-doc` and then call `new_context`. The reminder point
+   is `reminderThresholdRatio` (default 0.40) of the context window, or, for a
    model with a `modelThresholds` entry, that entry's token count. The first
    reminder in a window is delivered at the next step after usage reaches the
-   point. After that, a repeat is delivered no sooner than five minutes after
-   the previous reminder, and only while usage stays at or above the point. A
-   rollover opens a new window, and that window's first reminder is not held
-   back by the old one. Above the rollover point (`thresholdRatio`, default
-   0.90 of the window, or the model's `modelThresholds` entry), the reminder
-   keeps the same five-minute cadence, and the engine logs one warning per
-   turn. The engine does not roll over by itself there. When another backend
-   owns compaction for a session, this engine does not send the reminder and
-   does not log the pressure warnings for that session.
+   point. After that, a repeat is delivered no sooner than `reminderRepeatMs`
+   (default 300000, five minutes) after the previous reminder, and only while
+   usage stays at or above the point. A rollover opens a new window, and that
+   window's first reminder is not held back by the old one. At or above the
+   rollover point (`thresholdRatio`, default 0.90 of the window, or the model's
+   `modelThresholds` entry) the engine sends a separate hard reminder once per
+   turn, `rolloverReminderMessage`, and still logs one warning per turn. With
+   `automaticRollover` on (default `false`), the engine also rolls over by
+   itself at the next `agent/pre-step`, whether or not the model complied. That
+   automatic rollover commits the notes checkpoint, which carries the model's
+   own handoff when the model wrote one into the notes tool and the notes
+   snapshot when it did not, plus a recent tail; it never reads a handoff file.
+   When another backend owns compaction for a session, this engine does not send
+   the reminder and does not log the pressure warnings for that session.
 3. **Overflow** (never a rollover): the engine does not roll over on a
    provider-confirmed `CONTEXT_WINDOW_EXCEEDED` and does not retry. The provider
    error reaches the user unchanged. The model usually cannot reach
@@ -120,22 +126,26 @@ Responsibilities stay split (the Codex lesson):
    at least as large and fails too. The user runs `/compact`.
 4. **Manual**: `/compact` keeps working on an idle agent.
 
-Under `handoffOnly` (what the shipped preset sets) every path, including manual
-`/compact`, replaces the span from the first non-system surface node through the
-**last** surface node, so no priced tail survives unless `retainTokens` is set.
+Under `handoffOnly` (what the shipped preset sets) every path except the automatic
+rollover, including manual `/compact`, replaces the span from the first
+non-system surface node through the **last** surface node, so no priced tail
+survives unless `retainTokens` is set.
 When it is set, the handoff document leads the recent tail that budget selects,
 by the same rule `handoffOnly: false` uses. A budget of `0` still keeps the last
 node there, as it does without `handoffOnly`. `retainRatio` is never read under
-`handoffOnly`; use `handoffOnly: false` for a ratio-sized tail.
+`handoffOnly`; use `handoffOnly: false` for a ratio-sized tail. The automatic
+rollover is the one exception to a zero tail: it always keeps the tail its own
+`automaticRolloverRetainTokens` floor selects (default 10000), whatever the row's
+`retainTokens` says.
 
-Nothing old survives, in every case, including a rollover that fires while a
-step is mid-tool-call with no result yet. The host requires a tool-pairing
-balanced cut, so a pre-step whose tail cut is unbalanced does not roll over at
-all: it defers, the host appends the missing `tool/result` (a skipped or aborted
-call gets a synthetic one), and the **next** pre-step crosses with the whole
-prior surface inside the span. A deferred pre-step is logged at info level, not
-as a failure, and it leaves the model's request pending so the rollover is
-retried rather than lost.
+The replaced span leaves nothing old behind, in every case, including a rollover
+that fires while a step is mid-tool-call with no result yet. The host requires a
+tool-pairing balanced cut, so a pre-step whose tail cut is unbalanced does not
+roll over at all: it defers, the host appends the missing `tool/result` (a
+skipped or aborted call gets a synthetic one), and the **next** pre-step crosses
+with the whole prior surface inside the span. A deferred pre-step is logged at
+info level, not as a failure, and it leaves the model's request pending so the
+rollover is retried rather than lost.
 
 Manual `/compact` has no model in the loop and therefore no document to name;
 it composes the deterministic notes checkpoint.
@@ -339,18 +349,26 @@ other byte identical, and fails loud when either declaration's shape drifts. See
 on a different host line must do, and why a patch that matches no row is a
 silent no-op rather than an error.
 
-### Crossing 0.90 never picks a handoff
+### Crossing the rollover point picks no handoff
 
-`thresholdRatio` (0.90) marks a context that is too full to keep going. The
-engine does not compact there. Only the model can write the handoff, so crossing
-0.90 logs one warning per turn and waits for the model's own `new_context` call.
+`thresholdRatio` (0.90) marks a context that is too full to keep going. With
+`automaticRollover` off (the default), the engine does not compact there: only
+the model can write the handoff, so crossing the point sends the hard per-turn
+reminder, logs one warning per turn, and waits for the model's own `new_context`
+call. With `automaticRollover` on, the engine commits a rollover at the next
+pre-step whether or not the model complied. That rollover carries the
+deterministic notes checkpoint, which holds the model's own handoff when the
+model wrote one into the notes tool and the notes snapshot when it did not, plus
+a recent tail floored by `automaticRolloverRetainTokens` (default 10000, so the
+automatic path keeps a tail even on a row with `retainTokens: 0`).
 
 An earlier design rolled over at 0.90 with no model in the loop. It scanned
 `handoffDir` (default `.scratch/handoff`, relative to the session working
 directory) for `handoffPattern` files (default `HANDOFF-*.md`) and took the
 **newest by modification time**. Handoff files in a shared folder are not tied to
 a session, so that path could load another session's document into the current
-context. The scan is removed.
+context. No engine path reads a handoff file today: the automatic rollover
+commits the notes checkpoint instead.
 
 
 Configuration (cordis.yml `config` on the plugin row):
@@ -360,8 +378,13 @@ Configuration (cordis.yml `config` on the plugin row):
     - id: context-rollover
       name: dsh-context-rollover
       config:
-        thresholdRatio: 0.9          # warning point (fraction of window); never rolls over by itself
-        reminderThresholdRatio: 0.4  # /handoff-doc reminder point, repeated no sooner than 5 min apart
+        thresholdRatio: 0.9          # rollover point (fraction of window); the engine rolls over here only with automaticRollover on
+        reminderThresholdRatio: 0.4  # /handoff-doc reminder point, repeated no sooner than reminderRepeatMs apart
+        automaticRollover: false     # true: the engine rolls over at the rollover point whether or not the model complied
+        automaticRolloverRetainTokens: 10000 # recent-tail floor the automatic rollover always keeps, even with retainTokens 0
+        reminderRepeatMs: 300000     # minimum gap between cadence reminders, in milliseconds
+        # rolloverReminderMessage: hard reminder delivered to the model once per turn at or above the rollover
+        # point. The shipped default is the full order text; set it to restate the wording.
         handoffOnly: true            # the handoff document replaces the surface
         # retainTokens (recent verbatim tail) is read under handoffOnly too; without it no tail
         # is kept. retainRatio is read only when handoffOnly is false: with handoffOnly true the
@@ -375,13 +398,13 @@ Configuration (cordis.yml `config` on the plugin row):
         modelSurface: auto           # auto (host rows) | always (preset rows)
         modelThresholds:             # optional absolute points per routed model
           'strata/qwen-strata':
-            thresholdTokens: 200000        # rollover point (warning only; new_context rolls over)
-            reminderThresholdTokens: 157286 # reminder point, repeated no sooner than 5 min apart; must not exceed thresholdTokens
+            thresholdTokens: 200000        # rollover point; the engine rolls over here only with automaticRollover on
+            reminderThresholdTokens: 157286 # reminder point, repeated no sooner than reminderRepeatMs apart; must not exceed thresholdTokens
 ```
 
 `modelThresholds` is keyed by the routed model id, the `model` field of the session's request context. A model with an entry uses its two token points. Every other model keeps `thresholdRatio` and `reminderThresholdRatio`, measured against its own window. A patch row replaces its whole config, so restate every other key when you add this one.
 
-An entry is not checked against the model's window. A `thresholdTokens` at or above the window never fires the warning before the window fills. The threshold itself never rolls over; only `new_context` and `/compact` do.
+An entry is not checked against the model's window. A `thresholdTokens` at or above the window never fires the rollover before the window fills. With `automaticRollover` off (the default), only `new_context` and `/compact` roll over; with it on, the engine also rolls over at the entry's `thresholdTokens`.
 
 ## Local development with HMR
 
@@ -504,9 +527,11 @@ first, so `pnpm test` works whether or not `pnpm build` has run.
 - Under `handoffOnly` with no `retainTokens`, a rollover replacement contains the
   handoff document and nothing else: no notes, no narration, no older user prompts
   and no tail. With `retainTokens`, the recent tail that budget selects follows it.
-- The only rollovers are the model's own `new_context` call and manual `/compact`.
-  Crossing `thresholdRatio` only warns, and a provider-confirmed overflow does not
-  roll over: the provider error reaches the user unchanged.
+- With `automaticRollover` off (the default), the only rollovers are the model's
+  own `new_context` call and manual `/compact`; with it on, the engine also rolls
+  over at the rollover point, committing the notes checkpoint plus a recent tail.
+  Crossing the rollover point never picks a handoff file, and a provider-confirmed
+  overflow does not roll over: the provider error reaches the user unchanged.
 - Manual `/compact` composes the deterministic notes checkpoint. The
   model-requested path never substitutes notes for the document the model named.
 - Notes survive context rollovers within a session; no cross-session sync,

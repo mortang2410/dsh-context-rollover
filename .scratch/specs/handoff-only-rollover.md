@@ -36,6 +36,8 @@ Retarget the rollover so that:
 - The model-visible context after the rollover is the standing system/developer instructions
   plus the handoff document (plus whatever fresh infrastructure DSH provides to start a turn).
 - `thresholdRatio` stays at 0.90 as an emergency fallback for when the 40% reminder was ignored.
+  It rolls over only when `automaticRollover` is true (default false), and it commits the
+  deterministic notes checkpoint plus a recent tail. It never reads a handoff file.
 - No summarizer model is ever called. The `/handoff-doc` output is authoritative.
 - The DSH session id is unchanged, and the original event history stays on disk and reachable
   through the `history` tool for manual retrieval only.
@@ -68,10 +70,10 @@ Retarget the rollover so that:
     so that reading history stays my explicit decision.
 12. As a coding agent, I want no summarizer model to run on my conversation, so that the
     continuation context is exactly the document I wrote rather than a lossy paraphrase of it.
-13. As a coding agent, I want a 90% emergency rollover to still work when I ignored the 40%
-    reminder, so that I do not hit a hard context overflow and stall.
-14. As a coding agent, I want the emergency rollover to prefer a handoff document that exists,
-    so that the emergency path also lands on a complete continuation context.
+13. As a coding agent, I want a 90% emergency rollover I can enable with `automaticRollover`, so
+    that a session that ignored the 40% reminder does not hit a hard context overflow and stall.
+14. As a coding agent, I want the emergency rollover to carry my own handoff, my notes snapshot
+    and a recent tail, so that the emergency path also lands on a usable continuation context.
 15. As an operator, I want the reminder text configurable, so that I can change the wording or
     the workflow it points at without editing plugin source.
 16. As an operator, I want the 40% and 90% points to be plain configuration values, so that I can
@@ -86,8 +88,8 @@ Retarget the rollover so that:
     reaches the fresh context, so that the central claim of this change cannot silently regress.
 21. As a maintainer, I want a test that proves no model call happens on the rollover path, so
     that a future refactor cannot quietly reintroduce summarization.
-22. As a maintainer, I want a test that the 90% fallback still commits a rollover, so that the
-    emergency path stays alive.
+22. As a maintainer, I want a test that the emergency rollover still commits a rollover when
+    `automaticRollover` is on, so that the emergency path stays alive.
 23. As a maintainer, I want the reminder predicate shared between sender and reader, so that the
     "fired once" test cannot disagree with the code about what a reminder is.
 
@@ -102,10 +104,16 @@ Retarget the rollover so that:
   `Context is {percent}% full. Use \`/handoff-doc\` to create/update the durable handoff document. Make it fully sufficient for a fresh context to continue the work. After it succeeds, call \`new_context\`. The handoff document will be the entire continuation context.`
 - `reminderThresholdRatio` default changes `0.75` -> `0.40`.
 - `thresholdRatio` default stays `0.90`, and its role is restated in docs as the emergency
-  fallback.
-- New `handoffDir: string`, default `.scratch/handoff`, resolved against the session working
-  directory. Only used by the emergency path.
-- New `handoffPattern: string`, default `HANDOFF-*.md`. Only used by the emergency path.
+  fallback, enabled by `automaticRollover` (boolean, default `false`).
+- New `automaticRolloverRetainTokens: number`, default `10000`: the recent-tail floor the
+  automatic rollover keeps, even on a row whose `retainTokens` is `0`.
+- New `reminderRepeatMs: number`, default `300000`, replacing the fixed five-minute cadence.
+- New `rolloverReminderMessage: string`, the hard per-turn reminder delivered at or above the
+  rollover point, separate from the cadence reminder.
+- `handoffDir: string`, default `.scratch/handoff`, resolved against the session working
+  directory. Accepted for compatibility; no engine path reads it.
+- `handoffPattern: string`, default `HANDOFF-*.md`. Accepted for compatibility; no engine path
+  reads it.
 - New `handoffOnly: boolean`, default `false`. When true the range selector retains no tail at
   all: the replaced span runs from the first non-system surface node through the LAST surface
   node, backing off to the nearest earlier node only if the cut after the last node is not
@@ -245,13 +253,21 @@ the only real constraint is the mid-call case described above.
 
 ### Emergency fallback
 
-- At `thresholdRatio` (0.90) the automatic pressure rollover runs. It resolves a handoff file
-  by scanning `handoffDir` for `handoffPattern` and taking the newest by modification time.
-- Candidate selection is shrink-aware, in this order: newest eligible handoff file that passes
-  the shrink check; otherwise the deterministic notes checkpoint; otherwise no rollover. A
-  readable handoff that is not smaller than the span it would replace must not consume the one
-  emergency attempt and leave the context unchanged while a smaller notes checkpoint was
-  available. This is why the choice cannot be "pick the newest file, then let the guard throw".
+- At `thresholdRatio` (0.90), or at a routed model's `modelThresholds` point, the automatic
+  rollover runs when `automaticRollover` is true. The key defaults to false, so a deployment opts
+  in.
+- Candidate selection is the deterministic notes checkpoint plus the guaranteed recent tail:
+  `renderNotes(session)`, which carries the model's own handoff when the model wrote one into a
+  notes-tool note, followed by the tail that `automaticRolloverRetainTokens` floors (default
+  `10000`). When `selectRolloverRange` returns no span, the path defers and retries at the next
+  pre-step. When the notes render null or empty AND the selected tail is empty, it also defers:
+  it never commits an empty replacement. A deferral is logged at info and does not consume the
+  turn's one commit.
+- The automatic path never reads a handoff file and never scans `handoffDir`. The handoff
+  directory is shared by every session, so the newest file in it is not necessarily this
+  session's document: an earlier design took exactly that file and handed one session another
+  session's handoff. That shared-directory hazard is why no handoff file is ever read on this
+  path.
 - The emergency path cannot use an explicit path: no model is in the loop at 90%. Documented
   limitation.
 - The explicit `new_context` path has no such fallback by design: the model named one file, and
@@ -364,7 +380,7 @@ Modules under test:
 - the reminder builder and the once-per-window claim (existing `reminder-delivery` seam);
 - handoff resolution and reading (new module, unit tested for the refusal cases);
 - the rollover transaction's replacement content (through the real agent loop);
-- the emergency fallback (through the real agent loop).
+- the emergency rollover fallback (through the real agent loop).
 
 Required new tests, mapped to the user's list:
 
@@ -393,8 +409,9 @@ Required new tests, mapped to the user's list:
    manual), because a path-specific regression is exactly what a single happy-path check misses.
    The summary event's provider and deterministic model string are asserted as supporting
    evidence, not as the proof, since metadata alone cannot show that no request was made.
-7. The 90% emergency fallback still commits a rollover when the 40% reminder was ignored, with
-   the reminder threshold raised past the usage so no reminder fires first.
+7. The emergency rollover still commits a rollover when the 40% reminder was ignored. The test
+   sets `automaticRollover: true` (its default is `false`) and raises the reminder threshold past
+   the usage so no reminder fires first.
 8. Refusal: `new_context` with a missing, empty or unreadable path leaves the old context intact
    and reports the failure.
 
@@ -420,7 +437,7 @@ transaction and the shrink guard).
 | 02 reminder at 40%, configurable | stories 1-4, 15-17, 23 | 01 |
 | 03 handoff resolution | stories 5, 6 | 01 |
 | 04 handoff-only replacement | stories 7-11, 20 | 01, 03 |
-| 05 emergency fallback | stories 13, 14 | 04 |
+| 05 automatic rollover fallback | stories 13, 14 | 04 |
 | 06 no summarizer and guidance | stories 3, 12, 21, 22 | 04 |
 | 07 preset name and docs | stories 16-18 | 02, 04, 05, 06 |
 | 08 preset format modernization | story 18 and the running-host preset load | 01 |
@@ -436,11 +453,15 @@ rather than a test-local copy.
   `.scratch/handoff/`, named `.scratch/handoff/HANDOFF-<topic-or-date>.md`; if the session has
   no real workspace, use `~/.hermes/handoffs/`. The document opens with a receiver protocol and
   then carries thirteen required sections. This is why `handoffDir` defaults to
-  `.scratch/handoff` and the pattern to `HANDOFF-*.md`.
+  `.scratch/handoff` and the pattern to `HANDOFF-*.md`. Both keys are inert: no engine path reads
+  a handoff file, because the model names the document through `new_context`'s explicit path and
+  the `handoff-doc` skill also writes it into a notes-tool note, which is what the automatic
+  rollover carries.
 - The four grill-round decisions that shape the implementation: an explicit `handoff_path` beats
   scanning (a scan can load a stale document); the replacement content is the file's bytes with
   no preamble (a preamble would add non-handoff material to the "entire continuation context");
-  the emergency scan is a fallback of last resort and is documented as such; and the
+  the emergency rollover is a fallback of last resort and is documented as such, and it commits
+  the notes checkpoint plus a recent tail rather than scanning for a handoff file; and the
   no-summarizer test is scoped to the rollover path rather than to the whole turn.
 - `handoffMaxChars` currently bounds the `new_context` handoff string. With the file-based
   design it bounds the accepted handoff file size, and the refusal message names the limit.
