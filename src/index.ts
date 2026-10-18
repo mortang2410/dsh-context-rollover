@@ -302,19 +302,23 @@ export class ContextRolloverEngine extends CompactionEngine {
    * The model-visible reminder for this pre-step, when usage and the claim
    * gates allow one.
    *
-   * Two reminders, one decision:
+   * The rollover point decides the branch, and that branch is terminal:
    * - at or above the rollover point, the hard
    *   {@link RolloverConfig.rolloverReminderMessage} with the measured figures
-   *   filled in, claimed once per turn (see claimRolloverReminder), unless this
-   *   pre-step already committed a rollover (`crossedThisStep`);
+   *   filled in, claimed once per turn (see claimRolloverReminder). A pre-step
+   *   that already committed a rollover (`crossedThisStep`) delivers nothing at
+   *   all here: the engine did the work the order asks for, and the cadence
+   *   text is not a substitute, because its tokens-left line would read 0 in
+   *   that state;
    * - below the rollover point and at or above the handoff point, the cadence
    *   {@link RolloverConfig.reminderMessage}, claimed on the configured
    *   `reminderRepeatMs` gap (see claimReminder).
    *
-   * Both are delivered as the same kind of message: a `user/message` with the
-   * engine's notice source, appended to the `enter` decision the caller returns,
-   * which is what puts them in the next model request. The handoff and rollover
-   * points are what gate delivery; nothing about either text is hardcoded here.
+   * Both delivered texts are the same kind of message: a `user/message` with
+   * the engine's notice source, appended to the `enter` decision the caller
+   * returns, which is what puts them in the next model request. The handoff and
+   * rollover points are what gate delivery; nothing about either text is
+   * hardcoded here.
    * @param session - session whose latest routed request is measured.
    * @param turn - the turn of this pre-step, the hard reminder's claim key.
    * @param now - epoch milliseconds of this pre-step, read once by the caller.
@@ -342,7 +346,8 @@ export class ContextRolloverEngine extends CompactionEngine {
       rollover_point_tokens: rolloverTokens,
       tokens_to_rollover: Math.max(0, rolloverTokens - usedTokens),
     }
-    if (usedTokens >= rolloverTokens && !crossedThisStep) {
+    if (usedTokens >= rolloverTokens) {
+      if (crossedThisStep) return undefined
       // Claimed synchronously, like the cadence claim, so two engine rows that
       // observe one pre-step deliver one copy between them.
       if (!claimRolloverReminder(session, turn)) return undefined

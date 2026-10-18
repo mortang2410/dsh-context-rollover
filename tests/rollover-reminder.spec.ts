@@ -227,17 +227,16 @@ describe('a pre-step that commits a rollover delivers no hard reminder for that 
       () => Promise.resolve({ kind: 'enter' as const, messages: [] }),
     )
 
-    // Turn three, step one: the automatic safety net commits here, so this step
-    // already crossed the boundary and carries no hard reminder.
+    // Turn three, step one: the automatic safety net commits here. The
+    // rollover-point branch is terminal, so this step carries no reminder at
+    // all: not the hard order, because the engine just did the work the order
+    // asks for, and not the cadence text either, whose tokens-left line would
+    // read 0 while usage is still at or above the point.
     const committing = await step(3, 1)
     expect(countRollovers(session)).toBe(1)
     expect(decisionCarries(committing, 'ORDERING-HARD-SENTINEL')).toBe(false)
-    // The rollover opened a new window, so this step carries the cadence
-    // reminder instead. It is also the one reachable path for the cadence
-    // text's tokens-left clamp: usage is still at or above the point, so it
-    // reads 0 rather than a negative number.
-    expect(decisionCarries(committing, 'ORDERING-CADENCE leaving 0 before the rollover point')).toBe(true)
-    expect(decisionCarries(committing, 'leaving -')).toBe(false)
+    expect(decisionCarries(committing, 'ORDERING-CADENCE')).toBe(false)
+    expect(committing.kind === 'enter' ? committing.messages : []).toHaveLength(0)
 
     // The measurement after the commit is still at or above the point, so the
     // absent hard reminder above is the ordering rule and not a reading that

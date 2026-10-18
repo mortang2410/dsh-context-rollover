@@ -824,8 +824,9 @@ export function isPressureReminder(event: SessionEvent): event is SessionEvent<'
  *
  * Same source kind and form as {@link isPressureReminder}, and its own summary
  * prefix, so a hard reminder is never counted as a cadence reminder by the
- * window clock. Every consumer — the delivery check in index.ts and the test
- * harness — reads this predicate, so the definition cannot drift.
+ * window clock. The sender in index.ts and this predicate read the same prefix
+ * constant, so the two cannot disagree about what a hard reminder looks like;
+ * the test harness is the caller that reads the durable log through it.
  * @param event - one logged session event.
  * @returns true when the event is this engine's hard rollover reminder,
  *   narrowing the event to a `user/message` for the caller.

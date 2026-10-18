@@ -26,7 +26,7 @@ import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { DEFAULT_REMINDER_REPEAT_MS, resolveConfig } from '../src/config.ts'
 import type { RolloverConfig } from '../src/config.ts'
-import { CONTEXT_MANAGEMENT_GUIDANCE } from '../src/guidance.ts'
+import { CONTEXT_MANAGEMENT_GUIDANCE, contextManagementGuidance } from '../src/guidance.ts'
 import { ContextRolloverEngine } from '../src/index.ts'
 import {
   claimReminder,
@@ -392,5 +392,17 @@ describe('model-facing guidance', () => {
     // configuration can change. The shipped guidance names no number at all.
     expect(CONTEXT_MANAGEMENT_GUIDANCE).not.toContain('five minutes')
     expect(CONTEXT_MANAGEMENT_GUIDANCE).not.toContain('at most once per window')
+  })
+
+  it('states the per-turn repetition at or above the rollover point in both branches', () => {
+    // The standing text ships with every request, so the escalation the hard
+    // reminder performs has to be in it, whichever way the gate is set. The
+    // section is hard-wrapped, so compare on collapsed whitespace.
+    const flattened = (text: string): string => text.replace(/\s+/g, ' ')
+    const sentence = 'the order repeats every turn until you comply'
+    expect(flattened(CONTEXT_MANAGEMENT_GUIDANCE)).toContain(sentence)
+    expect(flattened(contextManagementGuidance({ automaticRollover: true }))).toContain(sentence)
+    // The gate-off branch keeps its accurate claim about what starts a rollover.
+    expect(CONTEXT_MANAGEMENT_GUIDANCE).toContain('Only your `new_context` call starts a handoff rollover')
   })
 })

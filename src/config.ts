@@ -12,8 +12,10 @@ import z from '@deepseek-ai/schemastery'
  * The shipped cadence reminder text: the absolute numbers for the routed model,
  * then the model's instruction to write the durable handoff and cross the
  * boundary. It repeats no sooner than `reminderRepeatMs` apart while usage
- * stays at or above the handoff point, and stops once usage reaches the
- * rollover point, where {@link DEFAULT_ROLLOVER_REMINDER_MESSAGE} takes over.
+ * stays at or above the handoff point and below the rollover point. At or above
+ * the rollover point {@link DEFAULT_ROLLOVER_REMINDER_MESSAGE} is the text the
+ * model reads, and a pre-step that committed a rollover carries no reminder at
+ * all, so this text is never delivered with nothing left before the point.
  *
  * Placeholders, filled at send time from {@link ReminderValues}:
  * - `{percent}`: tokens used as a percent of the routed model's context window.

@@ -26,9 +26,11 @@ export function contextManagementGuidance(options: { automaticRollover?: boolean
       + '  substitute for your own handoff. Write the document and call\n'
       + '  `new_context` as above anyway: your document is what the fresh context\n'
       + '  continues from, and the engine\'s checkpoint only carries the notes and the\n'
-      + '  recent tail.'
+      + '  recent tail. At or above the rollover point the order repeats every turn\n'
+      + '  until you comply, so do not wait for a second reminder.'
     : '- A reminder appears while the context is filling and usage stays at or above\n'
-      + '  the reminder point. Only your `new_context` call starts a handoff rollover.'
+      + '  the reminder point. At or above the rollover point the order repeats every\n'
+      + '  turn until you comply. Only your `new_context` call starts a handoff rollover.'
   return `
 # Context management
 
