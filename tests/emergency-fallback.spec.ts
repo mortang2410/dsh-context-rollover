@@ -256,13 +256,16 @@ describe('a model-requested rollover lands the handoff the model names', () => {
     const cwd = await scratch('dsh-rollover-named-')
     const dir = await handoffDirIn(cwd)
     const ownText = `# Handoff\n\n${OWN_IMAGE}: the image fix is verified; next, rerun the render check.\n`
-    const ownPath = await writeHandoff(dir, 'HANDOFF-image-fix.md', ownText, new Date('2024-01-01T00:00:00Z'))
-    // Newer by modification time, so a newest-file rule would pick this one.
+    // Both files sit inside the five-minute freshness window that new_context
+    // enforces. The own file is older by modification time and the foreign file
+    // newer, so a newest-file rule would still pick the foreign one.
+    const now = Date.now()
+    const ownPath = await writeHandoff(dir, 'HANDOFF-image-fix.md', ownText, new Date(now - 120_000))
     await writeHandoff(
       dir,
       'HANDOFF-mpd-foreign.md',
       `# Handoff\n\n${FOREIGN_MPD}: MPD playlist work.\n`,
-      new Date('2024-06-01T00:00:00Z'),
+      new Date(now - 60_000),
     )
 
     const { ctx, agent, session } = await engineHarness('named-handoff-regression', SHIPPED_POINT, { cwd })

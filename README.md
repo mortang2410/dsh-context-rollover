@@ -86,6 +86,14 @@ Responsibilities stay split (the Codex lesson):
   boundary that silently never happens. The document's bytes become the entire
   new context. The boundary is crossed at a safe lifecycle point, never
   mid-tool-batch.
+  Two guards refuse a call with a normal result whose text opens with `Warning:`
+  and gives the reason; the refusal is not a tool error, because the host
+  prefixes every thrown error with `Error:`. A second accepted call within five
+  minutes of the first is refused. A handoff document last modified more than
+  five minutes ago, or dated later than now, is refused. Refused calls start no
+  clock. The clock is kept in process memory and rebuilt from the
+  session's durable log when that memory is gone, so a host restart does not
+  clear it.
 - **`get_context_remaining()`** — honest headroom: tokens left before the hard
   window and before the rollover point (with `automaticRollover` off, only the
   model's `new_context` and `/compact` roll over; with it on, the engine rolls

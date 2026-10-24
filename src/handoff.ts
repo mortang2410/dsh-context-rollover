@@ -56,6 +56,8 @@ export interface HandoffSuccess {
   readonly path: string
   /** The file's text, byte-for-byte as it is on disk, with no wrapper or trimming. */
   readonly text: string
+  /** The file's modification time in epoch milliseconds, from the stat that confirmed it is a regular file. */
+  readonly mtimeMs: number
 }
 
 /** The outcome of reading one handoff document. */
@@ -193,7 +195,7 @@ export async function readHandoffFile(request: HandoffReadRequest): Promise<Hand
         + 'handoff limit; shorten it or raise handoffMaxChars.',
     }
   }
-  return { ok: true, path, text }
+  return { ok: true, path, text, mtimeMs: info.mtimeMs }
 }
 
 /**

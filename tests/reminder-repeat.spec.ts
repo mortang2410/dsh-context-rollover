@@ -17,7 +17,7 @@
  * @module tests/reminder-repeat
  */
 
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -280,6 +280,9 @@ describe('pressure reminder repeat cadence', () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dsh-reminder-repeat-'))
     const handoffPath = join(cwd, 'HANDOFF-repeat.md')
     await writeFile(handoffPath, '# Handoff\n\nContinue the cadence test.\n', 'utf8')
+    // The fake clock starts at T0, so the handoff is dated at T0 as well. A real
+    // mtime lies after that fake now, and new_context refuses a future date.
+    await utimes(handoffPath, T0 / 1000, T0 / 1000)
     const { ctx, agent, session } = await engineHarness(sessionId('new-window'), {
       thresholdRatio: 0.9,
       reminderThresholdRatio: 0.4,
