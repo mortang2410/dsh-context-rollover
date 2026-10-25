@@ -2,7 +2,8 @@
  * Per-model absolute rollover points.
  *
  * A `modelThresholds` entry keyed by a routed model id replaces the ratio-based
- * reminder and rollover points for that model only. Every other model keeps
+ * reminder and rollover points for that model only. The key `*` replaces them
+ * for every model with no entry of its own. A model left out of both keeps
  * `reminderThresholdRatio` and `thresholdRatio`, measured against its own
  * context window.
  *
@@ -82,6 +83,38 @@ describe('rolloverPointsFor', () => {
     expect(rolloverPointsFor(config, 1_000_000, 'glm')).toEqual(ratioPoints)
     expect(rolloverPointsFor(config, 1_000_000, 'constructor')).toEqual(ratioPoints)
   })
+
+  it('gives every model the `*` entry when it has no entry of its own', () => {
+    const config = resolveConfig({
+      modelThresholds: { '*': { thresholdTokens: 350_000, reminderThresholdTokens: 300_000 } },
+    })
+    const generic = { reminderTokens: 300_000, rolloverTokens: 350_000 }
+    expect(rolloverPointsFor(config, 1_000_000, 'commandcode/deepseek-goat')).toEqual(generic)
+    expect(rolloverPointsFor(config, 1_000_000, 'codex/sol-bifrost')).toEqual(generic)
+    expect(rolloverPointsFor(config, 1_000_000, 'constructor')).toEqual(generic)
+  })
+
+  it('lets a model-specific entry win over the `*` entry', () => {
+    const config = resolveConfig({
+      modelThresholds: {
+        '*': { thresholdTokens: 350_000, reminderThresholdTokens: 300_000 },
+        [QWEN]: { thresholdTokens: 169_000, reminderThresholdTokens: 155_000 },
+        haiku: { thresholdTokens: 250_000, reminderThresholdTokens: 200_000 },
+      },
+    })
+    expect(rolloverPointsFor(config, 170_000, QWEN)).toEqual({
+      reminderTokens: 155_000,
+      rolloverTokens: 169_000,
+    })
+    expect(rolloverPointsFor(config, 1_000_000, 'haiku')).toEqual({
+      reminderTokens: 200_000,
+      rolloverTokens: 250_000,
+    })
+    expect(rolloverPointsFor(config, 1_000_000, 'glm')).toEqual({
+      reminderTokens: 300_000,
+      rolloverTokens: 350_000,
+    })
+  })
 })
 
 describe('modelThresholds validation', () => {
@@ -114,6 +147,20 @@ describe('per-model points in the live pipeline', () => {
   it('reminds at the entry point for the configured model, below the ratio point', async () => {
     const { ctx, agent, session } = await engineHarness(sessionId('remind-own'), {
       modelThresholds: { [MODEL]: { thresholdTokens: 30_000, reminderThresholdTokens: 20_000 } },
+    })
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+      usageResponse('answer 1', 25_000),
+      usageResponse('answer 2', 26_000),
+    ]))
+
+    await followup(agent, 'turn one')
+    await followup(agent, 'turn two')
+    expect(reminderTexts(session)).toHaveLength(1)
+  })
+
+  it('reminds at the `*` fallback point for a model with no entry of its own', async () => {
+    const { ctx, agent, session } = await engineHarness(sessionId('remind-fallback'), {
+      modelThresholds: { '*': { thresholdTokens: 30_000, reminderThresholdTokens: 20_000 } },
     })
     ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
       usageResponse('answer 1', 25_000),

@@ -234,7 +234,8 @@ export interface RolloverConfig {
   /**
    * Absolute rollover points keyed by routed model id (the session's
    * `RequestContext.model`). An entry replaces the ratio-based reminder and
-   * rollover points for that model only; every other model keeps the ratios.
+   * rollover points for that model only. The key `*` is the fallback for every
+   * model without an entry of its own; a model left out of both keeps the ratios.
    */
   modelThresholds?: Record<string, ModelThresholds>
 }
@@ -246,6 +247,12 @@ export interface ModelThresholds {
   /** Reminder point in tokens; must not exceed {@link thresholdTokens}. */
   reminderThresholdTokens: number
 }
+
+/**
+ * The {@link RolloverConfig.modelThresholds} key that covers every routed model
+ * with no entry of its own. A model-specific key always wins over this one.
+ */
+export const MODEL_THRESHOLDS_DEFAULT_KEY = '*'
 
 /** Schemastery validation for {@link RolloverConfig}. */
 export const Config: z<RolloverConfig> = z.object({
@@ -424,8 +431,9 @@ export interface RolloverPoints {
 
 /**
  * Resolve the reminder and rollover points for the model a session is routed
- * to. A model with a `modelThresholds` entry uses that entry's absolute tokens.
- * Every other model derives both points from its own context window.
+ * to. A model with a `modelThresholds` entry uses that entry's absolute tokens;
+ * a model without one uses the `*` entry when it is configured. Every other
+ * model derives both points from its own context window.
  * @param config - resolved configuration.
  * @param contextWindow - the routed model's advertised context window.
  * @param model - the routed model id, as the session's request context reports it.
@@ -438,7 +446,11 @@ export function rolloverPointsFor(
 ): RolloverPoints {
   // `hasOwn`, not a bracket read: a model named like an Object.prototype key
   // must not pick up an inherited value.
-  const entry = Object.hasOwn(config.modelThresholds, model) ? config.modelThresholds[model] : undefined
+  const own = Object.hasOwn(config.modelThresholds, model) ? config.modelThresholds[model] : undefined
+  const fallback = Object.hasOwn(config.modelThresholds, MODEL_THRESHOLDS_DEFAULT_KEY)
+    ? config.modelThresholds[MODEL_THRESHOLDS_DEFAULT_KEY]
+    : undefined
+  const entry = own ?? fallback
   if (entry !== undefined) {
     return { reminderTokens: entry.reminderThresholdTokens, rolloverTokens: entry.thresholdTokens }
   }

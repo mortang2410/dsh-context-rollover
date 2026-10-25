@@ -114,14 +114,15 @@ Responsibilities stay split (the Codex lesson):
    usage is at or above the reminder point, the reminder tells the model, by
    default, to run `/handoff-doc` and then call `new_context`. The reminder point
    is `reminderThresholdRatio` (default 0.40) of the context window, or, for a
-   model with a `modelThresholds` entry, that entry's token count. The first
+   model with a `modelThresholds` entry (its own, or the `'*'` fallback), that
+   entry's token count. The first
    reminder in a window is delivered at the next step after usage reaches the
    point. After that, a repeat is delivered no sooner than `reminderRepeatMs`
    (default 300000, five minutes) after the previous reminder, and only while
    usage stays at or above the point. A rollover opens a new window, and that
    window's first reminder is not held back by the old one. At or above the
    rollover point (`thresholdRatio`, default 0.90 of the window, or the model's
-   `modelThresholds` entry) the engine sends a separate hard reminder once per
+   `modelThresholds` entry, or the `'*'` fallback entry) the engine sends a separate hard reminder once per
    turn, `rolloverReminderMessage`, unless that step already committed a
    rollover. The journal warning is the gate-off signal: one `logger.warn` per
    turn fires only while `automaticRollover` is off. The hard reminder is not
@@ -416,9 +417,12 @@ Configuration (cordis.yml `config` on the plugin row):
           'strata/qwen-strata':
             thresholdTokens: 200000        # rollover point; the engine rolls over here only with automaticRollover on
             reminderThresholdTokens: 157286 # reminder point, repeated no sooner than reminderRepeatMs apart; must not exceed thresholdTokens
+          '*':                             # fallback for every model with no entry of its own
+            thresholdTokens: 350000
+            reminderThresholdTokens: 300000
 ```
 
-`modelThresholds` is keyed by the routed model id, the `model` field of the session's request context. A model with an entry uses its two token points. Every other model keeps `thresholdRatio` and `reminderThresholdRatio`, measured against its own window. A patch row replaces its whole config, so restate every other key when you add this one.
+`modelThresholds` is keyed by the routed model id, the `model` field of the session's request context. A model with an entry uses its two token points. The key `'*'` supplies the two points for every model that has no entry of its own; a model-specific key always wins over it. A model left out of both the `'*'` entry and any specific entry keeps `thresholdRatio` and `reminderThresholdRatio`, measured against its own window. A patch row replaces its whole config, so restate every other key when you add this one.
 
 An entry is not checked against the model's window. A `thresholdTokens` at or above the window never fires the rollover before the window fills. With `automaticRollover` off (the default), only `new_context` and `/compact` roll over; with it on, the engine also rolls over at the entry's `thresholdTokens`.
 
