@@ -93,7 +93,7 @@ const ROLLOVER_ENGINE: unique symbol = Symbol.for('dsh-context-rollover.engine')
  * @param backend - the compaction backend to test.
  * @returns true when the backend carries the engine brand.
  */
-function isRolloverEngine(backend: unknown): boolean {
+function isRolloverEngine(backend: unknown): backend is ContextRolloverEngine {
   return (backend as { readonly [ROLLOVER_ENGINE]?: boolean } | undefined)?.[ROLLOVER_ENGINE] === true
 }
 
@@ -213,8 +213,34 @@ export class ContextRolloverEngine extends CompactionEngine {
       config: this.config,
       routeOf: session => session.requestContext(),
       compactionOwnedByForeignEngine: agent => this.compactionOwnedByForeignEngine(agent),
-      rolloverPending: session => this.pendingRollovers.has(session.id),
+      servingEngineOf: agent => this.servingEngineFor(agent),
     })
+  }
+
+  /**
+   * Whether this engine holds an accepted model-requested rollover for a session
+   * that has not committed it yet. The idle watchdog asks the engine that serves
+   * the session, which is the only one holding its request.
+   * @param sessionId - the session to check.
+   * @returns true while the request is accepted and uncommitted.
+   */
+  hasPendingRollover(sessionId: string): boolean {
+    return this.pendingRollovers.has(sessionId)
+  }
+
+  /**
+   * The rollover engine that serves one agent's session: the compaction backend
+   * the agent preset roster resolves for it when that backend is a rollover
+   * engine, otherwise this engine. Its configuration sets the session's rollover
+   * point, and its pending map holds the session's accepted request.
+   * @param agent - agent whose composition to inspect.
+   * @returns the serving rollover engine, which is this engine when none serves the session.
+   */
+  private servingEngineFor(agent: Agent): ContextRolloverEngine {
+    const owned = rosterOf(this.ctx)?.serviceFor(agent, 'compaction')
+    if (owned === undefined) return this
+    const backend = concreteCompaction(owned)
+    return isRolloverEngine(backend) ? backend : this
   }
 
   /** Mount the model-facing tools. */

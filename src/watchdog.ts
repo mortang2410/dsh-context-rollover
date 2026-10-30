@@ -19,15 +19,8 @@ import { sessionEvents } from './compat.ts'
 import { rolloverPointsFor } from './config.ts'
 import type { ResolvedRolloverConfig } from './config.ts'
 import { armedFromLog } from './epoch.ts'
-import { decideIdleFire } from './idle.ts'
+import { decideIdleFire, slashGestureNames } from './idle.ts'
 import type { IdleFireInputs } from './idle.ts'
-
-/**
- * The harness's skill gesture grammar, global so that every gesture in a message
- * is collected. It is the grammar `hasSlashGesture` checks in `idle.ts`, which
- * keeps its copy private; a test asserts the two agree.
- */
-const SLASH_GESTURE_NAMES = /(?:^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g
 
 /** The host-wide claim on the agent registry: one watchdog timer per host composition. */
 const CLAIM = Symbol.for('dsh-context-rollover.idle-watchdog')
@@ -38,16 +31,24 @@ const CLAIM = Symbol.for('dsh-context-rollover.idle-watchdog')
  */
 const failedSessions = new Set<string>()
 
+/** The part of a rollover engine that serves one session, as the watchdog reads it. */
+export interface IdleServingEngine {
+  /** The engine's resolved configuration, whose rollover point applies to the session. */
+  readonly config: ResolvedRolloverConfig
+  /** Whether the engine holds an accepted model-requested rollover for the session that is not yet committed. */
+  hasPendingRollover(sessionId: string): boolean
+}
+
 /** What the engine supplies to the watchdog, because only the engine can answer these. */
 export interface IdleWatchdogOptions {
-  /** The resolved configuration, read at every decision. */
+  /** The resolved configuration of the host row: whether the watchdog is armed, and its thresholds. */
   readonly config: ResolvedRolloverConfig
   /** The routed model and context window that a session reports. */
   readonly routeOf: (session: Session) => ReturnType<Session['requestContext']>
   /** Whether a compaction backend other than this plugin's engine owns the agent's session. */
   readonly compactionOwnedByForeignEngine: (agent: Agent) => boolean
-  /** Whether this engine holds an accepted model-requested rollover for the session that is not yet committed. */
-  readonly rolloverPending: (session: Session) => boolean
+  /** The engine that serves the agent's session, whose rollover point and pending request decide the fire. */
+  readonly servingEngineOf: (agent: Agent) => IdleServingEngine
 }
 
 /** One skill as the skills service summarizes it. */
@@ -59,15 +60,6 @@ interface SkillEntry {
 /** The part of the skills service the watchdog reads. */
 interface SkillLookup {
   list(options: { cwd?: string | undefined; scope: Agent }): Promise<readonly SkillEntry[]>
-}
-
-/**
- * The skill names a message's gestures name, in the harness's grammar.
- * @param text - the configured watchdog message.
- * @returns each `/name` gesture's name, in message order.
- */
-export function slashGestureNames(text: string): string[] {
-  return [...text.matchAll(SLASH_GESTURE_NAMES)].map(match => match[1] ?? '')
 }
 
 /**
@@ -93,6 +85,8 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
   }
   const claims = registry as unknown as Record<symbol, unknown>
   let skillsAbsentLogged = false
+  /** Set when the owning fiber unloads, so a sweep still waiting on a lookup sends nothing. */
+  let disposed = false
 
   /**
    * Measure the decision inputs for one root agent. A candidate that is not
@@ -116,6 +110,7 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
     const idleMs = Date.now() - newest.time
     const measured = agent.status === 'idle' && !queuedWork && idleMs >= config.idleRolloverAfterMs
     const measurement = measured ? ctx.tokenMeter.measure(session) : undefined
+    const serving = options.servingEngineOf(agent)
     return {
       enabled: config.idleRollover,
       status: agent.status,
@@ -123,29 +118,30 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
       idleMs,
       baselineKnown: measurement !== undefined && measurement.baseline.kind !== 'none',
       totalTokens: measurement?.totalTokens ?? 0,
-      rolloverPointTokens: rolloverPointsFor(config, route.contextWindow, route.model).rolloverTokens,
-      backendOwnsRollover: options.compactionOwnedByForeignEngine(agent),
+      rolloverPointTokens: rolloverPointsFor(serving.config, route.contextWindow, route.model).rolloverTokens,
+      foreignBackendOwnsCompaction: options.compactionOwnedByForeignEngine(agent),
       newContextAvailable: ctx.tools.get('new_context', agent) !== undefined,
       skillAvailable,
-      rolloverPending: options.rolloverPending(session),
+      rolloverPending: serving.hasPendingRollover(session.id),
       epochArmed: armedFromLog(session, config.idleRolloverMessage),
     }
   }
 
   /**
    * Whether the skill named by the message's gesture is available to the agent.
-   * With no skills service mounted the check passes, and one info line says so.
+   * With no skills service mounted the check fails closed: no skill body would be
+   * injected, so the attempt is not spent, and one info line says so.
    * @param agent - the agent whose skill scope is consulted.
-   * @returns true when a gesture names a user-invocable skill, or no skills service exists.
+   * @returns true when a gesture names a user-invocable skill of a mounted service.
    */
   const skillResolves = async (agent: Agent): Promise<boolean> => {
     const skills = ctx.get('skills') as unknown as SkillLookup | undefined
     if (skills === undefined) {
       if (!skillsAbsentLogged) {
         skillsAbsentLogged = true
-        ctx.logger.info('context rollover (idle watchdog): no skills service is mounted, so the skill check passes')
+        ctx.logger.info('context rollover (idle watchdog): no skills service is mounted, so no session is woken')
       }
-      return true
+      return false
     }
     const names = slashGestureNames(config.idleRolloverMessage)
     const summaries = await skills.list({ cwd: agent.session.header.cwd, scope: agent })
@@ -177,23 +173,30 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
 
   /**
    * Decide one root agent. The cheap gates run first, and the skill lookup is
-   * awaited only when those gates would fire. The decision is then taken again,
-   * with no await between it and the send.
+   * awaited only when those gates would fire. A sweep can be waiting on that
+   * lookup while an earlier sweep fires or fails, so the disposal flag and the
+   * failed-session set are read again after the await, and the decision is taken
+   * again with no await between it and the send.
    * @param agent - a root agent of the registry.
    */
   const consider = async (agent: Agent): Promise<void> => {
-    if (failedSessions.has(agent.session.id)) return
+    if (disposed || failedSessions.has(agent.session.id)) return
     const precheck = inputsFor(agent, true)
     if (precheck === undefined || !decideIdleFire(config, precheck).fire) return
     const skillAvailable = await skillResolves(agent)
+    if (disposed || failedSessions.has(agent.session.id)) return
     const inputs = inputsFor(agent, skillAvailable)
     if (inputs === undefined || !decideIdleFire(config, inputs).fire) return
     fire(agent)
   }
 
-  /** One tick: every root agent, each isolated so one failure skips only that session. */
+  /**
+   * One tick: every root agent, each isolated so one failure skips only that
+   * session. The walk stops once the owning fiber has unloaded.
+   */
   const sweep = async (): Promise<void> => {
     for (const agent of registry.roots()) {
+      if (disposed) return
       try {
         await consider(agent)
       } catch (error: unknown) {
@@ -217,6 +220,7 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
     const timer = setInterval(() => { void sweep() }, config.idleRolloverTickMs)
     timer.unref()
     return () => {
+      disposed = true
       clearInterval(timer)
       delete claims[CLAIM]
     }

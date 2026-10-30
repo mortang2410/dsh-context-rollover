@@ -11,6 +11,7 @@
     "@deepseek-ai/dsh-compaction-tool-result-pruner": "latest",
     "@deepseek-ai/dsh-home-paths": "latest",
     "@deepseek-ai/dsh-llm": "latest",
+    "@deepseek-ai/dsh-scope": "next",
     "@deepseek-ai/dsh-session": "latest",
     "@deepseek-ai/dsh-system-prompt": "latest",
     "@deepseek-ai/dsh-token-meter": "latest",

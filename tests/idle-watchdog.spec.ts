@@ -26,10 +26,9 @@ import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import type { RolloverConfig } from '../src/config.ts'
-import { hasSlashGesture } from '../src/idle.ts'
+import { hasSlashGesture, slashGestureNames } from '../src/idle.ts'
 import { ContextRolloverEngine } from '../src/index.ts'
 import { countRollovers } from '../src/rollover.ts'
-import { slashGestureNames } from '../src/watchdog.ts'
 import {
   CONTEXT_WINDOW,
   followup,
@@ -101,12 +100,14 @@ function provideRoster(ctx: Context, roster: { serviceFor(agent: unknown, name: 
   (ctx as unknown as { provide(name: string, value: unknown): void }).provide('agentPresets', roster)
 }
 
-/** Options for one rig: a session id, optional config, roster, and adapter. */
+/** Options for one rig: a session id, optional config, roster, adapter, and whether the skill is mounted. */
 interface RigOptions {
   readonly id: string
   readonly config?: Partial<RolloverConfig>
   readonly roster?: { serviceFor(agent: unknown, name: string): unknown }
   readonly adapter?: LlmAdapter
+  /** Mounted by default, because the watchdog's skill gate fails closed without it. */
+  readonly skill?: boolean
 }
 
 /**
@@ -117,6 +118,7 @@ interface RigOptions {
 async function rig(options: RigOptions) {
   const ctx = await mount()
   if (options.roster !== undefined) provideRoster(ctx, options.roster)
+  if (options.skill !== false) await mountRolloverSkill(ctx)
   ctx.llm.registerAdapter(['mock'], options.adapter ?? new ScriptedAdapter([usageResponse('answer', ABOVE_FLOOR)]))
   const engine = new ContextRolloverEngine(ctx, await configFor(options.config))
   const agent = await ctx.agentLoop.create(SessionId(options.id), { provider: MODEL, model: MODEL })
@@ -332,7 +334,7 @@ describe('idle rollover watchdog', () => {
   })
 
   it('sends nothing when the skill named by the message does not resolve, and fires once it does', async () => {
-    const { ctx, agent, session } = await rig({ id: 'no-skill' })
+    const { ctx, agent, session } = await rig({ id: 'no-skill', skill: false })
     await ctx.plugin(SkillRegistry)
     await followup(agent, 'first question')
 
@@ -415,6 +417,7 @@ describe('idle rollover watchdog', () => {
     const ctx = await mount()
     // A routed context window is needed before any candidate is measured, so the model must resolve.
     ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([usageResponse('answer', ABOVE_FLOOR)]))
+    await mountRolloverSkill(ctx)
     const fiber = ctx.isolate('compaction').plugin(ContextRolloverEngine, await configFor())
     await fiber
     const live = await ctx.agentLoop.create(SessionId('live-before-dispose'), { provider: MODEL, model: MODEL })
@@ -496,6 +499,8 @@ describe('idle rollover watchdog', () => {
     const foreign = new copy.ContextRolloverEngine(other.isolate('compaction'), {
       notesDir: await tempNotesDir(),
       idleRollover: false,
+      // The watchdog reads the point from the engine that serves the session, and its default sits below the measured usage.
+      modelThresholds: { [MODEL]: { ...FAR_POINT } },
     })
     expect(foreign instanceof ContextRolloverEngine).toBe(false)
 
@@ -557,7 +562,7 @@ describe('idle rollover watchdog', () => {
   it('treats a message with no slash gesture as skill-unavailable at every tick: it warns once and never sends', async () => {
     const ctx = await mount()
     ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([usageResponse('answer', ABOVE_FLOOR)]))
-    // Without a skills service the skill check passes, so the service must be mounted for the gate to decide.
+    // The skills service is mounted, so the gate decides on the missing gesture rather than on a missing service.
     await mountRolloverSkill(ctx)
     // The engine warns at construction, so the spy is installed before it is built.
     const warn = vi.spyOn(ctx.logger, 'warn')
@@ -582,13 +587,179 @@ describe('idle rollover watchdog', () => {
   })
 
   it('fires the same session shape once the message carries a slash gesture naming the same skill', async () => {
-    const { ctx, agent, session } = await rig({ id: 'gesture-control', config: { idleRolloverMessage: '/rollover' } })
-    await mountRolloverSkill(ctx)
+    const { agent, session } = await rig({ id: 'gesture-control', config: { idleRolloverMessage: '/rollover' } })
     await followup(agent, 'first question')
 
     await advance(AFTER_MS + TICK_MS)
     await agent.whenIdle()
     expect(sendsOf(session, '/rollover')).toHaveLength(1)
+  })
+
+  it('sends nothing when no skills service is mounted, and fires once the rollover skill is mounted', async () => {
+    const { ctx, agent, session } = await rig({ id: 'no-service', skill: false })
+    expect(ctx.get('skills')).toBeUndefined()
+    const info = vi.spyOn(ctx.logger, 'info')
+    await followup(agent, 'first question')
+
+    await advance(AFTER_MS + TICK_MS)
+    await agent.whenIdle()
+    expect(rolloverSends(session)).toHaveLength(0)
+    expect(info.mock.calls.filter(([line]) => String(line).includes('no skills service'))).toHaveLength(1)
+
+    await mountRolloverSkill(ctx)
+    await advance(TICK_MS)
+    await agent.whenIdle()
+    expect(rolloverSends(session)).toHaveLength(1)
+  })
+
+  it('takes the rollover point from the engine that serves the session, not from the host row', async () => {
+    let preset: ContextRolloverEngine | undefined
+    const { ctx, agent, session } = await rig({
+      id: 'served-by-preset',
+      roster: { serviceFor: () => preset },
+      config: { modelSurface: 'always' },
+    })
+    await followup(agent, 'first question')
+    const total = ctx.tokenMeter.measure(session).totalTokens
+
+    // The preset's point sits just below the measured usage; the host row's point is far above it.
+    const presetEngine = new ContextRolloverEngine(ctx.isolate('compaction'), await configFor({
+      modelThresholds: { [MODEL]: { thresholdTokens: total - 1, reminderThresholdTokens: total - 1 } },
+    }))
+    preset = presetEngine
+    await advance(AFTER_MS + TICK_MS)
+    await agent.whenIdle()
+    expect(rolloverSends(session)).toHaveLength(0)
+
+    // Control: lifting the preset's point above the usage lets the same session fire.
+    const points = presetEngine.config.modelThresholds[MODEL]
+    if (points === undefined) throw new Error('the test model has no rollover entry')
+    points.thresholdTokens = total + 1
+    await advance(TICK_MS)
+    await agent.whenIdle()
+    expect(rolloverSends(session)).toHaveLength(1)
+  })
+
+  it('sends nothing while the preset engine serving the session holds an uncommitted new_context request, and fires once a pre-step commits it', async () => {
+    // Seven plain answers, one reporting usage above the floor, then the turn that commits the request, also above the floor.
+    const adapter = new ScriptedAdapter([
+      ...Array.from({ length: 7 }, (_unused, index) => textResponse(`answer ${index}`)),
+      usageResponse('answer', ABOVE_FLOOR),
+      usageResponse('continued', ABOVE_FLOOR),
+    ])
+    let preset: ContextRolloverEngine | undefined
+    const { ctx, engine, agent, session } = await rig({
+      id: 'preset-pending',
+      adapter,
+      roster: { serviceFor: () => preset },
+    })
+    // The preset owns the session's compaction and its model-facing tools, so it holds the request and sets the point.
+    const presetEngine = new ContextRolloverEngine(
+      ctx.isolate('compaction'),
+      await configFor({ handoffOnly: true, modelSurface: 'always' }),
+    )
+    preset = presetEngine
+    await seedExchanges(agent, 7)
+    await followup(agent, 'last question')
+
+    // Called outside a turn, so no turn-stop commit runs and the request stays pending on the preset.
+    const accepted = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: ToolCallId('pending-preset-1'),
+      name: 'new_context',
+      arguments: { handoff_path: await freshHandoff() },
+      agent,
+    })
+    expect(accepted.isError).toBeFalsy()
+    expect(accepted.value).toMatchObject({ accepted: true })
+    expect(pendingOf(presetEngine).has(session.id)).toBe(true)
+    // The host row holds no request, so a read of only the host's map would see nothing to wait for.
+    expect(pendingOf(engine).has(session.id)).toBe(false)
+    // Above the floor, so the only gate left to hold the fire is the pending request.
+    expect(ctx.tokenMeter.measure(session).totalTokens).toBeGreaterThan(FLOOR)
+
+    await advance(AFTER_MS + TICK_MS)
+    await agent.whenIdle()
+    expect(rolloverSends(session)).toHaveLength(0)
+    expect(pendingOf(presetEngine).has(session.id)).toBe(true)
+
+    // The commit is a real turn: the preset's pre-step crosses the pending request before the model is asked.
+    const rolloversBefore = countRollovers(session)
+    await followup(agent, 'continue from the handoff')
+    expect(countRollovers(session)).toBe(rolloversBefore + 1)
+    expect(pendingOf(presetEngine).has(session.id)).toBe(false)
+
+    // Control: the commit lifted the only gate that held the fire.
+    await advance(AFTER_MS + TICK_MS)
+    await agent.whenIdle()
+    expect(rolloverSends(session)).toHaveLength(1)
+  })
+
+  it('sends nothing when the engine is disposed while a skill lookup is still pending', async () => {
+    const ctx = await mount()
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([usageResponse('answer', ABOVE_FLOOR)]))
+    await mountRolloverSkill(ctx)
+    const fiber = ctx.isolate('compaction').plugin(ContextRolloverEngine, await configFor())
+    await fiber
+    const agent = await ctx.agentLoop.create(SessionId('disposed-mid-lookup'), { provider: MODEL, model: MODEL })
+    await followup(agent, 'first question')
+
+    const skills = ctx.get('skills') as unknown as { list(options: unknown): Promise<unknown> }
+    const real = skills.list.bind(skills)
+    const release = deferred()
+    const lookup = vi.spyOn(skills, 'list').mockImplementation(async options => {
+      await release.promise
+      return real(options)
+    })
+
+    await advance(AFTER_MS + TICK_MS)
+    // Positive control: a tick reached the lookup, so the disposal below lands while a sweep waits on it.
+    expect(lookup).toHaveBeenCalled()
+
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    await fiber.dispose()
+    release.resolve()
+    await flush()
+    await agent.whenIdle()
+    expect(rolloverSends(agent.session)).toHaveLength(0)
+    // The disposed sweep stops at its flag. Without it, the reads after the lookup hit the inactive context and log a skip.
+    expect(warn.mock.calls.filter(([line]) => String(line).includes('skipped session'))).toHaveLength(0)
+  })
+
+  it('does not send from a sweep waiting on a lookup after an earlier sweep failed to send', async () => {
+    const { ctx, agent, session } = await rig({ id: 'overlap' })
+    await followup(agent, 'first question')
+
+    const skills = ctx.get('skills') as unknown as { list(options: unknown): Promise<unknown> }
+    const real = skills.list.bind(skills)
+    const releases: Array<() => void> = []
+    vi.spyOn(skills, 'list').mockImplementation(async options => {
+      const gate = deferred()
+      releases.push(gate.resolve)
+      await gate.promise
+      return real(options)
+    })
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    const send = vi.spyOn(agent, 'followup').mockImplementation(() => {
+      throw new Error('boom')
+    })
+
+    // The first tick past the threshold and the next one each reach the lookup and wait there.
+    await advance(AFTER_MS + TICK_MS)
+    expect(releases).toHaveLength(2)
+
+    // The first sweep resumes; its send throws before anything is queued, so the session is remembered as failed.
+    releases[0]?.()
+    await flush()
+    expect(send).toHaveBeenCalledTimes(1)
+
+    // The second sweep resumes after that failure and must not send again.
+    releases[1]?.()
+    await flush()
+    await agent.whenIdle()
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(rolloverSends(session)).toHaveLength(0)
+    expect(warn.mock.calls.filter(([line]) => String(line).includes('failed'))).toHaveLength(1)
   })
 
   it('reads the skill gesture the same way the decision does, in message order', () => {

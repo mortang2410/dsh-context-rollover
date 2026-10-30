@@ -7,7 +7,7 @@
  * @module dsh-context-rollover/epoch
  */
 
-import type { Session, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { sessionEvents } from './compat.ts'
 import { ROLLOVER_PROVIDER } from './rollover.ts'
 
@@ -17,9 +17,11 @@ export interface CommittedRollovers {
   readonly count: number
   /**
    * Log position of the newest committed `compaction/end`. Absent when no
-   * rollover has committed.
+   * rollover has committed. A plain number, because the published host line
+   * does not export the branded sequence type, and a branded position is
+   * assignable to it.
    */
-  readonly newestEndSeq?: SessionSeq
+  readonly newestEndSeq?: number
 }
 
 /**
@@ -37,7 +39,7 @@ export function committedRollovers(session: Session): CommittedRollovers {
   const started = new Set<string>()
   const summarized = new Set<string>()
   const committed = new Set<string>()
-  let newestEndSeq: SessionSeq | undefined
+  let newestEndSeq: number | undefined
   for (const event of sessionEvents(session)) {
     if (event.type === 'compaction/start') {
       started.add(event.data.compactionId)

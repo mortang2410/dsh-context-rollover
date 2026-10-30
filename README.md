@@ -221,6 +221,11 @@ Accepted residuals:
   plugin in place releases the slot, and the replacement claims it.
 - A session idle at or above its own rollover point gets no message. It keeps
   its large context until its next turn.
+- The checks prove that `new_context` resolves for the session and that the skill
+  named by the message is registered and user-invocable. They do not prove that
+  an execution policy admits the model's `new_context` call, or that the listener
+  that injects the skill body is mounted in this composition. If either is
+  missing, the attempt for that stretch is spent without a rollover.
 - Each message resets the auto-continue plugin's consecutive-recovery counter,
   because that plugin counts any user message it did not send as human
   intervention. One message therefore grants that plugin one fresh recovery
@@ -316,6 +321,11 @@ differences are bridged in `src/compat.ts`:
 - the replacement operation as `{ startSeq, endSeq }` (newer line) or
   `{ start, end }`, probed once per process because each line rejects the
   other's field names.
+
+The plugin also requires the host to provide `@deepseek-ai/dsh-scope` as a peer:
+the idle watchdog reads `scopeOf` from it to tell the host root from a scoped
+composition. Every host that mounts preset scopes already provides it, and the
+compatibility probe installs it from the `latest` tag.
 
 Note the published `@deepseek-ai/dsh-*` packages are a *partial* mirror: some
 of their peers reference packages that were never published publicly, so a
