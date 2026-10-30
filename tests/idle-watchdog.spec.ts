@@ -762,4 +762,37 @@ describe('idle rollover watchdog', () => {
       expect(hasSlashGesture(text)).toBe(slashGestureNames(text).length > 0)
     },
   )
+
+  it('prints the armed line once to the console, with the resolved values', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const { engine } = await rig({ id: 'armed-line' })
+      const { idleRolloverAfterMs, idleRolloverTokens, idleRolloverTickMs } = engine.config
+      const armed = info.mock.calls
+        .map(call => String(call[0]))
+        .filter(line => line.includes('idle watchdog') && line.includes('armed;'))
+      expect(armed).toEqual([
+        'context rollover (idle watchdog): armed; a session idle for '
+        + `${idleRolloverAfterMs} ms above ${idleRolloverTokens} tokens is woken, checked every ${idleRolloverTickMs} ms`,
+      ])
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('prints one sent line to the console when it fires', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const { agent, session } = await rig({ id: 'sent-line' })
+      await followup(agent, 'first question')
+      await advance(AFTER_MS + TICK_MS)
+      await agent.whenIdle()
+      const sent = info.mock.calls
+        .map(call => String(call[0]))
+        .filter(line => line.includes('sent /rollover to session'))
+      expect(sent).toEqual([`context rollover (idle watchdog): sent /rollover to session ${session.id}`])
+    } finally {
+      info.mockRestore()
+    }
+  })
 })

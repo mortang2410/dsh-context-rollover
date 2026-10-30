@@ -124,7 +124,7 @@ Responsibilities stay split (the Codex lesson):
    rollover point (`thresholdRatio`, default 0.90 of the window, or the model's
    `modelThresholds` entry, or the `'*'` fallback entry) the engine sends a separate hard reminder once per
    turn, `rolloverReminderMessage`, unless that step already committed a
-   rollover. The journal warning is the gate-off signal: one `logger.warn` per
+   rollover. The warning is the gate-off signal: one `logger.warn` per
    turn fires only while `automaticRollover` is off. The hard reminder is not
    gated on that key: the model reads it whenever usage is at or above the
    rollover point, in both gate states, and while the gate is on it is the only

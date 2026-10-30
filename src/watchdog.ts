@@ -74,13 +74,30 @@ interface SkillLookup {
 export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): void {
   const { config } = options
   if (!config.idleRollover) return
+  /**
+   * Report one watchdog event to the operator. The line goes to the context
+   * logger and to the console, because the host keeps logger messages in a
+   * memory buffer with no stdout sink: a journal that records the host's console
+   * would otherwise never show the armed line or a fire.
+   * @param level - the logger method the line uses.
+   * @param line - the message.
+   */
+  const report = (level: 'info' | 'warn', line: string): void => {
+    if (level === 'warn') {
+      ctx.logger.warn(line)
+      console.warn(line)
+      return
+    }
+    ctx.logger.info(line)
+    console.info(line)
+  }
   if (scopeOf(ctx) !== undefined) {
-    ctx.logger.info('context rollover (idle watchdog): this is a scoped composition, so no watchdog starts here')
+    report('info', 'context rollover (idle watchdog): this is a scoped composition, so no watchdog starts here')
     return
   }
   const registry = ctx.get('agents')
   if (registry === undefined) {
-    ctx.logger.info('context rollover (idle watchdog): no agent registry is mounted, so no watchdog starts')
+    report('info', 'context rollover (idle watchdog): no agent registry is mounted, so no watchdog starts')
     return
   }
   const claims = registry as unknown as Record<symbol, unknown>
@@ -141,7 +158,7 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
     if (skills === undefined) {
       if (!skillsAbsentLogged) {
         skillsAbsentLogged = true
-        ctx.logger.info('context rollover (idle watchdog): no skills service is mounted, so no session is woken')
+        report('info', 'context rollover (idle watchdog): no skills service is mounted, so no session is woken')
       }
       return false
     }
@@ -167,10 +184,10 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
     } catch (error: unknown) {
       if (session.seq === before) failedSessions.add(session.id)
       const reason = error instanceof Error ? error.message : String(error)
-      ctx.logger.warn(`context rollover (idle watchdog): sending to session ${session.id} failed: ${reason}`)
+      report('warn', `context rollover (idle watchdog): sending to session ${session.id} failed: ${reason}`)
       return
     }
-    ctx.logger.info(`context rollover (idle watchdog): sent ${config.idleRolloverMessage} to session ${session.id}`)
+    report('info', `context rollover (idle watchdog): sent ${config.idleRolloverMessage} to session ${session.id}`)
   }
 
   /**
@@ -214,7 +231,7 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
           await consider(agent)
         } catch (error: unknown) {
           const reason = error instanceof Error ? error.message : String(error)
-          ctx.logger.warn(`context rollover (idle watchdog): skipped session ${agent.session.id} this tick: ${reason}`)
+          report('warn', `context rollover (idle watchdog): skipped session ${agent.session.id} this tick: ${reason}`)
         }
       }
     } finally {
@@ -224,11 +241,12 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
 
   ctx.effect(() => {
     if (claims[CLAIM] !== undefined) {
-      ctx.logger.info('context rollover (idle watchdog): another watchdog already holds this host, so none starts')
+      report('info', 'context rollover (idle watchdog): another watchdog already holds this host, so none starts')
       return () => {}
     }
     claims[CLAIM] = true
-    ctx.logger.info(
+    report(
+      'info',
       'context rollover (idle watchdog): armed; a session idle for '
       + `${config.idleRolloverAfterMs} ms above ${config.idleRolloverTokens} tokens is woken, `
       + `checked every ${config.idleRolloverTickMs} ms`,
