@@ -46,6 +46,7 @@ import type { RolloverSelection } from './rollover.ts'
 import { checkpointCarriesNothing, replacementWindowNumber } from './checkpoint.ts'
 import { createRolloverTools } from './tools.ts'
 import type { PendingRollover } from './state.ts'
+import { startIdleWatchdog } from './watchdog.ts'
 
 /** Cordis plugin name used by loader diagnostics and message-source attribution. */
 export const name = PLUGIN_NAME
@@ -76,6 +77,24 @@ function rosterOf(ctx: Context): AgentPresetRoster | undefined {
 /** Resolve a Cordis traced service proxy to the concrete registered instance. */
 function concreteCompaction(engine: CompactionEngine): CompactionEngine {
   return (engine as CompactionEngine & { [symbols.original]?: CompactionEngine })[symbols.original] ?? engine
+}
+
+/**
+ * The brand every engine instance carries. It is a `Symbol.for` key, so a
+ * backend built by another copy of this module carries the same brand.
+ */
+const ROLLOVER_ENGINE: unique symbol = Symbol.for('dsh-context-rollover.engine')
+
+/**
+ * Whether a compaction backend is a rollover engine, whichever copy of this
+ * module created it. The check reads the brand instead of using `instanceof`,
+ * because the host row and a preset row load separate module copies (see
+ * rollover.ts).
+ * @param backend - the compaction backend to test.
+ * @returns true when the backend carries the engine brand.
+ */
+function isRolloverEngine(backend: unknown): boolean {
+  return (backend as { readonly [ROLLOVER_ENGINE]?: boolean } | undefined)?.[ROLLOVER_ENGINE] === true
 }
 
 /**
@@ -159,6 +178,9 @@ export class ContextRolloverEngine extends CompactionEngine {
   /** Resolved and validated configuration. */
   readonly config: ResolvedRolloverConfig
 
+  /** The engine brand, read by {@link isRolloverEngine}. */
+  readonly [ROLLOVER_ENGINE] = true
+
   private readonly pendingRollovers = new Map<string, PendingRollover>()
   /** Turns that already logged the above-rollover-point warning. */
   private readonly pressureWarnedTurns = new Set<string>()
@@ -187,6 +209,12 @@ export class ContextRolloverEngine extends CompactionEngine {
     this.registerTools()
     this.registerGuidance()
     this.registerLifecycle()
+    startIdleWatchdog(ctx, {
+      config: this.config,
+      routeOf: session => session.requestContext(),
+      compactionOwnedByForeignEngine: agent => this.compactionOwnedByForeignEngine(agent),
+      rolloverPending: session => this.pendingRollovers.has(session.id),
+    })
   }
 
   /** Mount the model-facing tools. */
@@ -658,6 +686,21 @@ export class ContextRolloverEngine extends CompactionEngine {
     if (roster === undefined) return false
     const owned = roster.serviceFor(agent, 'compaction')
     return owned !== undefined && concreteCompaction(owned) !== concreteCompaction(this)
+  }
+
+  /**
+   * Whether a compaction backend that is not a rollover engine owns the agent's
+   * session. This is the watchdog's inverse of {@link compactionOwnedElsewhere}:
+   * it asks by class, so a session served by another copy or instance of this
+   * engine is not foreign.
+   * @param agent - agent whose composition to inspect.
+   * @returns true when a backend that is not a rollover engine owns the session.
+   */
+  private compactionOwnedByForeignEngine(agent: Agent): boolean {
+    const roster = rosterOf(this.ctx)
+    if (roster === undefined) return false
+    const owned = roster.serviceFor(agent, 'compaction')
+    return owned !== undefined && !isRolloverEngine(concreteCompaction(owned))
   }
 
   /**
