@@ -726,40 +726,30 @@ describe('idle rollover watchdog', () => {
     expect(warn.mock.calls.filter(([line]) => String(line).includes('skipped session'))).toHaveLength(0)
   })
 
-  it('does not send from a sweep waiting on a lookup after an earlier sweep failed to send', async () => {
-    const { ctx, agent, session } = await rig({ id: 'overlap' })
+  it('keeps one sweep in flight while a skill lookup is pending, and sends once when it is released', async () => {
+    const { ctx, agent, session } = await rig({
+      id: 'one-in-flight',
+      config: { idleRolloverTickMs: 1, idleRolloverAfterMs: 1 },
+    })
     await followup(agent, 'first question')
 
     const skills = ctx.get('skills') as unknown as { list(options: unknown): Promise<unknown> }
     const real = skills.list.bind(skills)
-    const releases: Array<() => void> = []
-    vi.spyOn(skills, 'list').mockImplementation(async options => {
-      const gate = deferred()
-      releases.push(gate.resolve)
-      await gate.promise
+    const release = deferred()
+    const lookup = vi.spyOn(skills, 'list').mockImplementation(async options => {
+      await release.promise
       return real(options)
     })
-    const warn = vi.spyOn(ctx.logger, 'warn')
-    const send = vi.spyOn(agent, 'followup').mockImplementation(() => {
-      throw new Error('boom')
-    })
 
-    // The first tick past the threshold and the next one each reach the lookup and wait there.
-    await advance(AFTER_MS + TICK_MS)
-    expect(releases).toHaveLength(2)
+    // Five one-millisecond ticks elapse while the first lookup waits.
+    await advance(5)
+    // One lookup in the window. The call is also the control that a tick reached the lookup.
+    expect(lookup).toHaveBeenCalledTimes(1)
 
-    // The first sweep resumes; its send throws before anything is queued, so the session is remembered as failed.
-    releases[0]?.()
-    await flush()
-    expect(send).toHaveBeenCalledTimes(1)
-
-    // The second sweep resumes after that failure and must not send again.
-    releases[1]?.()
+    release.resolve()
     await flush()
     await agent.whenIdle()
-    expect(send).toHaveBeenCalledTimes(1)
-    expect(rolloverSends(session)).toHaveLength(0)
-    expect(warn.mock.calls.filter(([line]) => String(line).includes('failed'))).toHaveLength(1)
+    expect(rolloverSends(session)).toHaveLength(1)
   })
 
   it('reads the skill gesture the same way the decision does, in message order', () => {

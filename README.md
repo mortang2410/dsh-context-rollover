@@ -325,7 +325,7 @@ differences are bridged in `src/compat.ts`:
 The plugin also requires the host to provide `@deepseek-ai/dsh-scope` as a peer:
 the idle watchdog reads `scopeOf` from it to tell the host root from a scoped
 composition. Every host that mounts preset scopes already provides it, and the
-compatibility probe installs it from the `latest` tag.
+compatibility probe installs it from the `next` tag.
 
 Note the published `@deepseek-ai/dsh-*` packages are a *partial* mirror: some
 of their peers reference packages that were never published publicly, so a

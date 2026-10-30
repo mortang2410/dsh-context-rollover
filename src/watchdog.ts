@@ -87,6 +87,8 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
   let skillsAbsentLogged = false
   /** Set when the owning fiber unloads, so a sweep still waiting on a lookup sends nothing. */
   let disposed = false
+  /** Set while a sweep runs, so a tick that arrives during a slow skill lookup is skipped. */
+  let sweeping = false
 
   /**
    * Measure the decision inputs for one root agent. A candidate that is not
@@ -173,10 +175,13 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
 
   /**
    * Decide one root agent. The cheap gates run first, and the skill lookup is
-   * awaited only when those gates would fire. A sweep can be waiting on that
-   * lookup while an earlier sweep fires or fails, so the disposal flag and the
-   * failed-session set are read again after the await, and the decision is taken
-   * again with no await between it and the send.
+   * awaited only when those gates would fire. The second decision re-evaluates
+   * every gate against the state after the await, with no await between it and
+   * the send, and the disposal flag and the failed-session set are read in that
+   * pass too. With one sweep in flight no other send can run during the await,
+   * so the failed-session read cannot change the outcome today. It stays because
+   * it costs nothing, and it keeps a later change to the sweep serialization from
+   * sending to a session whose send already failed.
    * @param agent - a root agent of the registry.
    */
   const consider = async (agent: Agent): Promise<void> => {
@@ -192,17 +197,28 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
 
   /**
    * One tick: every root agent, each isolated so one failure skips only that
-   * session. The walk stops once the owning fiber has unloaded.
+   * session. At most one sweep runs at a time: a tick that arrives while a sweep
+   * still awaits a skill lookup is skipped, so a slow lookup cannot stack
+   * concurrent lookups. The walk stops once the owning fiber has unloaded. The
+   * flag is cleared in a finally, because an error that escapes the walk (the
+   * registry read sits outside the per-session isolation) must not leave the
+   * watchdog skipping every later tick.
    */
   const sweep = async (): Promise<void> => {
-    for (const agent of registry.roots()) {
-      if (disposed) return
-      try {
-        await consider(agent)
-      } catch (error: unknown) {
-        const reason = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(`context rollover (idle watchdog): skipped session ${agent.session.id} this tick: ${reason}`)
+    if (sweeping) return
+    sweeping = true
+    try {
+      for (const agent of registry.roots()) {
+        if (disposed) return
+        try {
+          await consider(agent)
+        } catch (error: unknown) {
+          const reason = error instanceof Error ? error.message : String(error)
+          ctx.logger.warn(`context rollover (idle watchdog): skipped session ${agent.session.id} this tick: ${reason}`)
+        }
       }
+    } finally {
+      sweeping = false
     }
   }
 
