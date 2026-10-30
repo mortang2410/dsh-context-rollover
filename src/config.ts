@@ -238,6 +238,31 @@ export interface RolloverConfig {
    * model without an entry of its own; a model left out of both keeps the ratios.
    */
   modelThresholds?: Record<string, ModelThresholds>
+  /**
+   * Arm the idle rollover watchdog. Defaults to `false`, and off mounts no timer
+   * and enumerates no session.
+   */
+  idleRollover?: boolean
+  /**
+   * Idle time, in milliseconds, a session must have had before the watchdog may
+   * fire. The threshold is inclusive. Defaults to `2400000` (40 minutes).
+   */
+  idleRolloverAfterMs?: number
+  /**
+   * Measured context size, in tokens, a session must be strictly above before the
+   * watchdog may fire. Defaults to `90000`.
+   */
+  idleRolloverTokens?: number
+  /**
+   * Exact text of the watchdog message. It must carry a `/name` skill gesture to
+   * inject the rollover skill body. Defaults to `/rollover`.
+   */
+  idleRolloverMessage?: string
+  /**
+   * How often the watchdog evaluates candidate sessions, in milliseconds. At most
+   * `2147483647`, the longest delay a Node timer accepts. Defaults to `60000`.
+   */
+  idleRolloverTickMs?: number
 }
 
 /** Absolute token points for one routed model, replacing its ratio-based points. */
@@ -253,6 +278,9 @@ export interface ModelThresholds {
  * with no entry of its own. A model-specific key always wins over this one.
  */
 export const MODEL_THRESHOLDS_DEFAULT_KEY = '*'
+
+/** The longest delay, in milliseconds, a Node timer accepts; a longer delay is set to 1 ms. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 /** Schemastery validation for {@link RolloverConfig}. */
 export const Config: z<RolloverConfig> = z.object({
@@ -277,6 +305,11 @@ export const Config: z<RolloverConfig> = z.object({
     thresholdTokens: z.number().step(1).min(1),
     reminderThresholdTokens: z.number().step(1).min(1),
   })),
+  idleRollover: z.boolean(),
+  idleRolloverAfterMs: z.number().step(1).min(1),
+  idleRolloverTokens: z.number().step(1).min(1),
+  idleRolloverMessage: z.string(),
+  idleRolloverTickMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS),
 })
 
 /** Resolved and validated rollover configuration. */
@@ -306,6 +339,16 @@ export interface ResolvedRolloverConfig {
   readonly modelSurface: 'auto' | 'always'
   /** Absolute points per routed model id; an empty map keeps the ratios for every model. */
   readonly modelThresholds: Readonly<Record<string, ModelThresholds>>
+  /** Arm the idle rollover watchdog; off mounts no timer. */
+  readonly idleRollover: boolean
+  /** Idle time, in milliseconds, a session must have had before a watchdog fire. */
+  readonly idleRolloverAfterMs: number
+  /** Measured tokens a session must be strictly above before a watchdog fire. */
+  readonly idleRolloverTokens: number
+  /** Exact text of the watchdog message. */
+  readonly idleRolloverMessage: string
+  /** How often the watchdog evaluates candidate sessions, in milliseconds. */
+  readonly idleRolloverTickMs: number
 }
 
 /** Reject a ratio that cannot represent a fraction of a context window. */
@@ -401,6 +444,35 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
       )
     }
   }
+  const idleRollover = config.idleRollover ?? false
+  if (typeof idleRollover !== 'boolean') {
+    throw new TypeError(`context-rollover: idleRollover must be a boolean, got ${String(idleRollover)}`)
+  }
+  const idleRolloverAfterMs = config.idleRolloverAfterMs ?? 2_400_000
+  if (!Number.isSafeInteger(idleRolloverAfterMs) || idleRolloverAfterMs <= 0) {
+    throw new TypeError(
+      `context-rollover: idleRolloverAfterMs must be a positive integer, got ${String(idleRolloverAfterMs)}`,
+    )
+  }
+  const idleRolloverTokens = config.idleRolloverTokens ?? 90_000
+  if (!Number.isSafeInteger(idleRolloverTokens) || idleRolloverTokens <= 0) {
+    throw new TypeError(
+      `context-rollover: idleRolloverTokens must be a positive integer, got ${String(idleRolloverTokens)}`,
+    )
+  }
+  const idleRolloverMessage = config.idleRolloverMessage ?? '/rollover'
+  validateNonEmptyString('idleRolloverMessage', idleRolloverMessage)
+  const idleRolloverTickMs = config.idleRolloverTickMs ?? 60_000
+  if (!Number.isSafeInteger(idleRolloverTickMs) || idleRolloverTickMs <= 0) {
+    throw new TypeError(
+      `context-rollover: idleRolloverTickMs must be a positive integer, got ${String(idleRolloverTickMs)}`,
+    )
+  }
+  if (idleRolloverTickMs > MAX_TIMER_DELAY_MS) {
+    throw new TypeError(
+      `context-rollover: idleRolloverTickMs must be at most ${MAX_TIMER_DELAY_MS}, got ${idleRolloverTickMs}`,
+    )
+  }
   return {
     thresholdRatio,
     automaticRollover,
@@ -420,6 +492,11 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
     handoffPattern,
     modelSurface,
     modelThresholds,
+    idleRollover,
+    idleRolloverAfterMs,
+    idleRolloverTokens,
+    idleRolloverMessage,
+    idleRolloverTickMs,
   }
 }
 

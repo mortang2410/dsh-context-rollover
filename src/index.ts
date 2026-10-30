@@ -28,6 +28,7 @@ import { Config as RolloverConfigSchema, renderReminderMessage, resolveConfig, r
 import type { ReminderValues, RolloverConfig, ResolvedRolloverConfig } from './config.ts'
 import type { RolloverReplacement } from './checkpoint.ts'
 import { contextManagementGuidance } from './guidance.ts'
+import { hasSlashGesture } from './idle.ts'
 import { NotesStore } from './notes.ts'
 import { sessionEventAt } from './compat.ts'
 import {
@@ -173,6 +174,14 @@ export class ContextRolloverEngine extends CompactionEngine {
       ctx.logger.warn(
         'context-rollover: handoffOnly ignores retainRatio, so it has no effect; '
         + 'set retainTokens to keep a recent tail',
+      )
+    }
+    // A watchdog message without a gesture names no skill, so the harness injects
+    // no skill body for it and the model would have to know the command already.
+    if (!hasSlashGesture(this.config.idleRolloverMessage)) {
+      ctx.logger.warn(
+        'context-rollover: idleRolloverMessage has no /name skill gesture, '
+        + 'so the harness injects no skill body for the watchdog message',
       )
     }
     this.registerTools()
