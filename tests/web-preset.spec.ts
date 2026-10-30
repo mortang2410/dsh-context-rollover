@@ -47,6 +47,7 @@ import {
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CompactionEngine } from '@deepseek-ai/dsh-compaction'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { resolveConfig, type RolloverConfig } from '../src/config.ts'
 // Type-only: resolves `ctx.agentPresets` and `ctx.agents` through their own merges.
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -669,6 +670,22 @@ describe('bundle patch against the real host tree', () => {
     // row is present in the composed tree the boot would mount.
     expect(findRow(rows, 'preset-standard-rollover')).toBeDefined()
     expect(findRow(rows, 'compaction-basic')).toBeDefined()
+    // The host-plane engine row this bundle inserts is enabled and carries the
+    // watchdog settings it ships. The raw values are asserted: resolveConfig
+    // fills every omitted key with its default, and four of the five shipped
+    // values equal those defaults, so a row that lost them would still resolve.
+    const hostRow = findRow(rows, 'context-rollover')
+    expect(hostRow).toBeDefined()
+    expect(hostRow?.disabled).not.toBe(true)
+    const shipped = {
+      idleRollover: true,
+      idleRolloverAfterMs: 2_400_000,
+      idleRolloverTokens: 90_000,
+      idleRolloverMessage: '/rollover',
+      idleRolloverTickMs: 60_000,
+    }
+    expect(hostRow?.config).toMatchObject(shipped)
+    expect(resolveConfig(hostRow?.config as RolloverConfig)).toMatchObject(shipped)
   })
 
   it('the roster row this host line exposes accepts only {default, selectedDefault}', () => {

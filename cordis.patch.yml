@@ -32,7 +32,16 @@
 - id: compaction-basic
   disabled: true
 
+# The row below also arms the idle rollover watchdog: a session idle for 40
+# minutes and above 90,000 tokens gets one `/rollover` message, and preset rows
+# stay off because a preset mounts one shared engine for every session, so a
+# timer there would watch the whole registry rather than one session.
 - insert:
     - id: context-rollover
       name: dsh-context-rollover
-      config: {}
+      config:
+        idleRollover: true
+        idleRolloverAfterMs: 2400000
+        idleRolloverTokens: 90000
+        idleRolloverMessage: /rollover
+        idleRolloverTickMs: 60000

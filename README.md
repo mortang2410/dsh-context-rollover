@@ -169,6 +169,63 @@ it composes the deterministic notes checkpoint.
 No engine path reads a handoff directory: `handoffDir` and `handoffPattern` are
 accepted configuration keys that nothing reads.
 
+### Idle rollover watchdog
+
+The watchdog rolls over a session that nobody is using, so the next request
+after you return does not resend its whole context. It runs only in the live
+host, once a minute by default. It sends one message into a session when all of
+these hold: the session has been idle for at least 40 minutes (the threshold is
+inclusive), its measured context is more than 90,000 tokens (strictly above, so
+exactly 90,000 does not fire), and its context is still below its own rollover
+point. The idle clock restarts on any event in the session, including a tool
+result or a queued message. The watchdog also waits while the session's agent is
+running or holds queued work, skips subagent sessions, and sends only where
+`new_context` and the rollover skill are available to that session.
+
+On this bundle the message is exactly `/rollover`, with no marker and no other
+text. The harness injects a skill body only into a direct user message whose
+`/name` gesture names a registered, user-invocable skill, and `/rollover` is the
+gesture for the rollover skill. The model therefore reads the same instructions
+it reads when you type the command: it writes a handoff document and calls
+`new_context` itself. The watchdog writes no handoff and commits no rollover.
+
+Each committed rollover opens a new stretch, and each stretch allows one
+watchdog message in its session. Once a `/rollover` message sits in the session
+log after the newest committed rollover, the watchdog stays quiet for that
+session until the next committed rollover. A message that was queued but never
+ran still counts. Two cases allow a second message in the same stretch; both are
+listed under Accepted residuals below.
+
+One fire costs one full-context turn for that session and, when the model follows
+the skill, leaves one handoff document in the session's working directory.
+
+The engine runs one timer per host, however many rollover presets or host rows
+are mounted, and preset rows never start it. This bundle ships the watchdog
+enabled on its host row (`cordis.patch.yml`, with the values above). The
+engine's own default is off, so a deployment that uses the engine without that
+row stays inert until it sets `idleRollover: true`. A deployment that restates
+this row's config without that key turns the watchdog off.
+
+Accepted residuals:
+
+- A `/rollover` that you type by hand is indistinguishable from the watchdog's
+  message, so it uses up the attempt for its stretch. If it does not roll the
+  session over, the watchdog stays quiet until the next committed rollover.
+- Changing `idleRolloverMessage` between restarts means earlier messages no
+  longer match the configured text. They stop counting toward the stretch's one
+  attempt, so one further message can be sent in that stretch.
+- A message whose send fails before it is recorded is not retried until the host
+  restarts. After a restart, that session can receive one message in that stretch.
+- If the host unloads the instance that owns the timer without loading a
+  successor, the watchdog stays off until the next host start. Reloading the
+  plugin in place releases the slot, and the replacement claims it.
+- A session idle at or above its own rollover point gets no message. It keeps
+  its large context until its next turn.
+- Each message resets the auto-continue plugin's consecutive-recovery counter,
+  because that plugin counts any user message it did not send as human
+  intervention. One message therefore grants that plugin one fresh recovery
+  burst of up to three continuations.
+
 ## What this plugin touches
 
 - **Registers four model-facing tools** (`new_context`, `get_context_remaining`, `notes`, `history`)
