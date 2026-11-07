@@ -688,6 +688,35 @@ describe('bundle patch against the real host tree', () => {
     expect(resolveConfig(hostRow?.config as RolloverConfig)).toMatchObject(shipped)
   })
 
+  it('the deployed profile keeps its preset hard point above the watchdog floor', () => {
+    // The shipped row above only carries the watchdog settings. The deployment
+    // presets that actually serve web sessions carry the compaction points, and
+    // those must stay apart from the watchdog floor: the floor decides when the
+    // watchdog may speak, the point decides when the engine commits.
+    const profileFile = join(homedir(), '.dsh', 'profiles', 'web', 'cordis.patch.yml')
+    // A machine without this deployment has no profile to pin; the shipped row
+    // assertion above still holds there.
+    if (!existsSync(profileFile)) return
+    const lines = readFileSync(profileFile, 'utf8').split('\n')
+    const starts = lines
+      .map((line, index) => (line.trim() === '- id: context-rollover' ? index : -1))
+      .filter(index => index >= 0)
+    // The two shipped presets each declare this engine once.
+    expect(starts.length).toBeGreaterThanOrEqual(2)
+    for (const startIndex of starts) {
+      const indent = lines[startIndex]!.search(/\S/)
+      const block: string[] = []
+      for (const line of lines.slice(startIndex)) {
+        if (line.trim() === '') continue
+        if (line.search(/\S/) < indent) break
+        block.push(line)
+      }
+      const text = block.join('\n')
+      expect(text).toContain('automaticRollover: true')
+      expect(text).toMatch(/'\*':\s*\n\s*thresholdTokens: 350000\n\s*reminderThresholdTokens: 300000/)
+    }
+  })
+
   it('the roster row this host line exposes accepts only {default, selectedDefault}', () => {
     // The old patch wrote `roots`/`includeShippedRoot`/`includeUserRoot` into
     // that row. Those fields do not exist there, and the patch still "applied"
