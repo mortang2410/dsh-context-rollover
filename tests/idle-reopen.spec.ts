@@ -196,6 +196,39 @@ describe('idle reopen', () => {
     expect(events.filter(event => event.type === 'compaction/end').length).toBeGreaterThanOrEqual(1)
   })
 
+  it('keeps the record when the stored preset does not mount, and warns once', async () => {
+    const rig = await openRig()
+    const sessionId = SessionId('preset-broken')
+    const handle = await openStoredTurn(rig.ctx, sessionId)
+    await advance(TICK_MS)
+    expect(recordAt(rig.candidatePath, sessionId)?.lastOutcome).toBe('marked')
+    await handle.dispose()
+
+    // The registry resolves the stored preset and then refuses the mount, the
+    // way a diagnostic-broken preset does with `agent-preset/invalid`.
+    const registry = rig.ctx.get('agentPresets')
+    if (registry === undefined) throw new Error('the rig provides the preset registry')
+    const mount = vi.fn(async (): Promise<never> => {
+      const error = new Error('agent preset "standard" is invalid') as Error & { code?: string }
+      error.code = 'agent-preset/invalid'
+      throw error
+    })
+    registry.mount = mount
+    const warn = vi.spyOn(rig.ctx.logger, 'warn')
+
+    // Exactly one tick crosses the threshold, so the assertion reads the failed
+    // reopen itself and not a later, disarmed retry.
+    await advance(AFTER_MS - TICK_MS + 1)
+    await settle(() => recordAt(rig.candidatePath, sessionId)?.lastOutcome === 'reopen-failed')
+
+    expect(mount).toHaveBeenCalledTimes(1)
+    expect(recordAt(rig.candidatePath, sessionId)?.lastOutcome).toBe('reopen-failed')
+    await settle(() => rig.ctx.agents.get(sessionId) === undefined)
+    expect(rig.ctx.agents.get(sessionId)).toBeUndefined()
+    const failures = warn.mock.calls.filter(([line]) => String(line).includes('reopening session'))
+    expect(failures).toHaveLength(1)
+  })
+
   it('keeps the record when the resumed turn fails, and disposes the handle', async () => {
     const rig = await openRig()
     const sessionId = SessionId('turn-failed')
