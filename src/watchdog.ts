@@ -237,7 +237,7 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
       if (composition === undefined) return
       let handle: { readonly agent: Agent; dispose(): Promise<void> } | undefined
       try {
-        handle = await ctx.agents.resume({
+        handle = await registry.resume({
           resumeSessionId: sessionId,
           agentOptions: composition.agentOptions,
           ...(composition.setup === undefined ? {} : { setup: composition.setup }),
