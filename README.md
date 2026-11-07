@@ -175,12 +175,21 @@ The watchdog rolls over a session that nobody is using, so the next request
 after you return does not resend its whole context. It runs only in the live
 host, once a minute by default. It sends one message into a session when all of
 these hold: the session has been idle for at least 40 minutes (the threshold is
-inclusive), its measured context is more than 90,000 tokens (strictly above, so
-exactly 90,000 does not fire), and its context is still below its own rollover
-point. The idle clock restarts on any event in the session, including a tool
-result or a queued message. The watchdog also waits while the session's agent is
+inclusive), and its measured context is more than 90,000 tokens (strictly above,
+so exactly 90,000 does not fire). The idle clock restarts on any real event in
+the session, including a tool result or a queued message; the load markers a
+resume writes do not count. The watchdog also waits while the session's agent is
 running or holds queued work, skips subagent sessions, and sends only where
 `new_context` and the rollover skill are available to that session.
+
+The candidates live in a durable file, `~/.dsh/idle-rollover-candidates.json` by
+default and settable with `idleRolloverCandidatesPath`. Each tick the watchdog
+refreshes that file from the live sessions and fires from the file, so a restart
+does not lose a pending wake-up. A candidate whose agent is no longer live — the
+state right after a restart — is reopened from its stored log with its stored
+preset, sent the message, and disposed again once the turn ends. A session at or
+above its own rollover point is treated like any other candidate: nothing above
+the floor suppresses the message.
 
 On this bundle the message is exactly `/rollover`, with no marker and no other
 text. The harness injects a skill body only into a direct user message whose
@@ -219,8 +228,6 @@ Accepted residuals:
 - If the host unloads the instance that owns the timer without loading a
   successor, the watchdog stays off until the next host start. Reloading the
   plugin in place releases the slot, and the replacement claims it.
-- A session idle at or above its own rollover point gets no message. It keeps
-  its large context until its next turn.
 - The checks prove that `new_context` resolves for the session and that the skill
   named by the message is registered and user-invocable. They do not prove that
   an execution policy admits the model's `new_context` call, or that the listener
@@ -237,8 +244,9 @@ Accepted residuals:
   and one system-prompt section — on headless profiles in every session; on
   the Web profile only inside `standard-rollover` sessions (other presets stay
   exactly as shipped).
-- **Writes files** in exactly one place: markdown notes under `<dsh home>/notes/<sessionId>/`.
-  Nothing else on disk is written; no network calls, no telemetry.
+- **Writes files** in exactly two places: markdown notes under `<dsh home>/notes/<sessionId>/`,
+  and the idle-rollover candidate file (`<dsh home>/idle-rollover-candidates.json` by default,
+  `idleRolloverCandidatesPath`). Nothing else on disk is written; no network calls, no telemetry.
 - **Replaces the active compaction backend** (`compaction-basic` is disabled by the bundle patch).
   Session logs stay fully compatible in both directions.
 - **No credentials, no cloud services, no data leaves the machine.**

@@ -151,7 +151,6 @@ describe('decideIdleFire', () => {
     idleMs: 3_000_000,
     baselineKnown: true,
     totalTokens: 90_001,
-    rolloverPointTokens: 180_000,
     foreignBackendOwnsCompaction: false,
     newContextAvailable: true,
     skillAvailable: true,
@@ -170,7 +169,6 @@ describe('decideIdleFire', () => {
     ['idle-too-short', { idleMs: 2_399_999 }],
     ['tokens-not-above-floor', { totalTokens: 90_000 }],
     ['tokens-not-above-floor', { baselineKnown: false }],
-    ['above-rollover-point', { totalTokens: 180_000 }],
     ['backend-not-rollover', { foreignBackendOwnsCompaction: true }],
     ['no-new-context-tool', { newContextAvailable: false }],
     ['skill-unavailable', { skillAvailable: false }],
@@ -185,8 +183,7 @@ describe('decideIdleFire', () => {
     ['not-idle', 'queued-work', { status: 'running', queuedWork: true }],
     ['queued-work', 'idle-too-short', { queuedWork: true, idleMs: 0 }],
     ['idle-too-short', 'tokens-not-above-floor', { idleMs: 0, totalTokens: 0 }],
-    ['tokens-not-above-floor', 'above-rollover-point', { totalTokens: 50_000, rolloverPointTokens: 40_000 }],
-    ['above-rollover-point', 'backend-not-rollover', { rolloverPointTokens: 90_001, foreignBackendOwnsCompaction: true }],
+    ['tokens-not-above-floor', 'backend-not-rollover', { totalTokens: 50_000, foreignBackendOwnsCompaction: true }],
     ['backend-not-rollover', 'no-new-context-tool', { foreignBackendOwnsCompaction: true, newContextAvailable: false }],
     ['no-new-context-tool', 'skill-unavailable', { newContextAvailable: false, skillAvailable: false }],
     ['skill-unavailable', 'rollover-pending', { skillAvailable: false, rolloverPending: true }],
@@ -211,10 +208,10 @@ describe('decideIdleFire', () => {
     expect(decideIdleFire(config, { ...passing, totalTokens: 90_001 })).toEqual({ fire: true })
   })
 
-  it('refuses exactly the rollover point and fires one token below it', () => {
+  it('fires at and above rollover point', () => {
     expect(decideIdleFire(config, { ...passing, totalTokens: 179_999 })).toEqual({ fire: true })
-    expect(decideIdleFire(config, { ...passing, totalTokens: 180_000 }))
-      .toEqual({ fire: false, reason: 'above-rollover-point' })
+    expect(decideIdleFire(config, { ...passing, totalTokens: 180_000 })).toEqual({ fire: true })
+    expect(decideIdleFire(config, { ...passing, totalTokens: 500_000 })).toEqual({ fire: true })
   })
 })
 

@@ -32,10 +32,15 @@
 - id: compaction-basic
   disabled: true
 
-# The row below also arms the idle rollover watchdog: a session idle for 40
-# minutes and above 90,000 tokens gets one `/rollover` message, and preset rows
-# stay off because a preset mounts one shared engine for every session, so a
-# timer there would watch the whole registry rather than one session.
+# The row below also arms the idle rollover watchdog. Each tick writes the
+# durable candidate file (default `~/.dsh/idle-rollover-candidates.json`, set
+# with `idleRolloverCandidatesPath`) from the live root sessions, then fires from
+# that file: a session idle for 40 minutes and above 90,000 tokens gets one
+# `/rollover` message. A candidate whose session is no longer live — the state
+# after a restart — is reopened from its stored log, sent to, and disposed again,
+# so the wake-up survives the restart. Preset rows stay off because a preset
+# mounts one shared engine for every session, so a timer there would watch the
+# whole registry rather than one session.
 - insert:
     - id: context-rollover
       name: dsh-context-rollover

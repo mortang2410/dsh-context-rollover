@@ -47,6 +47,7 @@ import { checkpointCarriesNothing, replacementWindowNumber } from './checkpoint.
 import { createRolloverTools } from './tools.ts'
 import type { PendingRollover } from './state.ts'
 import { startIdleWatchdog } from './watchdog.ts'
+import { CandidateStore, markCandidate } from './candidates.ts'
 
 /** Cordis plugin name used by loader diagnostics and message-source attribution. */
 export const name = PLUGIN_NAME
@@ -186,6 +187,8 @@ export class ContextRolloverEngine extends CompactionEngine {
   private readonly pressureWarnedTurns = new Set<string>()
   /** Turns that already committed one automatic rollover. */
   private readonly automaticRolledTurns = new Set<string>()
+  /** The durable candidate file the sweep reads and the pre-step refreshes. */
+  private readonly candidates: CandidateStore
 
   constructor(ctx: Context, config: RolloverConfig = {}) {
     super(ctx)
@@ -206,15 +209,38 @@ export class ContextRolloverEngine extends CompactionEngine {
         + 'so the harness injects no skill body for the watchdog message',
       )
     }
+    this.candidates = new CandidateStore({
+      path: this.config.idleRolloverCandidatesPath,
+      warn: line => { ctx.logger.warn(line) },
+    })
     this.registerTools()
     this.registerGuidance()
     this.registerLifecycle()
     startIdleWatchdog(ctx, {
       config: this.config,
+      candidates: this.candidates,
       routeOf: session => session.requestContext(),
       compactionOwnedByForeignEngine: agent => this.compactionOwnedByForeignEngine(agent),
       servingEngineOf: agent => this.servingEngineFor(agent),
     })
+  }
+
+  /**
+   * Record or refresh one session in the candidate file after a pre-step. A
+   * session that measures at or below the floor leaves the file, and so does one
+   * whose committed rollover count grew past the recorded count: that growth is a
+   * rollover the record was written before. A subagent session is never a
+   * candidate. The recorded activity time is the log-derived time, never the
+   * wall clock at write, so a restart keeps the same idle clock.
+   * @param agent - the agent whose pre-step just ran.
+   */
+  private observeCandidate(agent: Agent): void {
+    markCandidate(
+      this.candidates,
+      agent.session,
+      this.ctx.tokenMeter.measure(agent.session).totalTokens,
+      this.config.idleRolloverTokens,
+    )
   }
 
   /**
@@ -327,6 +353,7 @@ export class ContextRolloverEngine extends CompactionEngine {
           const message = error instanceof Error ? error.message : String(error)
           ctx.logger.warn(`context rollover failed: ${message}; continuing the turn`)
         }
+        if (this.config.idleRollover) this.observeCandidate(agent)
       }
       const decision = await next()
       if (decision.kind === 'reject') return decision

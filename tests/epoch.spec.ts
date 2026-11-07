@@ -7,15 +7,15 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { CompactionId } from '@deepseek-ai/dsh-compaction'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
-import { armedFromLog, committedRollovers } from '../src/epoch.ts'
+import { armedFromLog, committedRollovers, lastRealActivityAt } from '../src/epoch.ts'
 import { commitRollover, PLUGIN_NAME, ROLLOVER_PROVIDER, selectRolloverRange } from '../src/rollover.ts'
 import { closedConversation } from './harness.ts'
 
@@ -333,5 +333,69 @@ describe('rebuild equivalence', () => {
     const rebuilt = Session.create(SessionId(`rebuilt-${randomUUID()}`), original.snapshotEvents())
     expect(armedFromLog(rebuilt, MESSAGE)).toBe(armedFromLog(original, MESSAGE))
     expect(armedFromLog(rebuilt, MESSAGE)).toBe(false)
+  })
+})
+
+describe('lastRealActivityAt', () => {
+  const BASE = Date.parse('2026-10-30T12:00:00Z')
+  const MINUTE = 60_000
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(BASE)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('ignores load artifacts when finding activity time', () => {
+    const session = closedConversation(2)
+    expect(lastRealActivityAt(session)).toBe(BASE)
+
+    vi.setSystemTime(BASE + MINUTE)
+    session.append('session/end-seed', {})
+    expect(lastRealActivityAt(session)).toBe(BASE)
+  })
+
+  it('reports a real message written after the load marker', () => {
+    const session = closedConversation(2)
+    vi.setSystemTime(BASE + MINUTE)
+    session.append('session/end-seed', {})
+    vi.setSystemTime(BASE + 2 * MINUTE)
+    appendDirectUserMessage(session, 'after the load')
+    expect(lastRealActivityAt(session)).toBe(BASE + 2 * MINUTE)
+  })
+
+  it('reports no activity time for a log that holds a load marker alone', () => {
+    const session = Session.create(SessionId(`load-only-${randomUUID()}`))
+    session.append('session/end-seed', {})
+    expect(lastRealActivityAt(session)).toBeUndefined()
+  })
+
+  it('reports no activity time for an empty log', () => {
+    expect(lastRealActivityAt(Session.create(SessionId(`empty-${randomUUID()}`)))).toBeUndefined()
+  })
+
+  it('ignores the interrupted-turn closers a resume appends immediately before the load marker', () => {
+    const session = closedConversation(2)
+    session.append('turn/start', { turn: 3 })
+    session.append('step/start', { turn: 3, step: 1 })
+
+    vi.setSystemTime(BASE + MINUTE)
+    session.append('tool/result', {
+      turn: 3,
+      step: 1,
+      message: createToolResultMessage({
+        callId: ToolCallId('closer'),
+        content: [{ type: 'text', text: 'interrupted result' }],
+        isError: true,
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 3, step: 1 })
+    session.append('turn/end', { turn: 3, reason: { kind: 'interrupted' } })
+    session.append('session/end-seed', {})
+
+    expect(lastRealActivityAt(session)).toBe(BASE)
   })
 })

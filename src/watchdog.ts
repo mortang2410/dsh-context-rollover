@@ -1,11 +1,20 @@
 /**
- * The idle rollover watchdog. One timer per host composition wakes the live
- * top-level sessions: a session that has been idle past the configured time,
- * with its context above the configured floor and below its own rollover point,
+ * The idle rollover watchdog. One timer per host composition ticks two passes.
+ * The marking pass walks the live root agents and writes the durable candidate
+ * file: every session above the floor gets a record with its log-derived
+ * activity time, and a record whose session fell to the floor or committed a
+ * rollover leaves the file. The fire pass reads that file, never the table of
+ * open agents, so the candidates are the same after a restart.
+ *
+ * A live candidate is decided and fired directly: a session that has been idle
+ * past the configured time and carries a context above the configured floor
  * receives the configured message (`/rollover` by default) as a direct user
- * message. The model then writes its handoff and calls `new_context` as it
- * would after a typed command. The fire decision is {@link decideIdleFire}; this
- * module measures its inputs and sends.
+ * message. A candidate with no live agent is reopened first: its stored session
+ * is loaded through the resume composition, decided against the live session,
+ * sent to, and disposed again, so a restart does not lose the wake-up. The model
+ * then writes its handoff and calls `new_context` as it would after a typed
+ * command. The fire decision is {@link decideIdleFire}; this module measures its
+ * inputs and sends.
  *
  * @module dsh-context-rollover/watchdog
  */
@@ -14,11 +23,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { sessionEvents } from './compat.ts'
-import { rolloverPointsFor } from './config.ts'
 import type { ResolvedRolloverConfig } from './config.ts'
 import { armedFromLog } from './epoch.ts'
+import { markCandidate } from './candidates.ts'
+import type { CandidateRecord, CandidateStore } from './candidates.ts'
+import { composeResume, isSessionNotFound } from './resume.ts'
+import { committedRollovers, lastRealActivityAt } from './epoch.ts'
 import { decideIdleFire, slashGestureNames } from './idle.ts'
 import type { IdleFireInputs } from './idle.ts'
 
@@ -30,6 +42,15 @@ const CLAIM = Symbol.for('dsh-context-rollover.idle-watchdog')
  * process, so a send that always fails costs one warning instead of one per tick.
  */
 const failedSessions = new Set<string>()
+
+/** Sessions whose reopen task is in flight, so one sweep cannot open a session twice. */
+const reopening = new Set<string>()
+
+/** Sessions whose failed reopen already warned in this process. */
+const warnedReopens = new Set<string>()
+
+/** How long the reopen waits for the fired turn to finish. */
+const REOPEN_TURN_TIMEOUT_MS = 10 * 60 * 1000
 
 /** The part of a rollover engine that serves one session, as the watchdog reads it. */
 export interface IdleServingEngine {
@@ -43,6 +64,8 @@ export interface IdleServingEngine {
 export interface IdleWatchdogOptions {
   /** The resolved configuration of the host row: whether the watchdog is armed, and its thresholds. */
   readonly config: ResolvedRolloverConfig
+  /** The durable candidate file the sweep refreshes before it fires. */
+  readonly candidates: CandidateStore
   /** The routed model and context window that a session reports. */
   readonly routeOf: (session: Session) => ReturnType<Session['requestContext']>
   /** Whether a compaction backend other than this plugin's engine owns the agent's session. */
@@ -115,18 +138,17 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
    * threshold, so a busy session costs no measurement.
    * @param agent - a root agent of the registry.
    * @param skillAvailable - the skill check's result for this agent.
+   * @param activityAt - the candidate record's last real activity time.
    * @returns the decision inputs, or undefined for an ineligible candidate.
    */
-  const inputsFor = (agent: Agent, skillAvailable: boolean): IdleFireInputs | undefined => {
+  const inputsFor = (agent: Agent, skillAvailable: boolean, activityAt: number): IdleFireInputs | undefined => {
     const { session } = agent
     const { header } = session
     if (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) return undefined
-    const newest = sessionEvents(session).at(-1)
-    if (newest === undefined) return undefined
     const route = options.routeOf(session)
     if (route?.contextWindow === undefined) return undefined
     const queuedWork = agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0
-    const idleMs = Date.now() - newest.time
+    const idleMs = Date.now() - activityAt
     const measured = agent.status === 'idle' && !queuedWork && idleMs >= config.idleRolloverAfterMs
     const measurement = measured ? ctx.tokenMeter.measure(session) : undefined
     const serving = options.servingEngineOf(agent)
@@ -137,7 +159,6 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
       idleMs,
       baselineKnown: measurement !== undefined && measurement.baseline.kind !== 'none',
       totalTokens: measurement?.totalTokens ?? 0,
-      rolloverPointTokens: rolloverPointsFor(serving.config, route.contextWindow, route.model).rolloverTokens,
       foreignBackendOwnsCompaction: options.compactionOwnedByForeignEngine(agent),
       newContextAvailable: ctx.tools.get('new_context', agent) !== undefined,
       skillAvailable,
@@ -165,6 +186,139 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
     const names = slashGestureNames(config.idleRolloverMessage)
     const summaries = await skills.list({ cwd: agent.session.header.cwd, scope: agent })
     return summaries.some(skill => names.includes(skill.name) && skill.invocation.userInvocable)
+  }
+
+  /**
+   * Wait for one resumed agent to go idle, bounded. A turn that does not settle
+   * within the bound is a failed reopen, not a session to keep waiting on.
+   * @param agent - the resumed agent.
+   * @param boundMs - the longest wait.
+   * @returns 'idle' when the turn finished, 'timeout' when the bound expired.
+   */
+  const waitForIdle = async (agent: Agent, boundMs: number): Promise<'idle' | 'timeout'> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        agent.whenIdle().then(() => 'idle' as const),
+        new Promise<'timeout'>(resolve => { timer = setTimeout(() => { resolve('timeout') }, boundMs) }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Reopen one closed candidate, check the fire decision against the live
+   * session, send, wait for the turn, and dispose. The idle duration comes from
+   * the record, because a resumed log ends in the load artifacts just written;
+   * the size and the route come from the live session. A refusal keeps the
+   * record as blocked. A session that does not exist removes the record. Any
+   * other failure keeps the record for a later sweep and warns once per session.
+   * @param candidate - the record whose agent is not live.
+   */
+  const reopen = async (candidate: CandidateRecord): Promise<void> => {
+    const sessionId = SessionId(candidate.sessionId)
+    if (reopening.has(sessionId)) return
+    reopening.add(sessionId)
+    try {
+      let composition: Awaited<ReturnType<typeof composeResume>>
+      try {
+        composition = await composeResume(ctx, sessionId, warning => { report('warn', warning) })
+      } catch (error: unknown) {
+        // The session query service reports a stored session that no longer
+        // exists; a record for it is dead weight, so it leaves the file.
+        if (isSessionNotFound(error)) {
+          options.candidates.remove(candidate.sessionId)
+          return
+        }
+        reopenFailed(candidate, error)
+        return
+      }
+      if (composition === undefined) return
+      let handle: { readonly agent: Agent; dispose(): Promise<void> } | undefined
+      try {
+        handle = await ctx.agents.resume({
+          resumeSessionId: sessionId,
+          agentOptions: composition.agentOptions,
+          ...(composition.setup === undefined ? {} : { setup: composition.setup }),
+        })
+      } catch (error: unknown) {
+        if (isSessionNotFound(error)) {
+          options.candidates.remove(candidate.sessionId)
+          return
+        }
+        reopenFailed(candidate, error)
+        return
+      }
+      try {
+        const { agent } = handle
+        if (candidate.lastRealActivityAt === null) {
+          options.candidates.put({ ...candidate, lastOutcome: 'blocked' })
+          return
+        }
+        const skillAvailable = await skillResolves(agent)
+        const inputs = inputsFor(agent, skillAvailable, candidate.lastRealActivityAt)
+        const decision = inputs === undefined ? undefined : decideIdleFire(config, inputs)
+        if (decision === undefined || !decision.fire) {
+          options.candidates.put({ ...candidate, lastOutcome: 'blocked' })
+          report('info', `context rollover (idle watchdog): reopened ${candidate.sessionId} and sent nothing: ${decision === undefined ? 'no decision inputs' : decision.reason}`)
+          return
+        }
+        try {
+          agent.followup(createUserMessage({
+            content: [{ type: 'text', text: config.idleRolloverMessage }],
+            source: { kind: 'user' },
+          }))
+        } catch (error: unknown) {
+          reopenFailed(candidate, error)
+          return
+        }
+        report('info', `context rollover (idle watchdog): sent ${config.idleRolloverMessage} to reopened session ${candidate.sessionId}`)
+        let outcome: 'idle' | 'timeout'
+        try {
+          outcome = await waitForIdle(agent, REOPEN_TURN_TIMEOUT_MS)
+        } catch (error: unknown) {
+          // The resumed turn failed; the record stays for a later sweep.
+          reopenFailed(candidate, error)
+          return
+        }
+        if (outcome === 'timeout') {
+          reopenFailed(candidate, new Error(`the turn did not finish within ${REOPEN_TURN_TIMEOUT_MS} ms`))
+          return
+        }
+        const measured = ctx.tokenMeter.measure(agent.session)
+        const count = committedRollovers(agent.session).count
+        if (count > candidate.committedRolloverCount || measured.totalTokens <= config.idleRolloverTokens) {
+          options.candidates.remove(candidate.sessionId)
+          return
+        }
+        options.candidates.put({
+          ...candidate,
+          lastRealActivityAt: lastRealActivityAt(agent.session) ?? candidate.lastRealActivityAt,
+          totalTokens: measured.totalTokens,
+          committedRolloverCount: count,
+          lastOutcome: 'sent',
+        })
+      } finally {
+        await handle.dispose()
+      }
+    } finally {
+      reopening.delete(sessionId)
+    }
+  }
+
+  /**
+   * Record and report one failed reopen. The warning is one per session per host
+   * process; the record stays so a later sweep may retry it.
+   * @param candidate - the record that failed.
+   * @param error - the failure.
+   */
+  const reopenFailed = (candidate: CandidateRecord, error: unknown): void => {
+    const reason = error instanceof Error ? error.message : String(error)
+    options.candidates.put({ ...candidate, lastOutcome: 'reopen-failed' })
+    if (warnedReopens.has(candidate.sessionId)) return
+    warnedReopens.add(candidate.sessionId)
+    report('warn', `context rollover (idle watchdog): reopening session ${candidate.sessionId} failed: ${reason}`)
   }
 
   /**
@@ -200,14 +354,15 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
    * it costs nothing, and it keeps a later change to the sweep serialization from
    * sending to a session whose send already failed.
    * @param agent - a root agent of the registry.
+   * @param activityAt - the candidate record's last real activity time.
    */
-  const consider = async (agent: Agent): Promise<void> => {
+  const consider = async (agent: Agent, activityAt: number): Promise<void> => {
     if (disposed || failedSessions.has(agent.session.id)) return
-    const precheck = inputsFor(agent, true)
+    const precheck = inputsFor(agent, true, activityAt)
     if (precheck === undefined || !decideIdleFire(config, precheck).fire) return
     const skillAvailable = await skillResolves(agent)
     if (disposed || failedSessions.has(agent.session.id)) return
-    const inputs = inputsFor(agent, skillAvailable)
+    const inputs = inputsFor(agent, skillAvailable, activityAt)
     if (inputs === undefined || !decideIdleFire(config, inputs).fire) return
     fire(agent)
   }
@@ -225,13 +380,52 @@ export function startIdleWatchdog(ctx: Context, options: IdleWatchdogOptions): v
     if (sweeping) return
     sweeping = true
     try {
+      // Marking pass: every live root that measures above the floor is recorded,
+      // and a record whose session fell to the floor or grew a committed rollover
+      // leaves the file. This pass never fires; it only keeps the file equal to
+      // the sessions it describes.
       for (const agent of registry.roots()) {
         if (disposed) return
         try {
-          await consider(agent)
+          markCandidate(
+            options.candidates,
+            agent.session,
+            ctx.tokenMeter.measure(agent.session).totalTokens,
+            config.idleRolloverTokens,
+          )
         } catch (error: unknown) {
           const reason = error instanceof Error ? error.message : String(error)
           report('warn', `context rollover (idle watchdog): skipped session ${agent.session.id} this tick: ${reason}`)
+        }
+      }
+      // Fire pass: the candidate file is the only source of candidates. A live
+      // candidate is decided and fired; a candidate with no live agent is left to
+      // the reopen path.
+      for (const candidate of options.candidates.all()) {
+        if (disposed) return
+        const agent = registry.get(SessionId(candidate.sessionId))
+        if (agent !== undefined && reopening.has(SessionId(candidate.sessionId))) continue
+        if (agent === undefined) {
+          // Resume only a record that has already been idle long enough to
+          // fire; a recent one cannot pass the decision, and a resume per tick
+          // would pay a session load for a refusal the record already answers.
+          const loaded = ctx.sessions.get(SessionId(candidate.sessionId))
+          const idleMs = candidate.lastRealActivityAt === null
+            ? undefined
+            : Date.now() - candidate.lastRealActivityAt
+          if (loaded === undefined && idleMs !== undefined && idleMs >= config.idleRolloverAfterMs) {
+            void reopen(candidate).catch((error: unknown) => {
+              const reason = error instanceof Error ? error.message : String(error)
+              report('warn', `context rollover (idle watchdog): reopening session ${candidate.sessionId} threw: ${reason}`)
+            })
+          }
+          continue
+        }
+        try {
+          if (candidate.lastRealActivityAt !== null) await consider(agent, candidate.lastRealActivityAt)
+        } catch (error: unknown) {
+          const reason = error instanceof Error ? error.message : String(error)
+          report('warn', `context rollover (idle watchdog): skipped session ${candidate.sessionId} this tick: ${reason}`)
         }
       }
     } finally {

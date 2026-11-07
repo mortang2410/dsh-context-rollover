@@ -30,8 +30,20 @@ import type {
   StreamChunk,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionHeader } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import SessionPersistence, {
+  SessionAlreadyExistsError,
+  SessionPersistenceNotFoundError,
+  SessionPersistenceRevision,
+  SessionReadOnlyError,
+} from '@deepseek-ai/dsh-session-persistence'
+import type {
+  SessionAccess,
+  SessionHandle,
+  SessionHandleReadResult,
+  SessionPersistenceSnapshot,
+} from '@deepseek-ai/dsh-session-persistence'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 
@@ -448,5 +460,147 @@ export async function followup(agent: Agent, text: string): Promise<void> {
 export async function seedExchanges(agent: Agent, count: number): Promise<void> {
   for (let index = 0; index < count; index += 1) {
     await followup(agent, `research question ${index}`)
+  }
+}
+
+// ---- in-memory session persistence for the resume tests ----
+
+/** One stored session of {@link MemorySessionPersistence}. */
+interface MemoryEntry {
+  readonly header: SessionHeader
+  readonly inheritedEventCount: SessionLogOffset
+  readonly events: SessionEvent[]
+}
+
+/** One stored session a {@link MemorySessionPersistence} starts with, as a restart hands it over. */
+export interface MemoryStoredSession {
+  readonly header: SessionHeader
+  readonly inheritedEventCount?: SessionLogOffset
+  readonly events?: readonly SessionEvent[]
+}
+
+/** What {@link MemorySessionPersistence} mounts with. */
+export interface MemorySessionPersistenceConfig {
+  /** Sessions the store already holds, for a test that models a restart. */
+  readonly seed?: readonly MemoryStoredSession[]
+}
+
+/**
+ * The handle one in-memory entry hands out. Appends are durable on resolution,
+ * nothing buffers, so both flush paths are no-ops. The type is internal to the
+ * harness; tests store and read through the agent loop and the engine.
+ */
+class MemoryHandle implements SessionHandle {
+  private closed = false
+
+  constructor(
+    private readonly store: MemorySessionPersistence,
+    readonly id: SessionId,
+    readonly header: SessionHeader,
+    readonly inheritedEventCount: SessionLogOffset,
+    readonly access: SessionAccess,
+  ) {
+    if (access === 'write') store.writers.set(id, this)
+  }
+
+  async read(offset = 0, length?: number): Promise<SessionHandleReadResult> {
+    const entry = this.store.entries.get(this.id)
+    if (entry === undefined) throw new SessionPersistenceNotFoundError(this.id)
+    const from = entry.events.filter(event => event.seq >= offset)
+    const slice = length === undefined ? from : from.slice(0, length)
+    return { eventState: 'detached', events: structuredClone(slice) }
+  }
+
+  async append(events: readonly SessionEvent[]): Promise<void> {
+    if (this.access === 'read') throw new SessionReadOnlyError(this.id, 'append')
+    const entry = this.store.entries.get(this.id)
+    if (entry === undefined) throw new SessionPersistenceNotFoundError(this.id)
+    entry.events.push(...structuredClone(events))
+  }
+
+  async flush(): Promise<void> {
+    if (this.access === 'read') throw new SessionReadOnlyError(this.id, 'flush')
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return
+    this.closed = true
+    this.store.writers.delete(this.id)
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.close()
+  }
+
+  /** Append one live event routed from `session/event`; the session already committed it. */
+  pushLive(event: SessionEvent): void {
+    const entry = this.store.entries.get(this.id)
+    if (entry === undefined || this.closed) return
+    entry.events.push(structuredClone(event))
+  }
+}
+
+/**
+ * An in-memory `SessionPersistence` backend for the resume tests. The shipped
+ * JSONL backend needs a native module that a checkout without a native build
+ * does not carry, so the resume path runs against this store instead: the same
+ * handle contract, the same not-found and read-only errors, and no durability
+ * boundary to wait on.
+ */
+export class MemorySessionPersistence extends SessionPersistence {
+  /** Every stored session, keyed by id; the handle reads it directly. */
+  readonly entries = new Map<SessionId, MemoryEntry>()
+  /** The active write handle of each stored session, the live event route. */
+  readonly writers = new Map<SessionId, MemoryHandle>()
+  private revision = 0
+
+  constructor(ctx: Context, config: MemorySessionPersistenceConfig = {}) {
+    super(ctx)
+    for (const stored of config.seed ?? []) {
+      this.entries.set(stored.header.id, {
+        header: structuredClone(stored.header),
+        inheritedEventCount: stored.inheritedEventCount ?? SessionLogOffset(0),
+        events: structuredClone([...(stored.events ?? [])]),
+      })
+    }
+    // Live events reach the active write handle by session id, exactly as the
+    // shipped JSONL backend routes them; without this a resumed or fresh
+    // session's log would never grow past its seed.
+    ctx.on('session/event', (session, event) => {
+      this.writers.get(session.id)?.pushLive(event)
+    })
+  }
+
+  async create(header: SessionHeader): Promise<SessionHandle> {
+    if (this.entries.has(header.id)) throw new SessionAlreadyExistsError(header.id)
+    const stored = structuredClone(header)
+    this.revision += 1
+    this.entries.set(stored.id, { header: stored, inheritedEventCount: SessionLogOffset(0), events: [] })
+    return new MemoryHandle(this, stored.id, structuredClone(stored), SessionLogOffset(0), 'write')
+  }
+
+  async open(id: SessionId, access: SessionAccess): Promise<SessionHandle> {
+    const entry = this.entries.get(id)
+    if (entry === undefined) throw new SessionPersistenceNotFoundError(id)
+    return new MemoryHandle(this, id, structuredClone(entry.header), entry.inheritedEventCount, access)
+  }
+
+  async flush(): Promise<void> {}
+
+  async stat(id: SessionId): Promise<SessionPersistenceSnapshot | undefined> {
+    const entry = this.entries.get(id)
+    if (entry === undefined) return undefined
+    return { header: structuredClone(entry.header), revision: this.revisionOf() }
+  }
+
+  async list(): Promise<readonly SessionPersistenceSnapshot[]> {
+    return [...this.entries.values()].map(entry => ({
+      header: structuredClone(entry.header),
+      revision: this.revisionOf(),
+    }))
+  }
+
+  private revisionOf(): SessionPersistenceRevision {
+    return SessionPersistenceRevision(`memory-revision-${this.revision}`)
   }
 }

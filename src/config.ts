@@ -6,6 +6,8 @@
  * @module dsh-context-rollover/config
  */
 
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 /**
@@ -263,6 +265,11 @@ export interface RolloverConfig {
    * `2147483647`, the longest delay a Node timer accepts. Defaults to `60000`.
    */
   idleRolloverTickMs?: number
+  /**
+   * Absolute path of the candidate file that survives a host restart. Defaults to
+   * `~/.dsh/idle-rollover-candidates.json`.
+   */
+  idleRolloverCandidatesPath?: string
 }
 
 /** Absolute token points for one routed model, replacing its ratio-based points. */
@@ -310,6 +317,7 @@ export const Config: z<RolloverConfig> = z.object({
   idleRolloverTokens: z.number().step(1).min(1),
   idleRolloverMessage: z.string(),
   idleRolloverTickMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS),
+  idleRolloverCandidatesPath: z.string(),
 })
 
 /** Resolved and validated rollover configuration. */
@@ -349,6 +357,8 @@ export interface ResolvedRolloverConfig {
   readonly idleRolloverMessage: string
   /** How often the watchdog evaluates candidate sessions, in milliseconds. */
   readonly idleRolloverTickMs: number
+  /** Absolute path of the candidate file that survives a host restart. */
+  readonly idleRolloverCandidatesPath: string
 }
 
 /** Reject a ratio that cannot represent a fraction of a context window. */
@@ -473,6 +483,8 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
       `context-rollover: idleRolloverTickMs must be at most ${MAX_TIMER_DELAY_MS}, got ${idleRolloverTickMs}`,
     )
   }
+  const idleRolloverCandidatesPath = config.idleRolloverCandidatesPath ?? join(homedir(), '.dsh', 'idle-rollover-candidates.json')
+  validateNonEmptyString('idleRolloverCandidatesPath', idleRolloverCandidatesPath)
   return {
     thresholdRatio,
     automaticRollover,
@@ -497,6 +509,7 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
     idleRolloverTokens,
     idleRolloverMessage,
     idleRolloverTickMs,
+    idleRolloverCandidatesPath,
   }
 }
 

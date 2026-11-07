@@ -40,6 +40,7 @@ import {
   textResponse,
   usageResponse,
 } from './harness.ts'
+import { CandidateStore } from '../src/candidates.ts'
 
 const T0 = Date.parse('2026-10-30T12:00:00Z')
 const MINUTE = 60_000
@@ -52,6 +53,12 @@ const TICK_MS = MINUTE
 const ABOVE_FLOOR = 100_000
 /** A rollover point that no test reaches unless it lowers it. */
 const FAR_POINT = { thresholdTokens: 1_000_000, reminderThresholdTokens: 500_000 }
+
+/** The candidate path a test's engine writes, which `configFor` always sets. */
+function candidatePath(config: RolloverConfig): string {
+  if (config.idleRolloverCandidatesPath === undefined) throw new Error('the test config has no candidate path')
+  return config.idleRolloverCandidatesPath
+}
 
 /** Every context a test mounted, disposed after it. */
 const contexts: Context[] = []
@@ -81,8 +88,11 @@ async function mount(): Promise<Context> {
 
 /** Engine configuration with the watchdog on and a rollover point no test reaches by accident. */
 async function configFor(overrides: Partial<RolloverConfig> = {}): Promise<RolloverConfig> {
+  const candidateDir = await mkdtemp(join(tmpdir(), 'dsh-idle-candidates-'))
+  scratchDirs.push(candidateDir)
   return {
     notesDir: await tempNotesDir(),
+    idleRolloverCandidatesPath: join(candidateDir, 'candidates.json'),
     idleRollover: true,
     idleRolloverAfterMs: AFTER_MS,
     idleRolloverTokens: FLOOR,
@@ -120,9 +130,10 @@ async function rig(options: RigOptions) {
   if (options.roster !== undefined) provideRoster(ctx, options.roster)
   if (options.skill !== false) await mountRolloverSkill(ctx)
   ctx.llm.registerAdapter(['mock'], options.adapter ?? new ScriptedAdapter([usageResponse('answer', ABOVE_FLOOR)]))
-  const engine = new ContextRolloverEngine(ctx, await configFor(options.config))
+  const config = await configFor(options.config)
+  const engine = new ContextRolloverEngine(ctx, config)
   const agent = await ctx.agentLoop.create(SessionId(options.id), { provider: MODEL, model: MODEL })
-  return { ctx, engine, agent, session: agent.session }
+  return { ctx, engine, agent, session: agent.session, config }
 }
 
 /** Every user message in a session's durable log whose only content is `text`, whatever its source. */
@@ -225,6 +236,62 @@ describe('idle rollover watchdog', () => {
     expect(sends[0]?.source.kind).toBe('user')
   })
 
+  it('measures idle from the last real activity, not from a load marker written a minute ago', async () => {
+    vi.setSystemTime(T0 - 41 * MINUTE)
+    const { agent, session } = await rig({ id: 'loaded' })
+    await followup(agent, 'first question')
+    await agent.whenIdle()
+
+    vi.setSystemTime(T0 - MINUTE)
+    session.append('session/end-seed', {})
+    expect(rolloverSends(session)).toHaveLength(0)
+
+    vi.setSystemTime(T0)
+    await advance(TICK_MS)
+    await agent.whenIdle()
+    expect(rolloverSends(session)).toHaveLength(1)
+  })
+
+  it('never fires a session that fell to the floor, and drops it from the candidate file', async () => {
+    const { ctx, engine, agent, session, config } = await rig({ id: 'dropped' })
+    await followup(agent, 'first question')
+    await advance(TICK_MS)
+    expect(new CandidateStore({ path: candidatePath(config), warn: () => {} }).get(session.id)).toBeDefined()
+
+    Object.assign(engine.config, { idleRolloverTokens: ctx.tokenMeter.measure(session).totalTokens + 1 })
+    await advance(AFTER_MS + TICK_MS)
+    await agent.whenIdle()
+    expect(rolloverSends(session)).toHaveLength(0)
+    expect(new CandidateStore({ path: candidatePath(config), warn: () => {} }).get(session.id)).toBeUndefined()
+  })
+
+  it('marks a live session above the floor and fires it from the file on the same sweep', async () => {
+    const { agent, session, config } = await rig({ id: 'marked-by-sweep' })
+    await followup(agent, 'first question')
+
+    // Drop the record the pre-step wrote, so the sweep's own marking pass is what
+    // puts the session in front of the fire pass. Reading through a new store also
+    // proves the file on disk, not a cached copy, is what the sweep sees.
+    new CandidateStore({ path: candidatePath(config), warn: () => {} }).remove(session.id)
+    expect(new CandidateStore({ path: candidatePath(config), warn: () => {} }).get(session.id)).toBeUndefined()
+
+    await advance(AFTER_MS + TICK_MS)
+    await agent.whenIdle()
+
+    expect(rolloverSends(session)).toHaveLength(1)
+    expect(new CandidateStore({ path: candidatePath(config), warn: () => {} }).get(session.id)).toBeDefined()
+  })
+
+  it('sends nothing to a session whose log holds a load marker alone', async () => {
+    vi.setSystemTime(T0 - MINUTE)
+    const { session } = await rig({ id: 'load-only' })
+    session.append('session/end-seed', {})
+
+    vi.setSystemTime(T0)
+    await advance(TICK_MS * 3)
+    expect(rolloverSends(session)).toHaveLength(0)
+  })
+
   it('sends nothing at exactly the token floor and fires one token above it', async () => {
     const { ctx, agent, session, engine } = await rig({ id: 'floor' })
     await followup(agent, 'first question')
@@ -241,7 +308,34 @@ describe('idle rollover watchdog', () => {
     expect(rolloverSends(session)).toHaveLength(1)
   })
 
-  it('sends nothing at the session rollover point and fires one token below it', async () => {
+  it('commits the automatic rollover at the pre-step of the fired turn and still reaches the model', async () => {
+    const adapter = new ScriptedAdapter([usageResponse('answer', ABOVE_FLOOR)])
+    const { ctx, engine, agent, session } = await rig({
+      id: 'auto-commit-fire',
+      adapter,
+      config: { automaticRollover: true, retainTokens: 0, automaticRolloverRetainTokens: 200 },
+    })
+    const filler = 'detail '.repeat(600)
+    await followup(agent, `turn 1 ${filler}`)
+    await followup(agent, `turn 2 ${filler}`)
+    await agent.whenIdle()
+    expect(countRollovers(session)).toBe(0)
+
+    const points = engine.config.modelThresholds[MODEL]
+    if (points === undefined) throw new Error('the test model has no rollover entry')
+    points.thresholdTokens = ctx.tokenMeter.measure(session).totalTokens
+
+    await advance(AFTER_MS + TICK_MS)
+    await agent.whenIdle()
+
+    expect(rolloverSends(session)).toHaveLength(1)
+    expect(countRollovers(session)).toBeGreaterThanOrEqual(1)
+    const carried = adapter.recorded.some(request => request.messages.some(message =>
+      message.content.some(block => block.type === 'text' && block.text.includes('/rollover'))))
+    expect(carried).toBe(true)
+  })
+
+  it('fires at and above the session rollover point', async () => {
     const { ctx, agent, session, engine } = await rig({ id: 'rollover-point' })
     await followup(agent, 'first question')
     const total = ctx.tokenMeter.measure(session).totalTokens
@@ -250,11 +344,6 @@ describe('idle rollover watchdog', () => {
 
     points.thresholdTokens = total
     await advance(AFTER_MS + TICK_MS)
-    await agent.whenIdle()
-    expect(rolloverSends(session)).toHaveLength(0)
-
-    points.thresholdTokens = total + 1
-    await advance(TICK_MS)
     await agent.whenIdle()
     expect(rolloverSends(session)).toHaveLength(1)
   })
@@ -607,34 +696,6 @@ describe('idle rollover watchdog', () => {
     expect(info.mock.calls.filter(([line]) => String(line).includes('no skills service'))).toHaveLength(1)
 
     await mountRolloverSkill(ctx)
-    await advance(TICK_MS)
-    await agent.whenIdle()
-    expect(rolloverSends(session)).toHaveLength(1)
-  })
-
-  it('takes the rollover point from the engine that serves the session, not from the host row', async () => {
-    let preset: ContextRolloverEngine | undefined
-    const { ctx, agent, session } = await rig({
-      id: 'served-by-preset',
-      roster: { serviceFor: () => preset },
-      config: { modelSurface: 'always' },
-    })
-    await followup(agent, 'first question')
-    const total = ctx.tokenMeter.measure(session).totalTokens
-
-    // The preset's point sits just below the measured usage; the host row's point is far above it.
-    const presetEngine = new ContextRolloverEngine(ctx.isolate('compaction'), await configFor({
-      modelThresholds: { [MODEL]: { thresholdTokens: total - 1, reminderThresholdTokens: total - 1 } },
-    }))
-    preset = presetEngine
-    await advance(AFTER_MS + TICK_MS)
-    await agent.whenIdle()
-    expect(rolloverSends(session)).toHaveLength(0)
-
-    // Control: lifting the preset's point above the usage lets the same session fire.
-    const points = presetEngine.config.modelThresholds[MODEL]
-    if (points === undefined) throw new Error('the test model has no rollover entry')
-    points.thresholdTokens = total + 1
     await advance(TICK_MS)
     await agent.whenIdle()
     expect(rolloverSends(session)).toHaveLength(1)

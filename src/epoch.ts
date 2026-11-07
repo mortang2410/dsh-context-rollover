@@ -7,7 +7,7 @@
  * @module dsh-context-rollover/epoch
  */
 
-import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 import { sessionEvents } from './compat.ts'
 import { ROLLOVER_PROVIDER } from './rollover.ts'
 
@@ -56,6 +56,46 @@ export function committedRollovers(session: Session): CommittedRollovers {
   return newestEndSeq === undefined
     ? { count: committed.size }
     : { count: committed.size, newestEndSeq }
+}
+
+/**
+ * Whether this event is the `turn/end` the host appends when it closes a turn
+ * that was still open in a stored log. That closer carries the `interrupted`
+ * reason, which the live loop never writes.
+ * @param event - the logged event to test.
+ * @returns true for the interrupted-turn closer.
+ */
+function isInterruptedTurnEnd(event: SessionEvent): boolean {
+  return event.type === 'turn/end' && event.data.reason.kind === 'interrupted'
+}
+
+/**
+ * The time of the newest real activity in one session's log, with the load
+ * artifacts excluded. Loading or resuming a stored session appends a trailing
+ * `session/end-seed` marker stamped at load time, and the resume path appends
+ * the open turn's closers immediately before it: zero or more `tool/result`
+ * events, an optional `step/end`, and a `turn/end` whose reason is
+ * `interrupted`. None of those events is activity by the person or the model, so
+ * the idle clock ignores them; without that exclusion, opening a session would
+ * restart its idle time. A log that holds only load artifacts has no activity
+ * time.
+ * @param session - the session whose log to read.
+ * @returns the millisecond time of the newest real event, or undefined when the
+ * log holds load artifacts only.
+ */
+export function lastRealActivityAt(session: Session): number | undefined {
+  const events = sessionEvents(session)
+  let end = events.length
+  if (end === 0) return undefined
+  if (events[end - 1]?.type === 'session/end-seed') {
+    end -= 1
+    if (end > 0 && isInterruptedTurnEnd(events[end - 1]!)) {
+      end -= 1
+      if (events[end - 1]?.type === 'step/end') end -= 1
+      while (end > 0 && events[end - 1]?.type === 'tool/result') end -= 1
+    }
+  }
+  return end === 0 ? undefined : events[end - 1]?.time
 }
 
 /**

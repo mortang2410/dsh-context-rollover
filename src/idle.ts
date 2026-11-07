@@ -13,7 +13,6 @@ export type IdleSkipReason =
   | 'queued-work'
   | 'idle-too-short'
   | 'tokens-not-above-floor'
-  | 'above-rollover-point'
   | 'backend-not-rollover'
   | 'no-new-context-tool'
   | 'skill-unavailable'
@@ -34,8 +33,6 @@ export interface IdleFireInputs {
   readonly baselineKnown: boolean
   /** The measured total tokens of the session's context. */
   readonly totalTokens: number
-  /** The session's own rollover point in tokens, for its routed model. */
-  readonly rolloverPointTokens: number
   /** Whether a compaction backend that is not this plugin's engine owns the session. */
   readonly foreignBackendOwnsCompaction: boolean
   /** Whether the `new_context` tool is available to the session's agent. */
@@ -83,10 +80,10 @@ export function hasSlashGesture(text: string): boolean {
 /**
  * Decide whether the watchdog fires for one candidate session. The gates run in
  * order and the first failing gate is the reason. The idle threshold is
- * inclusive. The tokens must be strictly above the floor. At or above the
- * session's rollover point the watchdog stands down, because the deployed
- * automatic rollover commits there at a pre-step and would shadow the context
- * before the model writes its handoff.
+ * inclusive. The tokens must be strictly above the floor, and nothing above the
+ * floor is a refusal: a session at or above its own rollover point still gets
+ * the message, because the automatic commit is the engine's own and this
+ * watchdog neither suppresses nor defers it.
  * @param config - the two thresholds the watchdog reads.
  * @param inputs - the values the caller measured for the candidate.
  * @returns `{ fire: true }` when every gate passes, otherwise `{ fire: false, reason }`.
@@ -102,7 +99,6 @@ export function decideIdleFire(
   if (!inputs.baselineKnown || inputs.totalTokens <= config.idleRolloverTokens) {
     return { fire: false, reason: 'tokens-not-above-floor' }
   }
-  if (inputs.totalTokens >= inputs.rolloverPointTokens) return { fire: false, reason: 'above-rollover-point' }
   if (inputs.foreignBackendOwnsCompaction) return { fire: false, reason: 'backend-not-rollover' }
   if (!inputs.newContextAvailable) return { fire: false, reason: 'no-new-context-tool' }
   if (!inputs.skillAvailable) return { fire: false, reason: 'skill-unavailable' }
