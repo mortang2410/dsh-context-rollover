@@ -33,12 +33,13 @@ function checkpointText(text: string): string {
 /**
  * What one rollover writes in place of the replaced span.
  *
- * Two compositions exist because there are two continuation contracts, and
+ * Three compositions exist because there are three continuation contracts, and
  * they are not interchangeable. The notes checkpoint surrounds the state it
  * carries with engine-authored narration and section headings. A handoff
  * document is a complete continuation contract written for a cold reader, so
  * its bytes must reach the fresh context unchanged, with nothing prepended,
- * appended or wrapped.
+ * appended or wrapped. A compiled copy is already framed by the compiler's own
+ * preamble and recall guide, so its text is likewise carried unchanged.
  */
 export type RolloverReplacement =
   | {
@@ -56,9 +57,23 @@ export type RolloverReplacement =
       /** Path the text was read from; named by a refusal or a diagnostic. */
       readonly path?: string
     }
+  | {
+      /**
+       * The compiled copy of the replaced span: the recall guide first, the
+       * durable notes header after it when notes exist, then the framed
+       * compiled entries.
+       */
+      readonly kind: 'compiled'
+      /** 1-based number of the window the rollover starts (summary metadata). */
+      readonly windowNumber: number
+      /** The exact replacement text the composer built. */
+      readonly text: string
+    }
 
 /**
- * The window number a rollover starts, whichever composition it uses.
+ * The window number a rollover starts, whichever composition it uses. The
+ * compiled variant is a spread of the handoff-document variant with a different
+ * `kind`, so this reads the same field for both.
  * @param replacement - the replacement the caller selected.
  * @returns the 1-based window number.
  */

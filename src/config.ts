@@ -270,6 +270,24 @@ export interface RolloverConfig {
    * `~/.dsh/idle-rollover-candidates.json`.
    */
   idleRolloverCandidatesPath?: string
+  /**
+   * Ceiling, in compiler tokens, for the compiled body of one forced rollover.
+   * Defaults to `65536`, VCC's published cap. The compiler also never exceeds
+   * half of the shadowed span, whichever is smaller.
+   */
+  checkpointCap?: number
+  /** Assistant text budget, in tokens, for one compiled entry. Defaults to `1500`. */
+  assistantTextTokens?: number
+  /** User text budget, in tokens, for one compiled entry. Defaults to `2000`. */
+  userTextTokens?: number
+  /** Tool-call one-liner and tool-result excerpt budgets, in tokens. Default to `200`. */
+  toolCallTokens?: number
+  /** Carry assistant reasoning blocks into the compiled copy. Defaults to `false`. */
+  includeReasoning?: boolean
+  /** Tools whose key argument is rendered in a compiled tool-call line. Empty keeps VCC's list. */
+  toolArgTools?: string[]
+  /** Bookkeeping tools dropped from the compiled copy entirely. Empty hides nothing. */
+  hideTools?: string[]
 }
 
 /** Absolute token points for one routed model, replacing its ratio-based points. */
@@ -318,6 +336,13 @@ export const Config: z<RolloverConfig> = z.object({
   idleRolloverMessage: z.string(),
   idleRolloverTickMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS),
   idleRolloverCandidatesPath: z.string(),
+  checkpointCap: z.number().step(1).min(1),
+  assistantTextTokens: z.number().step(1).min(1),
+  userTextTokens: z.number().step(1).min(1),
+  toolCallTokens: z.number().step(1).min(1),
+  includeReasoning: z.boolean(),
+  toolArgTools: z.array(z.string()),
+  hideTools: z.array(z.string()),
 })
 
 /** Resolved and validated rollover configuration. */
@@ -359,6 +384,20 @@ export interface ResolvedRolloverConfig {
   readonly idleRolloverTickMs: number
   /** Absolute path of the candidate file that survives a host restart. */
   readonly idleRolloverCandidatesPath: string
+  /** Ceiling, in compiler tokens, for the compiled body of one forced rollover. */
+  readonly checkpointCap: number
+  /** Assistant text budget, in tokens, per compiled entry. */
+  readonly assistantTextTokens: number
+  /** User text budget, in tokens, per compiled entry. */
+  readonly userTextTokens: number
+  /** Tool-call one-liner and tool-result excerpt budgets, in tokens. */
+  readonly toolCallTokens: number
+  /** Carry assistant reasoning blocks into the compiled copy. */
+  readonly includeReasoning: boolean
+  /** Tools whose key argument is rendered in a compiled tool-call line. */
+  readonly toolArgTools: readonly string[]
+  /** Bookkeeping tools dropped from the compiled copy. */
+  readonly hideTools: readonly string[]
 }
 
 /** Reject a ratio that cannot represent a fraction of a context window. */
@@ -380,6 +419,15 @@ function validateTokenCount(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError(`context-rollover: ${name} must be a positive integer, got ${String(value)}`)
   }
+}
+
+/**
+ * Reject a list entry that is not a non-empty tool name.
+ * @param name - the configuration key, for the error message.
+ * @param values - the list to check.
+ */
+function validateStringList(name: string, values: readonly string[]): void {
+  for (const value of values) validateNonEmptyString(`${name} entry`, value)
 }
 
 /**
@@ -485,6 +533,22 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
   }
   const idleRolloverCandidatesPath = config.idleRolloverCandidatesPath ?? join(homedir(), '.dsh', 'idle-rollover-candidates.json')
   validateNonEmptyString('idleRolloverCandidatesPath', idleRolloverCandidatesPath)
+  const checkpointCap = config.checkpointCap ?? 65536
+  validateTokenCount('checkpointCap', checkpointCap)
+  const assistantTextTokens = config.assistantTextTokens ?? 1500
+  validateTokenCount('assistantTextTokens', assistantTextTokens)
+  const userTextTokens = config.userTextTokens ?? 2000
+  validateTokenCount('userTextTokens', userTextTokens)
+  const toolCallTokens = config.toolCallTokens ?? 200
+  validateTokenCount('toolCallTokens', toolCallTokens)
+  const includeReasoning = config.includeReasoning ?? false
+  if (typeof includeReasoning !== 'boolean') {
+    throw new TypeError(`context-rollover: includeReasoning must be a boolean, got ${String(includeReasoning)}`)
+  }
+  const toolArgTools = config.toolArgTools ?? []
+  validateStringList('toolArgTools', toolArgTools)
+  const hideTools = config.hideTools ?? []
+  validateStringList('hideTools', hideTools)
   return {
     thresholdRatio,
     automaticRollover,
@@ -510,6 +574,13 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
     idleRolloverMessage,
     idleRolloverTickMs,
     idleRolloverCandidatesPath,
+    checkpointCap,
+    assistantTextTokens,
+    userTextTokens,
+    toolCallTokens,
+    includeReasoning,
+    toolArgTools,
+    hideTools,
   }
 }
 
