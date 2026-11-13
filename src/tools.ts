@@ -1,7 +1,8 @@
 /**
  * The plugin's model-facing tools: `new_context`, `get_context_remaining`,
- * `notes`, and `history`. The tools only request or report; the rollover
- * boundary itself is crossed by the engine at a safe lifecycle point.
+ * `notes`, `history`, `recall`, and `search`. The first four only request or
+ * report, and the rollover boundary itself is crossed by the engine at a safe
+ * lifecycle point; `recall` and `search` read the durable log back.
  *
  * @module dsh-context-rollover/tools
  */
@@ -18,6 +19,8 @@ import type { ResolvedRolloverConfig } from './config.ts'
 import { readHandoffFileOrThrow } from './handoff.ts'
 import { readHistoryItem, searchHistory } from './history.ts'
 import { NotesStore } from './notes.ts'
+import { DEFAULT_MAX_RECALL_TOKENS, recallByCheckpoint, recallByResult, recallBySeq } from './recall.ts'
+import { searchLog } from './search.ts'
 import { sessionEvents } from './compat.ts'
 import { countRollovers, preflightRolloverReplacement, replacementSubject, rolloverSummarySeqs, rolloverTooLargeMessage } from './rollover.ts'
 import type { PendingRollover } from './state.ts'
@@ -563,6 +566,104 @@ function historyTool() {
   })
 }
 
+/** What one `recall` call names: an event position, a tool result, or a checkpoint. */
+type RecallReference = 'seq' | 'result' | 'checkpoint'
+
+/**
+ * The `recall` tool: VCC's complete text projection of one log record, within
+ * the recall budget. Every pointer a compiled checkpoint writes resolves here.
+ * @param maxRecallTokens - the budget one call may read; a later ticket threads
+ *   the configured key, so this defaults to VCC's published value.
+ */
+function recallTool(maxRecallTokens: number) {
+  return defineTool({
+    name: 'recall',
+    description:
+      'Restore the exact original content of earlier events in THIS conversation by a typed reference, '
+      + 'never a paraphrase: the durable log is append-only, so recalled content is always the original tokens. '
+      + 'type="seq" with an event selection ("12", "3-7", "seq 12", "seqs 3-7" — the checkpoint marker forms) '
+      + 'restores those events; type="result" with the "result N" pointer from a tool call (or the bare seq) '
+      + 'restores that tool result; type="checkpoint" with an ordinal ("1" = oldest, as in a "[checkpoint N]" '
+      + 'line) or a "seq N" pointer restores that checkpoint. To find events by keyword instead, use the search tool.',
+    parameters: {
+      type: {
+        type: 'string',
+        enum: ['seq', 'result', 'checkpoint'],
+        required: true,
+        description: 'Reference type: "seq" for events by position, "result" for a tool result, "checkpoint" for a whole checkpoint.',
+      },
+      id: {
+        type: 'string',
+        required: true,
+        description: 'Type-dependent reference: "3-7,15" or "seq 12" for seq; "result 3" or "3" for result; "1", "checkpoint 1", or "seq 12345" for checkpoint.',
+      },
+      max_tokens: {
+        type: 'integer',
+        description: `Budget for this call in tokens (default ${maxRecallTokens}). A record larger than the budget comes back cut, with a marker naming the cut.`,
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args, rawValue) => {
+        const value = rawValue as unknown as { text: string }
+        return [{ type: 'text', text: value.text }]
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const session = requireSession(exec)
+      const budget = args.max_tokens ?? maxRecallTokens
+      const reference = args.type as RecallReference
+      switch (reference) {
+        case 'seq':
+          return { text: recallBySeq(session, args.id, budget).text }
+        case 'result':
+          return { text: recallByResult(session, args.id, budget).text }
+        case 'checkpoint':
+          return { text: recallByCheckpoint(session, args.id, budget).text }
+        default:
+          throw new Error(`invalid recall type "${String(reference)}"; expected "seq", "result", or "checkpoint"`)
+      }
+    },
+  })
+}
+
+/**
+ * The `search` tool: keyword or regular-expression search over every record of
+ * this session's log, reporting the log positions `recall` accepts.
+ * @param maxRecallTokens - the budget the matching lines are rendered under.
+ */
+function searchTool(maxRecallTokens: number) {
+  return defineTool({
+    name: 'search',
+    description:
+      'Search THIS conversation\'s durable event log by keyword or regular expression (case-insensitive, '
+      + 'Unicode-aware). Every event ever recorded is searchable, including text elided or cut by a compiled '
+      + 'checkpoint, because the log is append-only and untouched. Returns the matching records with their '
+      + '(seq N) positions and the matching lines; then call recall with that position to restore the full '
+      + 'exact original content. Escape regex special characters when you mean them literally.',
+    parameters: {
+      query: {
+        type: 'string',
+        required: true,
+        description: 'Keyword or regular expression to search for (case-insensitive).',
+      },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args, rawValue) => {
+        const value = rawValue as unknown as { text: string }
+        return [{ type: 'text', text: value.text }]
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const session = requireSession(exec)
+      return { text: searchLog(session, args.query, maxRecallTokens).text }
+    },
+  })
+}
+
 /**
  * Build the plugin's tools for one engine instance.
  * @param deps - runtime collaborators shared with the engine.
@@ -580,6 +681,8 @@ export function createRolloverTools(
     getContextRemainingTool(deps),
     ...(notesEnabled ? [notesTool(deps)] : []),
     ...(historyEnabled ? [historyTool()] : []),
+    recallTool(DEFAULT_MAX_RECALL_TOKENS),
+    searchTool(DEFAULT_MAX_RECALL_TOKENS),
   ]
   return tools
 }

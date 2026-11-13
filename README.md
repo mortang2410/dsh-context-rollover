@@ -22,7 +22,8 @@ protocol and compaction transaction.
 > compaction from the session's **agent preset**, and the shipped presets
 > (`standard`, `cordis`, `ptc`) stay exactly as they are: they keep the built-in
 > summarizer and get **no rollover tools and no rollover guidance** — no
-> `new_context`, no `get_context_remaining`, no `notes`, no `history`. A
+> `new_context`, no `get_context_remaining`, no `notes`, no `history`, no
+> `recall`, no `search`. A
 > `standard` or `cordis` session cannot roll over at all.
 >
 > This bundle ships **two** rollover presets, and a session uses exactly one:
@@ -103,6 +104,15 @@ Responsibilities stay split (the Codex lesson):
   automatically; the model decides what survives.
 - **`history`** — `search | read` over conversation that left the active
   surface. Targeted recovery, not wholesale reconstruction.
+- **`recall`** — restore the exact original text of one log record by a typed
+  reference: `type: "seq"` with a position or range (`12`, `3-7`, `seq 12`), `type:
+  "result"` with a tool result's position (`result 3`), or `type: "checkpoint"`
+  with an ordinal (`1` is the oldest). Media comes back as a label, and a record
+  larger than the recall budget (16000 tokens by default, `max_tokens` per call)
+  comes back cut, and the cut carries a marker plus the call that reads the rest.
+- **`search`** — keyword or regular-expression search over every record in the
+  log, including text only a tool result ever held, reported with the log
+  positions `recall` accepts.
 
 ### Rollover paths
 
@@ -240,7 +250,7 @@ Accepted residuals:
 
 ## What this plugin touches
 
-- **Registers four model-facing tools** (`new_context`, `get_context_remaining`, `notes`, `history`)
+- **Registers six model-facing tools** (`new_context`, `get_context_remaining`, `notes`, `history`, `recall`, `search`)
   and one system-prompt section — on headless profiles in every session; on
   the Web profile only inside `standard-rollover` sessions (other presets stay
   exactly as shipped).
