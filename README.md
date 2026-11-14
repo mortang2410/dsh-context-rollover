@@ -6,8 +6,9 @@ working context window and continue in a fresh one while preserving durable
 state — with **no summarization**.
 
 ```text
-fresh working context = standing instructions + the durable handoff document you wrote; nothing else
-(model-driven path; the automatic rollover keeps a recent tail and the notes checkpoint)
+model-driven path: fresh working context = standing instructions + the handoff document you wrote; nothing else
+automatic path:    fresh working context = standing instructions + a compiled copy of the replaced span + a recent tail
+manual /compact:  fresh working context = standing instructions + the deterministic notes checkpoint
 ```
 
 Inspired by the context-management architecture in `openai/codex` (the
@@ -53,8 +54,9 @@ must additionally live in the session's agent preset — see
 compaction: `compaction/start` → `compaction/summary` → one replacement
 `user/message` with full source provenance → `compaction/end` — but the
 "summary" is the **handoff document's own bytes** on the model-driven path, the
-deterministic notes checkpoint on the manual and automatic paths, and never an
-LLM call. Raw session events stay persisted and the session id is unchanged;
+deterministic notes checkpoint on the manual `/compact` path, the **compiled
+copy of the replaced span** on the automatic path, and never an LLM call. Raw
+session events stay persisted and the session id is unchanged;
 `deriveMessages()` rebuilds automatically.
 
 After a rollover the model-visible context is the standing system/developer
@@ -62,8 +64,10 @@ instructions plus the replacement. On the model-driven path **no recent tail, no
 prior messages and no tool calls carry over** — including the `new_context` call
 that requested the boundary, and including the workspace `AGENTS.md` chain, which
 `dsh-agent-instructions` re-injects from disk because the surface no longer
-carries it. The automatic rollover is the exception: its replacement is the notes
-checkpoint and it keeps a recent tail (see [Rollover paths](#rollover-paths)).
+carries it. The automatic rollover is the exception: its replacement is a compiled
+copy of the span it replaces and it keeps a recent tail (see
+[Rollover paths](#rollover-paths) and
+[Automatic path: the compiled copy](#automatic-path-the-compiled-copy)).
 
 Responsibilities stay split (the Codex lesson):
 
@@ -141,10 +145,11 @@ Responsibilities stay split (the Codex lesson):
    rollover point, in both gate states, and while the gate is on it is the only
    one of the two signals. With `automaticRollover` on (default
    `false`), the engine also rolls over by itself at the next `agent/pre-step`,
-   whether or not the model complied. That automatic rollover commits the notes
-   checkpoint, which carries the model's own handoff when the model wrote one
-   into the notes tool and the notes snapshot when it did not, plus a recent tail;
-   it never reads a handoff file.
+   whether or not the model complied. That automatic rollover commits a compiled
+   copy of the span it replaces: the recall guide, then your durable notes
+   snapshot when there are notes, then the conversation entries the compiler
+   kept, each cut carrying the log position `recall` reads the original from.
+   It keeps a recent tail and never reads a handoff file.
    When another backend owns compaction for a session, this engine does not send
    the reminder and does not log the pressure warnings for that session.
 3. **Overflow** (never a rollover): the engine does not roll over on a
@@ -177,8 +182,10 @@ rollover is retried rather than lost.
 
 Manual `/compact` has no model in the loop and therefore no document to name;
 it composes the deterministic notes checkpoint.
-No engine path reads a handoff directory: `handoffDir` and `handoffPattern` are
-accepted configuration keys that nothing reads.
+No engine path reads a handoff file or scans a handoff directory: `handoffDir` and
+`handoffPattern` are accepted configuration keys that nothing reads, `handoffDir`
+only names the directory the automatic path must prove disjoint from the notes
+store (see [Automatic path: the compiled copy](#automatic-path-the-compiled-copy)).
 
 ### Idle rollover watchdog
 
@@ -459,11 +466,10 @@ silent no-op rather than an error.
 the model can write the handoff, so crossing the point sends the hard per-turn
 reminder, logs one warning per turn, and waits for the model's own `new_context`
 call. With `automaticRollover` on, the engine commits a rollover at the next
-pre-step whether or not the model complied. That rollover carries the
-deterministic notes checkpoint, which holds the model's own handoff when the
-model wrote one into the notes tool and the notes snapshot when it did not, plus
-a recent tail floored by `automaticRolloverRetainTokens` (default 10000, so the
-automatic path keeps a tail even on a row with `retainTokens: 0`).
+pre-step whether or not the model complied. That rollover carries a compiled copy
+of the span it replaces plus a recent tail floored by
+`automaticRolloverRetainTokens` (default 10000, so the automatic path keeps a
+tail even on a row with `retainTokens: 0`).
 
 An earlier design rolled over at 0.90 with no model in the loop. It scanned
 `handoffDir` (default `.scratch/handoff`, relative to the session working
@@ -471,7 +477,7 @@ directory) for `handoffPattern` files (default `HANDOFF-*.md`) and took the
 **newest by modification time**. Handoff files in a shared folder are not tied to
 a session, so that path could load another session's document into the current
 context. No engine path reads a handoff file today: the automatic rollover
-commits the notes checkpoint instead.
+commits a compiled copy of the span it replaces instead.
 
 
 Configuration (cordis.yml `config` on the plugin row):
@@ -512,53 +518,74 @@ Configuration (cordis.yml `config` on the plugin row):
 
 An entry is not checked against the model's window. A `thresholdTokens` at or above the window never fires the rollover before the window fills. With `automaticRollover` off (the default), only `new_context` and `/compact` roll over; with it on, the engine also rolls over at the entry's `thresholdTokens`.
 
-## Local development with HMR
+### Automatic path: the compiled copy
 
-The fast loop runs DSH from your checkout with the plugin linked from this
-directory and Cordis HMR watching the source:
+When the automatic rollover fires, it compiles the span it is about to replace
+into the text the new window starts with. The replaced span is projected from
+the session's own derived messages, compiled under a token budget derived from
+the span, and framed as the recall guide first, your durable notes snapshot
+after it when there are notes, then the entries in log order. Nothing in a
+compiled copy is paraphrased: the conversation text is the source text, and
+every truncation, cut or elision carries the recorded entry it came from,
+either inside the cut marker (`(seq 12)` or `(seqs 5-8)`) or in the cut's own
+suffix (`...(truncated from seq 12)`, which names the head cut and the tail cut
+both). A `recall` call with `type: "`seq`"` and that position then reads the
+original bytes from the append-only log.
 
-1. **Create a dedicated profile and link this package**
+Each compiled copy still names its mode: the summary event's model label is
+`deterministic/compiled-window-N`, the journal line reads
+`context rollover (automatic): compiled mode; window N started`. Manual
+`/compact` keeps its `deterministic/notes-window-N` label and the handoff path
+its `deterministic/handoff-window-N`.
 
-   ```sh
-   dsh plugin --profile rollover-dev add D:/path/to/dsh-context-rollover
-   ```
+The compiler's budgets are configuration keys on the plugin row, validated at
+construction (a non-positive or non-numeric value throws a `TypeError` naming
+the key):
 
-   (A custom profile initializes with just `dsh-base`; the bundle's patch
-   applies automatically because the package declares `dsh.bundle.patch`.)
+| Key | Default | What it bounds |
+|---|---|---|
+| `checkpointCap` | `65536` | ceiling, in compiler tokens, for the compiled body; the compiler also never exceeds half the shadowed span |
+| `assistantTextTokens` | `1500` | assistant text per compiled entry |
+| `userTextTokens` | `2000` | user text per compiled entry |
+| `toolCallTokens` | `200` | tool-call one-liners and tool-result excerpts |
+| `includeReasoning` | `false` | carry assistant reasoning blocks into the copy |
+| `toolArgTools` | VCC's published list | tools whose key argument appears in a tool-call line |
+| `hideTools` | nothing hidden | bookkeeping tools dropped from the copy entirely |
+| `maxRecallTokens` | `16000` | total budget for one `recall` or `search` lookup result, overridden per call by an explicit argument |
 
-2. **Enable the `hmr` row** in `$DSH_HOME/profiles/rollover-dev/cordis.patch.yml`
-   (patch rows replace whole configs, so restate `root`):
+Two read-back tools exist beside the session so a cut is never a loss: a
+`recall` call reads one record by its log position (or a tool result's
+position, or a checkpoint's ordinal), with media as labels and an over-budget
+record cut and marked, and `search` finds a keyword or regular expression
+across every original conversation record and reports the positions `recall`
+accepts.
 
-   ```yaml
-   - id: hmr
-     config:
-       root: ['.', 'D:/path/to/dsh-context-rollover/src']
-       debounce: 100
-   ```
+The compiled copy is smaller than the span it replaces, checked twice: once by
+the engine's meter before the transaction opens, and again by the commit-time
+shrink guard. A candidate that does not shrink, a span the projection cannot
+rebuild, and a compile that keeps no entries all defer: nothing is committed, and
+the next pre-step retries.
 
-   The base bundle mounts `hmr` disabled by default; the `timer` row it needs
-   is already active.
+Configuring `notesDir` inside the effective `handoffDir` (or the reverse), judged
+by both paths as written and as their realpaths resolve, makes the automatic path
+refuse with a `TypeError` naming `notesDir` before it reads, stats or lists the
+notes store. The refusal covers a relative `notesDir`, a nested one, a symlinked
+handoff directory, and a symlinked notes base whose per-session directory does not
+exist yet. The refusal is logged and the turn continues; no rollover commits from
+that configuration. The handoff directory is never read, stated or listed by the
+automatic path: only its own path and realpath are compared with the notes store.
 
-3. **Run DSH from source**
-
-   ```sh
-   cd /path/to/deepseek-harness
-   pnpm run build          # once; Typert host artifacts are required
-   pnpm dsh --profile rollover-dev
-   ```
-
-   Source launch runs through tsx (`node --import tsx/esm`), which is what makes
-   hot reload of TypeScript plugin sources work.
-
-4. **Edit `src/*.ts` in this package** — the affected plugin reloads in place;
-   registrations (tools, system-prompt sections, event listeners) unwind and
-   reapply through Cordis effects. Profile patch edits also recompose live
-   (`patchReload: live` is the default for custom profiles).
-
-5. **Restart is still required for**: initial bundle installation, bundle
-   membership changes (`dsh.plugin add/remove`), framework-level dependency
-   changes (Cordis falls back to `loader.exit()`), and anything HMR cannot
-   safely swap.
+`tests/forced-rollover-e2e.spec.ts` drives real crossings through the engine's
+pre-step with a handoff document planted in the configured handoff directory, and
+asserts the compiled copy's markers, its log positions, the notes snapshot, the
+absence of the planted document, no handoff reader call and no filesystem access
+of that directory, plus the overlapping-root refusals and a composed copy that
+stays under half its span's price.
+`tests/mutation-check.sh` breaks the compiled marker, the log-position marker and
+the half-the-span cap in turn, shows that named test failing for each, then proves
+`tests/readme-check.mjs` rejects a README with any anchored key, tool or word
+removed and accepts the real one. The script backs up the sources it edits and
+restores them on every exit, so the tree matches the commit afterwards.
 
 ### Windows: `link:` junctions and Git Bash
 
@@ -591,6 +618,8 @@ their relaxed strictness.
 pnpm install
 pnpm test        # surface, notes, history, engine integration, tool rendering
 pnpm typecheck
+bash tests/mutation-check.sh   # the end-to-end spec and the README check fail when they should
+node tests/readme-check.mjs    # the compiled-copy section still names its keys, tools and guarantees
 ```
 
 Tests mount the real session store, token meter, tool runtime, agent loop,
@@ -634,11 +663,11 @@ first, so `pnpm test` works whether or not `pnpm build` has run.
   contains the handoff document and nothing else: no notes, no narration, no older
   user prompts and no tail. With `retainTokens`, the recent tail that budget
   selects follows it. The automatic rollover is the exception: it composes the
-  notes checkpoint and always keeps its `automaticRolloverRetainTokens` tail
+  compiled copy and always keeps its `automaticRolloverRetainTokens` tail
   (default 10000).
 - With `automaticRollover` off (the default), the only rollovers are the model's
   own `new_context` call and manual `/compact`; with it on, the engine also rolls
-  over at the rollover point, committing the notes checkpoint plus a recent tail.
+  over at the rollover point, committing the compiled copy plus a recent tail.
   Crossing the rollover point never picks a handoff file, and a provider-confirmed
   overflow does not roll over: the provider error reaches the user unchanged.
 - Manual `/compact` composes the deterministic notes checkpoint. The
