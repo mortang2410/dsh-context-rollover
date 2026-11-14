@@ -24,8 +24,10 @@
 # The fourth check mutates no source. It copies the README into scratch, drops every
 # anchored word `tests/readme-check.mjs` asserts from its section, and requires each
 # dropped word to be named by a failure line; then it asks the same check to reject a
-# README with no such section, and to accept the real one. That is what keeps the
-# README check from passing everything.
+# README with no such section, and to accept the real one. It also removes each
+# compiler-key table row, each read-back tool's tool-list entry, and the manual-path
+# sentence from a whole-README copy, one removal per run, and requires the failure
+# line naming it. That is what keeps the README check from passing everything.
 #
 # Every edit is a byte-level backup plus a `python3` whole-string replacement with
 # an asserted occurrence count, never a `sed` expression: the frame deletion spans
@@ -351,7 +353,76 @@ PY
     sed 's/^/  /' "$LOG_DIR/$name.real.log" >&2
     status+=("fail"); return
   fi
-  echo "mutation-check: killed $name; it rejected a broken and an absent section and passed the real README"
+
+  # The compiler-key guards and the global assertions the check makes outside
+  # the compiled-copy section: the section-only copy above never reaches them
+  # on a full document, so deleting the COMPILER_KEYS loop would leave it
+  # green. Each probe drops one table row from a whole-README copy and
+  # requires the failure line naming the key.
+  for key in checkpointCap assistantTextTokens userTextTokens toolCallTokens includeReasoning toolArgTools hideTools maxRecallTokens; do
+    local key_copy="$WORK_DIR/README.key-$key.md"
+    local key_log="$LOG_DIR/$name.key-$key.log"
+    if ! python3 - "$good" "$key_copy" "$key" <<'PY'
+import sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text(encoding='utf-8')
+key = sys.argv[3]
+lines = source.splitlines(keepends=True)
+hits = [i for i, line in enumerate(lines) if f'| `{key}` |' in line]
+if len(hits) != 1:
+    raise SystemExit(f'mutation-check: the README has {len(hits)} table rows for {key}, expected 1')
+Path(sys.argv[2]).write_text(''.join(line for i, line in enumerate(lines) if i != hits[0]), encoding='utf-8')
+PY
+    then
+      echo "mutation-check: FAIL $name could not drop the $key table row" >&2
+      status+=("fail"); return
+    fi
+    local krc=0
+    timeout 60s node "$README_CHECK" "$key_copy" >"$key_log" 2>&1 || krc=$?
+    if [ $krc -ne 1 ] || ! grep -qF -- "\`$key\`" "$key_log"; then
+      echo "mutation-check: FAIL $name did not report the removed $key table row (exit $krc; log: $key_log)" >&2
+      status+=("fail"); return
+    fi
+    echo "mutation-check: killed $name key-$key; the check names the missing \`$key\` row"
+  done
+
+  # The global assertions, one removal per run on a whole-README copy: each
+  # read-back tool's tool-list entry, and the manual-path sentence that
+  # composes the notes checkpoint.
+  for tool in recall search; do
+    local tool_copy="$WORK_DIR/README.global-tool-$tool.md"
+    local tool_log="$LOG_DIR/$name.global-tool-$tool.log"
+    cp -- "$good" "$tool_copy"
+    if ! apply_replacement "$tool_copy" "**\`$tool\`**" '' 1; then
+      echo "mutation-check: FAIL $name could not drop the $tool tool-list entry" >&2
+      status+=("fail"); return
+    fi
+    local trc=0
+    timeout 60s node "$README_CHECK" "$tool_copy" >"$tool_log" 2>&1 || trc=$?
+    if [ $trc -ne 1 ] || ! grep -qF -- "never lists the \`$tool\` tool in its tool list" "$tool_log"; then
+      echo "mutation-check: FAIL $name did not report the removed $tool tool-list entry (exit $trc; log: $tool_log)" >&2
+      status+=("fail"); return
+    fi
+    echo "mutation-check: killed $name tool-$tool; the check names the missing \`$tool\` tool-list entry"
+  done
+  local claim_copy="$WORK_DIR/README.global-manual-claim.md"
+  local claim_log="$LOG_DIR/$name.global-manual-claim.log"
+  cp -- "$good" "$claim_copy"
+  if ! apply_replacement "$claim_copy" 'Manual `/compact` has no model in the loop and therefore no document to name;
+the manual path is what composes the notes checkpoint.
+' '' 1; then
+    echo "mutation-check: FAIL $name could not drop the manual-path sentence" >&2
+    status+=("fail"); return
+  fi
+  local crc=0
+  timeout 60s node "$README_CHECK" "$claim_copy" >"$claim_log" 2>&1 || crc=$?
+  if [ $crc -ne 1 ] || ! grep -qF -- 'never says the manual path is what composes the notes checkpoint' "$claim_log"; then
+    echo "mutation-check: FAIL $name did not report the removed manual-path sentence (exit $crc; log: $claim_log)" >&2
+    status+=("fail"); return
+  fi
+  echo "mutation-check: killed $name manual-claim; the check names the missing manual-path sentence"
+
+  echo "mutation-check: killed $name; it rejected a broken and an absent section and passed the real README, and named every dropped key, tool-list entry and the manual claim on full copies"
   status+=("killed")
 }
 

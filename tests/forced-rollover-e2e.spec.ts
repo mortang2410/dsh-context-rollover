@@ -613,7 +613,7 @@ describe('overlapping notes and handoff roots are refused before any notes acces
       notesDir: cwd,
     })
 
-    expect(refusal.refusal).toMatch(/^TypeError: context-rollover: notesDir /)
+    expect(refusal.refusal).toMatch(/^context-rollover: notesDir /)
     expect(refusal.refusal).toContain(resolve(cwd))
     assertRefusedBeforeNotes(refusal)
   })
@@ -627,7 +627,7 @@ describe('overlapping notes and handoff roots are refused before any notes acces
       notesDir: join(handoffDir, 'notes'),
     })
 
-    expect(refusal.refusal).toMatch(/^TypeError: context-rollover: notesDir /)
+    expect(refusal.refusal).toMatch(/^context-rollover: notesDir /)
     expect(refusal.refusal).toContain(resolve(handoffDir))
     assertRefusedBeforeNotes(refusal)
   })
@@ -644,7 +644,7 @@ describe('overlapping notes and handoff roots are refused before any notes acces
       notesDir: notesBase,
     })
 
-    expect(refusal.refusal).toMatch(/^TypeError: context-rollover: notesDir /)
+    expect(refusal.refusal).toMatch(/^context-rollover: notesDir /)
     expect(refusal.refusal).toContain(realpathSync(notesBase))
     assertRefusedBeforeNotes(refusal)
   })
@@ -665,7 +665,7 @@ describe('overlapping notes and handoff roots are refused before any notes acces
       notesDir: notesBase,
     })
 
-    expect(refusal.refusal).toMatch(/^TypeError: context-rollover: notesDir /)
+    expect(refusal.refusal).toMatch(/^context-rollover: notesDir /)
     expect(refusal.refusal).toContain(realpathSync(notesBase))
     assertRefusedBeforeNotes(refusal)
   })
@@ -746,7 +746,7 @@ function assertRefusedBeforeNotes(refusal: OverlapRefusal): void {
 
 /** What one overlapping fixture produced. */
 interface OverlapRefusal {
-  /** The forwarded refusal the engine logged, as `Name: message`. */
+  /** The forwarded refusal the engine logged, as the plain message. */
   readonly refusal: string
   /** Recorded accesses under the notes base, for the whole run. */
   readonly notesTouches: readonly PathTouch[]
@@ -795,6 +795,12 @@ async function overlapRefusal(
     ? realpathSync(resolve(fixture.notesDir, id))
     : resolve(fixture.notesDir, id))
   allowRootProbe(handoffAbsolute)
+  // The logged refusal carries only the thrown value's message; the TypeError
+  // class itself is observable only before the lifecycle catch. Assert it at
+  // the engine's own seam, so a plain Error with the same text fails here
+  // rather than passing through the log.
+  const seam = harness.engine as unknown as { assertNotesRootDisjoint(session: typeof harness.session): Promise<void> }
+  await expect(seam.assertNotesRootDisjoint(harness.session)).rejects.toBeInstanceOf(TypeError)
   const { ctx, agent } = harness
   let refusal = ''
   const warn = ctx.logger.warn.bind(ctx.logger)
@@ -820,12 +826,12 @@ async function overlapRefusal(
 
 /**
  * The refusal text the engine logged: the lifecycle logs `error.message`, so a
- * thrown TypeError arrives without its name. Re-attach the class name the
- * containment checks throw, so a test can assert on the class as well.
+ * thrown TypeError arrives without its name. Strip the lifecycle's wrapping
+ * and return the plain message; the thrown class itself is asserted at the seam
+ * in `overlapRefusal`, where the object is still observable.
  * @param message - the logged warning.
- * @returns the refusal as `TypeError: <message>`.
+ * @returns the plain refusal message.
  */
 function refusalText(message: string): string {
-  const unwrapped = message.replace(/^context rollover failed: /, '').replace(/; continuing the turn$/, '')
-  return unwrapped.startsWith('context-rollover: notesDir') ? `TypeError: ${unwrapped}` : unwrapped
+  return message.replace(/^context rollover failed: /, '').replace(/; continuing the turn$/, '')
 }
