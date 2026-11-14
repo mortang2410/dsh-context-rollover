@@ -587,6 +587,54 @@ the half-the-span cap in turn, shows that named test failing for each, then prov
 removed and accepts the real one. The script backs up the sources it edits and
 restores them on every exit, so the tree matches the commit afterwards.
 
+## Local development with HMR
+
+The fast loop runs DSH from your checkout with the plugin linked from this
+directory and Cordis HMR watching the source:
+
+1. **Create a dedicated profile and link this package**
+
+   ```sh
+   dsh plugin --profile rollover-dev add D:/path/to/dsh-context-rollover
+   ```
+
+   (A custom profile initializes with just `dsh-base`; the bundle's patch
+   applies automatically because the package declares `dsh.bundle.patch`.)
+
+2. **Enable the `hmr` row** in `$DSH_HOME/profiles/rollover-dev/cordis.patch.yml`
+   (patch rows replace whole configs, so restate `root`):
+
+   ```yaml
+   - id: hmr
+     config:
+       root: ['.', 'D:/path/to/dsh-context-rollover/src']
+       debounce: 100
+   ```
+
+   The base bundle mounts `hmr` disabled by default; the `timer` row it needs
+   is already active.
+
+3. **Run DSH from source**
+
+   ```sh
+   cd /path/to/deepseek-harness
+   pnpm run build          # once; Typert host artifacts are required
+   pnpm dsh --profile rollover-dev
+   ```
+
+   Source launch runs through tsx (`node --import tsx/esm`), which is what makes
+   hot reload of TypeScript plugin sources work.
+
+4. **Edit `src/*.ts` in this package**: the affected plugin reloads in place;
+   registrations (tools, system-prompt sections, event listeners) unwind and
+   reapply through Cordis effects. Profile patch edits also recompose live
+   (`patchReload: live` is the default for custom profiles).
+
+5. **Restart is still required for**: initial bundle installation, bundle
+   membership changes (`dsh.plugin add/remove`), framework-level dependency
+   changes (Cordis falls back to `loader.exit()`), and anything HMR cannot
+   safely swap.
+
 ### Windows: `link:` junctions and Git Bash
 
 `pnpm install` in a profile run from Git Bash mangles `link:D:/...`
