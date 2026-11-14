@@ -491,7 +491,6 @@ describe('the forced path commits the compiled copy and never touches the handof
     // At least one log position: every compiled row that was cut or elided
     // carries the durable seq it can be recalled from.
     const logPositions = logPositionMarkers(replacementText)
-    expect(logPositions).toHaveLength(logPositions.length)
     expect(logPositions.length).toBeGreaterThan(0)
 
     // The durable notes snapshot still appears; the planted handoff never does.
