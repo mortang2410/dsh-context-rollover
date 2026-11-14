@@ -12,6 +12,8 @@
  * @module tests/idle-reopen
  */
 
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -170,7 +172,15 @@ describe('idle reopen', () => {
 
   it('removes the record when the fired turn committed a rollover', async () => {
     const rig = await openRig({
-      config: { automaticRollover: true, retainTokens: 0, automaticRolloverRetainTokens: 200 },
+      config: {
+        automaticRollover: true,
+        retainTokens: 0,
+        automaticRolloverRetainTokens: 200,
+        // The session has no working directory, so the notes/handoff
+        // containment check can only prove the store safe with an absolute
+        // handoff root. Nothing is written under it.
+        handoffDir: join(tmpdir(), 'dsh-idle-reopen-handoff'),
+      },
     })
     const sessionId = SessionId('committed')
     const handle = await rig.ctx.agents.create({

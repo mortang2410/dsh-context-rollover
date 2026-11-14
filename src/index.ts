@@ -11,7 +11,7 @@
  * @module dsh-context-rollover
  */
 
-import { realpath } from 'node:fs/promises'
+import { readlink, realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Context, symbols } from '@deepseek-ai/cordis'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
@@ -136,12 +136,19 @@ function isMissingPath(error: unknown): boolean {
  * The canonical absolute form of a root that may not exist yet.
  *
  * The realpath of the root itself when it exists, otherwise the realpath of
- * the nearest existing ancestor with the missing suffix appended. This is how
- * a symlinked base is resolved without requiring the leaf directory to exist.
+ * the nearest resolvable ancestor with the missing suffix appended. This is how
+ * a symlinked base is resolved without requiring the leaf directory to exist,
+ * and how a missing leaf below a symlinked ancestor is still compared through
+ * the location that ancestor really names.
+ *
+ * A symbolic link whose own target does not resolve is refused instead of
+ * treated as a missing directory: its real location is unknown, so no
+ * comparison can prove anything about the tree it will hold.
  * @param target - the root path, absolute or resolved against the process cwd.
  * @returns the canonical absolute path.
  * @throws when an existing ancestor cannot be resolved for any reason other
- *   than a missing path, so the caller can fail closed.
+ *   than a missing path, or when a resolvable component is a dangling
+ *   symbolic link, so the caller can fail closed.
  */
 async function canonicalRoot(target: string): Promise<string> {
   const absolute = resolve(target)
@@ -153,12 +160,35 @@ async function canonicalRoot(target: string): Promise<string> {
     } catch (error: unknown) {
       if (!isMissingPath(error)) throw error
     }
+    if (await isDanglingSymlink(probe)) {
+      throw new Error(
+        `context-rollover: ${probe} is a dangling symbolic link, so the location it will hold is unknown`,
+      )
+    }
     const parent = dirname(probe)
     if (parent === probe) {
       throw new Error(`context-rollover: no existing ancestor for ${absolute}`)
     }
     suffix.unshift(basename(probe))
     probe = parent
+  }
+}
+
+/**
+ * Whether a path entry is a symbolic link whose target does not resolve.
+ *
+ * `realpath` reports a missing target as `ENOENT`, exactly like an absent
+ * directory entry, so the entry's own type has to decide: a link `readlink`
+ * reads after `realpath` failed has no resolvable location to compare.
+ * @param target - the path that just failed to resolve as missing.
+ * @returns true when the entry exists as a symbolic link.
+ */
+async function isDanglingSymlink(target: string): Promise<boolean> {
+  try {
+    await readlink(target)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -765,10 +795,10 @@ export class ContextRolloverEngine extends CompactionEngine {
    * from the effective handoff root.
    *
    * The comparison runs before any note-store read: the lexical absolute paths
-   * first, then the canonical notes root, then the handoff root's own realpath
-   * when it exists. A missing notes leaf is canonicalized through its nearest
-   * existing ancestor, and any failure to prove the roots disjoint fails
-   * closed with a TypeError naming `notesDir`.
+   * first, then both roots in canonical form, each resolved through its nearest
+   * resolvable ancestor with any missing suffix appended. A dangling symbolic
+   * link, or any other root whose canonical location cannot be established,
+   * fails closed with a TypeError naming `notesDir`.
    * @param session - session whose notes root and working directory are read.
    * @returns the rendered notes snapshot, or `null` when notes are disabled or empty.
    */
@@ -781,38 +811,40 @@ export class ContextRolloverEngine extends CompactionEngine {
    * Reject a notes root that equals or lies under the effective handoff root,
    * or one whose relationship cannot be proven disjoint.
    *
-   * Only the handoff root's own path is resolved; nothing under it is read,
+   * Only the two roots' own paths are resolved; nothing under either is read,
    * stated or listed. The handoff root resolves against the session working
-   * directory, matching how a relative handoff path is named, and falls back to
-   * the process working directory for a session without one.
+   * directory, matching how a relative handoff path is named; a session without
+   * one is refused rather than compared against the process working directory,
+   * which the handoff reader would never use.
    * @param session - session whose notes root and working directory are read.
    */
   private async assertNotesRootDisjoint(session: Session): Promise<void> {
     const notesRoot = this.notesStore(session).root
     const notesAbsolute = resolve(notesRoot)
-    const cwd = session.header.cwd
-    const handoffAbsolute = isAbsolute(this.config.handoffDir)
-      ? resolve(this.config.handoffDir)
-      : resolve(cwd ?? process.cwd(), this.config.handoffDir)
+    let handoffAbsolute: string
+    if (isAbsolute(this.config.handoffDir)) {
+      handoffAbsolute = resolve(this.config.handoffDir)
+    } else {
+      const cwd = session.header.cwd
+      if (cwd === undefined) {
+        throw notesDisjointnessError(notesRoot, this.config.handoffDir, new Error(
+          'a relative handoff directory needs the session working directory, and this session has none',
+        ))
+      }
+      handoffAbsolute = resolve(cwd, this.config.handoffDir)
+    }
     if (pathsOverlap(notesAbsolute, handoffAbsolute)) {
       throw notesOverlapError(notesRoot, notesAbsolute, handoffAbsolute)
     }
     let notesCanonical: string
+    let handoffCanonical: string
     try {
       notesCanonical = await canonicalRoot(notesRoot)
+      handoffCanonical = await canonicalRoot(handoffAbsolute)
     } catch (error: unknown) {
       throw notesDisjointnessError(notesRoot, handoffAbsolute, error)
     }
-    if (pathsOverlap(notesCanonical, handoffAbsolute)) {
-      throw notesOverlapError(notesRoot, notesCanonical, handoffAbsolute)
-    }
-    let handoffCanonical: string | undefined
-    try {
-      handoffCanonical = await realpath(handoffAbsolute)
-    } catch (error: unknown) {
-      if (!isMissingPath(error)) throw notesDisjointnessError(notesRoot, handoffAbsolute, error)
-    }
-    if (handoffCanonical !== undefined && pathsOverlap(notesCanonical, handoffCanonical)) {
+    if (pathsOverlap(notesCanonical, handoffCanonical)) {
       throw notesOverlapError(notesRoot, notesCanonical, handoffCanonical)
     }
   }

@@ -11,7 +11,7 @@
  * @module dsh-context-rollover/notes
  */
 
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
@@ -77,25 +77,51 @@ export class NotesStore {
 
   /**
    * List note files newest-modified first.
+   *
+   * Every entry is `lstat`ed and only a regular file is listed, so nothing
+   * below the store is reached through a symbolic link: a linked entry is
+   * skipped instead of followed, and recursion descends only into real
+   * directories. The compiled copy renders what this returns, so a note entry
+   * linked into the handoff tree can never put a handoff document on the
+   * surface.
    * @returns the listings, or `[]` when the store directory does not exist.
    */
   async list(): Promise<NoteListing[]> {
-    let entries: string[]
+    const listings = await this.walk('')
+    return listings.sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+
+  /**
+   * Collect the regular files below one store-relative directory.
+   * @param relative - store-relative directory (`''` for the store root).
+   * @returns the listings in directory order, links skipped.
+   */
+  private async walk(relative: string): Promise<NoteListing[]> {
+    const directory = relative === '' ? this.dir : join(this.dir, ...relative.split('/'))
+    let names: readonly string[]
     try {
-      entries = await readdir(this.dir, { recursive: true })
+      names = await readdir(directory)
     } catch {
       return []
     }
-    const listings = await Promise.all(entries.map(async (entry) => {
-      const path = entry.replaceAll('\\', '/')
-      const absolute = join(this.dir, entry)
-      const info = await stat(absolute).catch(() => undefined)
-      if (info === undefined || !info.isFile()) return undefined
-      return { path, size: info.size, updatedAt: info.mtimeMs }
-    }))
+    const listings: NoteListing[] = []
+    for (const name of names) {
+      const path = relative === '' ? name : `${relative}/${name}`
+      let info
+      try {
+        info = await lstat(relative === '' ? join(this.dir, name) : join(directory, name))
+      } catch {
+        // An entry removed between the listing and its stat is not a note.
+        continue
+      }
+      if (info.isDirectory()) {
+        listings.push(...await this.walk(path))
+        continue
+      }
+      if (!info.isFile()) continue
+      listings.push({ path, size: info.size, updatedAt: info.mtimeMs })
+    }
     return listings
-      .filter((listing): listing is NoteListing => listing !== undefined)
-      .sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
   /**

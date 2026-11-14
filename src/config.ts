@@ -292,7 +292,8 @@ export interface RolloverConfig {
   /**
    * Total budget, in density-aware tokens, for one `recall` or `search` result.
    * Defaults to `16000`, VCC's published recall budget. A per-call `max_tokens`
-   * argument overrides it for that call only.
+   * argument overrides it for that `recall` call only; `search` takes only a
+   * query and always uses this budget.
    */
   maxRecallTokens?: number
 }

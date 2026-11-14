@@ -313,7 +313,15 @@ describe('idle rollover watchdog', () => {
     const { ctx, engine, agent, session } = await rig({
       id: 'auto-commit-fire',
       adapter,
-      config: { automaticRollover: true, retainTokens: 0, automaticRolloverRetainTokens: 200 },
+      config: {
+        automaticRollover: true,
+        retainTokens: 0,
+        automaticRolloverRetainTokens: 200,
+        // The session has no working directory, so the notes/handoff
+        // containment check can only prove the store safe with an absolute
+        // handoff root. Nothing is written under it.
+        handoffDir: join(tmpdir(), 'dsh-idle-watchdog-handoff'),
+      },
     })
     const filler = 'detail '.repeat(600)
     await followup(agent, `turn 1 ${filler}`)

@@ -38,9 +38,10 @@
  * plain copy of its exports (`vi.spyOn` refuses a bare `node:` namespace) and
  * wraps every primitive that can read, stat or list a path. Each touched path
  * is compared with the planted directory and the configured notes base, in
- * every spelling the code could use. A `realpath` of a root the containment
- * check compares is an entry point and allowed; a read, stat or listing of
- * either root, and any `realpath` below it, is recorded and fails. The recorder
+ * every spelling the code could use. A root probe (`realpath` or `readlink`) of
+ * a root the containment check compares is an entry point and allowed, because
+ * it names the entry itself; a read, stat or listing of either root, and any
+ * probe below it, is recorded and fails. The recorder
  * is proven live before the run, and again after it, through the same
  * primitive a broken path would use.
  *
@@ -164,13 +165,21 @@ function isAtOrUnder(path: string, target: string): boolean {
 }
 
 /**
- * The names a case allows for `realpath` calls: the roots the containment check
+ * The names a case allows for root probes: the roots the containment check
  * compares, each in the spelling the configuration gives and the spelling it
- * resolves to. Those names are entry points rather than accesses inside a
- * directory; a read, stat or listing of any of them still fails, and so does a
- * `realpath` of anything below a monitored root.
+ * resolves to. `realpath` and `readlink` of those names are entry points: they
+ * name the root entry itself, so they reveal only whether it resolves and
+ * whether it is a symbolic link, never a file inside it. A read, stat or
+ * listing of any of them still fails, and so does a root probe of anything
+ * below a monitored root.
  */
-const allowedRealpaths = new Set<string>()
+const allowedRootProbes = new Set<string>()
+
+/**
+ * The primitives allowed on a root's own name: entry points of the containment
+ * check, not accesses inside the directory it guards.
+ */
+const ROOT_PROBE_PRIMITIVES = new Set(['realpath', 'readlink'])
 
 /** Whether a touched path is one of the monitored paths. */
 function isMonitoredPath(path: string): boolean {
@@ -179,16 +188,16 @@ function isMonitoredPath(path: string): boolean {
 }
 
 /**
- * Allow the `realpath` of the roots the containment check compares against
+ * Allow the root probes of the roots the containment check compares against
  * (contract C8): the handoff root, the notes root, and the directory holding an
  * absent notes leaf, in the spelling the configuration gives and in the
- * canonical spelling its absence resolves through. Every other name under them
- * stays a recorded access.
+ * canonical spelling its absence resolves through. Every read, stat or listing
+ * under them stays a recorded access.
  * @param names - each root, in the spelling the configuration or the store gives
  *   it and in the canonical spelling it resolves to.
  */
-function allowRootRealpath(...names: string[]): void {
-  for (const name of names) allowedRealpaths.add(resolve(name))
+function allowRootProbe(...names: string[]): void {
+  for (const name of names) allowedRootProbes.add(resolve(name))
 }
 
 /**
@@ -221,7 +230,7 @@ function monitor(path: string, parentForm = true): void {
 function startMonitoring(notesRoot: string, ...paths: string[]): void {
   monitored.length = 0
   touches.length = 0
-  allowedRealpaths.clear()
+  allowedRootProbes.clear()
   monitor(notesRoot, true)
   for (const path of paths) monitor(path, false)
   const module = fs as unknown as Record<string, unknown>
@@ -247,7 +256,7 @@ function record(primitive: string, original: unknown): unknown {
     const target = args[0]
     if (typeof target === 'string' || target instanceof URL) {
       const path = resolve(String(target))
-      const allowed = primitive === 'realpath' && allowedRealpaths.has(path)
+      const allowed = ROOT_PROBE_PRIMITIVES.has(primitive) && allowedRootProbes.has(path)
       if (isMonitoredPath(path) && !allowed) {
         touches.push({ primitive, path })
       }
@@ -408,7 +417,7 @@ async function crossWithHandoff(
     handoffDir,
   }, { cwd })
   const { ctx, agent, session, notesBase } = harness
-  allowRootRealpath(notesBase, realpathSync(notesBase), handoffDir)
+  allowRootProbe(notesBase, realpathSync(notesBase), handoffDir)
   const warnings: string[] = []
   const infos: string[] = []
   const warn = ctx.logger.warn.bind(ctx.logger)
@@ -506,8 +515,8 @@ describe('the forced path commits the compiled copy and never touches the handof
 
     // No handoff reading happened: no reader call, and no filesystem access of
     // the configured handoff directory or its documents by any primitive, the
-    // root's own realpath included (that is the one realpath the recorder
-    // allows, and a call naming the root cannot read anything inside it).
+    // root's own probe included (realpath or readlink, which the recorder
+    // allows: a call naming the root cannot read anything inside it).
     expect(run.readHandoffFile.mock.calls).toEqual([])
     expect(run.resolveHandoffPath.mock.calls).toEqual([])
     expect(touches).toEqual([])
@@ -662,6 +671,67 @@ describe('overlapping notes and handoff roots are refused before any notes acces
   })
 })
 
+describe('a note entry that resolves into the handoff tree is never read or rendered', () => {
+  it('skips a symlinked note entry and never enters a symlinked directory entry', async () => {
+    const cwd = await scratch('dsh-forced-e2e-note-symlink-')
+    const handoffDir = join(cwd, 'handoff')
+    mkdirSync(handoffDir, { recursive: true })
+    const sentinelPath = join(handoffDir, 'HANDOFF-linked.md')
+    writeFileSync(
+      sentinelPath,
+      'LINKED-HANDOFF-SENTINEL: no compiled copy may carry this.\n',
+      'utf8',
+    )
+
+    const harness = await engineHarness('forced-e2e-note-symlink', { ...AUTOMATIC, handoffDir }, { cwd })
+    const { ctx, agent, session, notesBase } = harness
+    const store = new NotesStore(NotesStore.directoryFor(session.id, notesBase))
+    await store.write('state.md', 'E2E-NOTES-SENTINEL: the migration is the next step.\n')
+    await store.write('plans/rollout.md', 'E2E-PLAN-SENTINEL\n')
+    // Two escaping entries: a regular note replaced by a link into the handoff
+    // tree, and a directory link a recursive listing could follow. The notes
+    // root is a real directory outside the handoff root, so the root check
+    // passes and only the store's own enumeration decides.
+    await symlink(sentinelPath, join(store.root, 'linked.md'))
+    await symlink(handoffDir, join(store.root, 'handoff-link'))
+
+    startMonitoring(handoffDir, sentinelPath)
+    expect(await recorderIsLive(handoffDir)).toBe(true)
+    // The liveness probe above is the last touch this test allows itself.
+    touches.length = 0
+    allowRootProbe(handoffDir)
+    const warnings: string[] = []
+    const warn = ctx.logger.warn.bind(ctx.logger)
+    ctx.logger.warn = (message: string): void => { warnings.push(message); warn(message) }
+    const renderAll = vi.spyOn(NotesStore.prototype, 'renderAll')
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([textResponse('short answer')]))
+
+    await followup(agent, longMessage('turn 1'))
+    await followup(agent, longMessage('turn 2'))
+    await followup(agent, longMessage('turn 3'))
+
+    expect(countRollovers(session)).toBe(1)
+    expect(renderAll).toHaveBeenCalled()
+    const committed = session.snapshotEvents()
+      .filter(event => event.type === 'compaction/summary')
+      .flatMap(event => (event as { data: { summary?: Array<{ type: string; text?: string }> } }).data.summary ?? [])
+      .filter(block => block.type === 'text' && block.text !== undefined)
+      .map(block => block.text as string)
+    expect(committed).toHaveLength(1)
+    // Only the real notes reached the compiled copy.
+    expect(committed[0]).toContain('E2E-NOTES-SENTINEL')
+    expect(committed[0]).toContain('E2E-PLAN-SENTINEL')
+    expect(committed[0]).not.toContain('LINKED-HANDOFF-SENTINEL')
+    expect(derivedTexts(session).join('\n')).not.toContain('LINKED-HANDOFF-SENTINEL')
+
+    // The boundary was never crossed: the linked entry was never read, and the
+    // symlinked directory was never listed or statted through its own path.
+    expect(touches).toEqual([])
+    expect(warnings.filter(message => message.includes('context rollover failed'))).toEqual([])
+    expect(await recorderIsLive(handoffDir)).toBe(true)
+  })
+})
+
 /**
  * The shared acceptance for every overlapping fixture: nothing under the notes
  * base was read, statted or listed, the store never rendered, listed or read,
@@ -718,13 +788,13 @@ async function overlapRefusal(
   // it resolves to are entry points of the check; the handoff root is the
   // forbidden directory, and everything below the store directory is watched.
   startMonitoring(resolve(fixture.notesDir, id), handoffAbsolute)
-  allowRootRealpath(resolve(fixture.notesDir))
+  allowRootProbe(resolve(fixture.notesDir))
   // An absent notes root has no realpath of its own; its canonical form is the
   // nearest existing ancestor's realpath with the missing name appended.
-  allowRootRealpath(resolve(fixture.notesDir, id), existsSync(resolve(fixture.notesDir, id))
+  allowRootProbe(resolve(fixture.notesDir, id), existsSync(resolve(fixture.notesDir, id))
     ? realpathSync(resolve(fixture.notesDir, id))
     : resolve(fixture.notesDir, id))
-  allowRootRealpath(handoffAbsolute)
+  allowRootProbe(handoffAbsolute)
   const { ctx, agent } = harness
   let refusal = ''
   const warn = ctx.logger.warn.bind(ctx.logger)

@@ -301,6 +301,16 @@ describe('the automatic rollover commits when the model never rolls over', () =>
     // byte for byte. The span's own seqs make the recomputation honest: it is
     // the text the engine committed, not one the test wrote.
     expect(committedReplacementTexts(session)).toEqual([await expectedCompiledText(session, notesBase)])
+    // The order of the committed text, read from markers the test names itself
+    // rather than from the composer that produced it: this fixture has no
+    // notes, so the recall guide leads and the first compiled entry of the
+    // replaced span follows it directly.
+    const compiled = committedReplacementTexts(session)[0] ?? ''
+    const guideAt = compiled.indexOf(RECALL_GUIDE)
+    const entryAt = compiled.indexOf('[user]\nturn 1')
+    expect(guideAt).toBeGreaterThan(-1)
+    expect(compiled).not.toContain('## Durable notes')
+    expect(entryAt).toBeGreaterThan(guideAt)
     const summary = summaryFacts(session).at(-1)
     expect(summary?.model).toBe('deterministic/compiled-window-1')
     // The mode word in the journal comes from the same replacement variant as
@@ -342,9 +352,17 @@ describe('the automatic rollover commits when the model never rolls over', () =>
     expect(committedReplacementTexts(session)).toEqual([await expectedCompiledText(session, notesBase)])
     expect(summaryFacts(session).at(-1)?.model).toBe('deterministic/compiled-window-1')
     const visible = derivedTexts(session).join('\n')
-    // The guide leads and the notes header follows it, as the composer orders
-    // them; the exact committed text above already pins the boundary.
-    expect(visible.indexOf(RECALL_GUIDE)).toBeLessThan(visible.indexOf('## Durable notes'))
+    // C3's order, asserted from the committed text and markers the test names
+    // itself, so a reordering inside the production composer cannot satisfy
+    // this assertion: the recall guide, then the durable notes header, then
+    // the first compiled entry of the replaced span.
+    const compiled = committedReplacementTexts(session)[0] ?? ''
+    const guideAt = compiled.indexOf(RECALL_GUIDE)
+    const notesAt = compiled.indexOf('## Durable notes')
+    const entryAt = compiled.indexOf('[user]\nturn one')
+    expect(guideAt).toBeGreaterThan(-1)
+    expect(notesAt).toBeGreaterThan(guideAt)
+    expect(entryAt).toBeGreaterThan(notesAt)
     expect(visible).toContain('AUTOMATIC-NOTES-SENTINEL')
     expect(visible).not.toContain('FOREIGN-HANDOFF-SENTINEL')
   })
@@ -383,6 +401,25 @@ describe('a pending handoff still commits before the forced branch', () => {
     expect(summaryFacts(session).at(-1)?.model).toBe('deterministic/handoff-window-1')
     // The forced branch never ran, so its compiled journal line never appeared.
     expect(infos.filter(message => message.includes('context rollover (automatic)'))).toEqual([])
+  })
+
+  it('commits the handoff when the automatic threshold is also met at that pre-step', async () => {
+    // Control first: the same surface with a plain tool call instead of a
+    // pending request commits the compiled branch at that pre-step, so the
+    // automatic rollover really is eligible there. A fixture where the
+    // automatic branch could not run would not discriminate the priority.
+    const control = await priorityCrossing('auto-priority-control', 'tool')
+    expect(countRollovers(control.session)).toBe(1)
+    expect(summaryFacts(control.session).at(-1)?.model).toBe('deterministic/compiled-window-1')
+    expect(control.infos.filter(message => message.includes('compiled mode; window 1 started'))).toHaveLength(1)
+
+    // The same arrangement with the model's pending handoff: the request wins
+    // over the eligible automatic branch, byte for byte, and the compiled
+    // branch never runs.
+    const pending = await priorityCrossing('auto-priority-handoff', 'handoff')
+    expect(committedReplacementTexts(pending.session)).toEqual([pending.document])
+    expect(summaryFacts(pending.session).at(-1)?.model).toBe('deterministic/handoff-window-1')
+    expect(pending.infos.filter(message => message.includes('context rollover (automatic)'))).toEqual([])
   })
 })
 
@@ -471,6 +508,66 @@ describe('the notes and handoff roots are proven disjoint before notes are read'
     expect(refusal.starts).toBe(0)
     expect(refusal.renderCalls).toBe(0)
   })
+
+  it('refuses a missing handoff leaf below a symlink alias of the notes root', async () => {
+    const cwd = await scratch('dsh-auto-containment-alias-')
+    const notesBase = join(cwd, 'notes-base')
+    const sessionId = 'alias-absent-leaf'
+    await mkdir(join(notesBase, sessionId), { recursive: true })
+    await writeFile(join(notesBase, sessionId, 'state.md'), 'NOTE-READ-SENTINEL', 'utf8')
+    // The handoff root names a leaf that does not exist below a link resolving
+    // onto the notes root. Neither spelling lies under the other, and the leaf
+    // itself has no realpath, so only canonicalizing both roots through their
+    // nearest existing ancestors can prove the containment.
+    await symlink(join(notesBase, sessionId), join(cwd, 'notes-alias'))
+
+    const refusal = await containmentRefusal(sessionId, {
+      notesDir: notesBase,
+      handoffDir: join(cwd, 'notes-alias', 'absent-leaf'),
+    }, cwd)
+
+    expect(refusal.warnings.some(message => message.includes('notesDir') && message.includes('overlaps')))
+      .toBe(true)
+    expect(refusal.compactions).toBe(0)
+    expect(refusal.starts).toBe(0)
+    expect(refusal.renderCalls).toBe(0)
+  })
+
+  it('refuses a dangling notes-root symlink', async () => {
+    const cwd = await scratch('dsh-auto-containment-dangling-')
+    // The notes base is a symbolic link whose target does not exist. The
+    // nearest resolvable ancestor cannot say where the notes store lives, so
+    // the relationship to the handoff root stays unprovable.
+    await symlink(join(cwd, 'missing-target'), join(cwd, 'notes-link'))
+    const refusal = await containmentRefusal('dangling-notes-root', {
+      notesDir: join(cwd, 'notes-link'),
+      handoffDir: join(cwd, 'handoff'),
+    }, cwd)
+
+    expect(refusal.warnings.some(message =>
+      message.includes('notesDir') && message.includes('cannot be proven disjoint'))).toBe(true)
+    expect(refusal.compactions).toBe(0)
+    expect(refusal.starts).toBe(0)
+    expect(refusal.renderCalls).toBe(0)
+  })
+
+  it('refuses a relative handoff root when the session has no working directory', async () => {
+    const cwd = await scratch('dsh-auto-containment-no-cwd-')
+    // A relative handoff root resolves against the session working directory,
+    // and the handoff reader refuses a relative document path without one. The
+    // check cannot substitute the process cwd and prove a relationship the
+    // handoff path contract will never use.
+    const refusal = await containmentRefusal('no-session-cwd', {
+      notesDir: join(cwd, 'notes'),
+      handoffDir: 'relative-handoff',
+    }, undefined)
+
+    expect(refusal.warnings.some(message =>
+      message.includes('notesDir') && message.includes('cannot be proven disjoint'))).toBe(true)
+    expect(refusal.compactions).toBe(0)
+    expect(refusal.starts).toBe(0)
+    expect(refusal.renderCalls).toBe(0)
+  })
 })
 
 describe('the automatic rollover is off by default', () => {
@@ -495,10 +592,11 @@ describe('the automatic rollover is off by default', () => {
 
 describe('one automatic rollover per turn', () => {
   it('suppresses a second viable attempt in the same turn, and commits in the next', async () => {
+    const cwd = await scratch('dsh-auto-once-per-turn-')
     const { ctx, agent, session } = await engineHarness('auto-once-per-turn', {
       ...AUTOMATIC,
       automaticRolloverRetainTokens: 1,
-    })
+    }, { cwd })
     const warnings = captureWarnings(ctx)
     // Turn two makes two requests: a tool call, then an answer. Both pre-steps
     // are above the point and both have a span worth replacing, so the second
@@ -527,10 +625,11 @@ describe('one automatic rollover per turn', () => {
 
 describe('a deferral commits nothing and is retried', () => {
   it('defers when the tail floor cannot be met, then commits later in the same turn', async () => {
+    const cwd = await scratch('dsh-auto-defer-retry-')
     const { ctx, agent, session } = await engineHarness('auto-defer-retry', {
       ...AUTOMATIC,
       automaticRolloverRetainTokens: 3000,
-    })
+    }, { cwd })
     const infos = captureInfos(ctx)
     const warnings = captureWarnings(ctx)
     // Turn two: the first pre-step sees one closed exchange, too small for a
@@ -550,6 +649,52 @@ describe('a deferral commits nothing and is retried', () => {
     expect(startsByTurn(session)).toEqual(new Map([[2, 1]]))
     expect(countRollovers(session)).toBe(1)
     expect(warnings.filter(message => message.includes('context rollover failed'))).toEqual([])
+  })
+
+  it('retries a size-refused candidate and commits at the next pre-step of the same turn', async () => {
+    const cwd = await scratch('dsh-auto-size-retry-')
+    const { ctx, agent, session } = await engineHarness('auto-size-retry', AUTOMATIC, { cwd })
+    const infos = captureInfos(ctx)
+    const warnings = captureWarnings(ctx)
+    const startsAtDeferral: number[] = []
+    const infoBefore = ctx.logger.info.bind(ctx.logger)
+    ctx.logger.info = (message: string): void => {
+      if (message.includes('not smaller than the selected span')) {
+        // How many brackets existed when the size deferral was logged: zero
+        // proves the refused first attempt committed nothing.
+        startsAtDeferral.push(
+          session.snapshotEvents().filter(event => event.type === 'compaction/start').length,
+        )
+      }
+      infoBefore(message)
+    }
+    const original = ctx.tokenMeter.estimateMessage.bind(ctx.tokenMeter)
+    let prices = 0
+    vi.spyOn(ctx.tokenMeter, 'estimateMessage').mockImplementation((message) => {
+      prices += 1
+      // The first candidate the composer builds is priced above its span; every
+      // later price is the meter's own, so the retry at the next pre-step fits.
+      return prices === 1 ? 1_000_000 : original(message)
+    })
+    // Turn two makes three requests: two tool calls, then an answer. The size
+    // refusal at the second pre-step consumes nothing, and the third pre-step
+    // retries and commits in the same turn.
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+      textResponse('seed answer'),
+      toolCall('get_context_remaining', '{}', 'c1'),
+      toolCall('get_context_remaining', '{}', 'c2'),
+      textResponse('final answer'),
+    ]))
+
+    await followup(agent, longMessage('seed'))
+    await followup(agent, longMessage('crossing', 200))
+
+    expect(startsAtDeferral).toEqual([0])
+    expect(infos.filter(message => message.includes('not smaller than the selected span'))).toHaveLength(1)
+    expect(warnings.filter(message => message.includes('context rollover failed'))).toEqual([])
+    // The later pre-step opened the only bracket, and it committed.
+    expect(startsByTurn(session)).toEqual(new Map([[2, 1]]))
+    expect(countRollovers(session)).toBe(1)
   })
 
   it('never selects a span that would leave nothing behind', async () => {
@@ -620,12 +765,13 @@ describe('the automatic rollover stands down for another backend', () => {
 
 describe('a non-shrinking automatic candidate defers', () => {
   it('commits nothing, logs the deferral, and continues the turn', async () => {
+    const cwd = await scratch('dsh-auto-refused-')
     const { ctx, agent, session } = await engineHarness('auto-refused', {
       ...AUTOMATIC,
       // The tail floor is met by the long answer alone, so the only span left is
       // the short user message, which is smaller than the compiled framing.
       automaticRolloverRetainTokens: 1000,
-    })
+    }, { cwd })
     const infos = captureInfos(ctx)
     const warnings = captureWarnings(ctx)
     ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
@@ -649,9 +795,17 @@ describe('a non-shrinking automatic candidate defers', () => {
   })
 
   it('defers when the meter refuses a candidate the compiler composed', async () => {
-    const { ctx, agent, session } = await engineHarness('auto-meter-preflight', AUTOMATIC)
+    const cwd = await scratch('dsh-auto-meter-preflight-')
+    const { ctx, agent, session } = await engineHarness('auto-meter-preflight', AUTOMATIC, { cwd })
     const infos = captureInfos(ctx)
     const warnings = captureWarnings(ctx)
+    // The call boundary is the assertion, not only the missing bracket: the
+    // commit function itself must never be entered, because its own size
+    // recheck also returns before opening `compaction/start`. A regression that
+    // called it after a preflight miss would leave the no-bracket assertions
+    // green, so this counts calls at the seam.
+    const rolloverModule = await import('../src/rollover.ts')
+    const commitRollover = vi.spyOn(rolloverModule, 'commitRollover')
     // The compiler's own cap accepts this span, so the composer builds a
     // candidate; the live meter prices it above the span and the preflight
     // returns the deferral before commitRollover can open a bracket.
@@ -662,6 +816,9 @@ describe('a non-shrinking automatic candidate defers', () => {
     await followup(agent, longMessage('turn two'))
     await followup(agent, longMessage('turn three'))
 
+    // The count, not the recorded arguments: Vitest's printer cannot render
+    // this module-namespace spy or the objects it was passed in a failure diff.
+    expect(commitRollover.mock.calls.length).toBe(0)
     expect(countRollovers(session)).toBe(0)
     expect(session.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
     expect(infos.filter(message => message.includes('not smaller than the selected span'))).toHaveLength(1)
@@ -671,7 +828,8 @@ describe('a non-shrinking automatic candidate defers', () => {
 
 describe('a commit-time size recheck keeps the deferral', () => {
   it('returns the same deferral when the recheck rejects a preflight-passing candidate', async () => {
-    const { ctx, agent, session } = await engineHarness('auto-commit-recheck', AUTOMATIC)
+    const cwd = await scratch('dsh-auto-commit-recheck-')
+    const { ctx, agent, session } = await engineHarness('auto-commit-recheck', AUTOMATIC, { cwd })
     const infos = captureInfos(ctx)
     const warnings = captureWarnings(ctx)
     const original = ctx.tokenMeter.estimateMessage.bind(ctx.tokenMeter)
@@ -696,7 +854,8 @@ describe('a commit-time size recheck keeps the deferral', () => {
   })
 
   it('propagates an unrelated meter failure from the commit instead of deferring', async () => {
-    const { ctx, agent, session } = await engineHarness('auto-commit-meter-error', AUTOMATIC)
+    const cwd = await scratch('dsh-auto-commit-meter-error-')
+    const { ctx, agent, session } = await engineHarness('auto-commit-meter-error', AUTOMATIC, { cwd })
     const infos = captureInfos(ctx)
     const warnings = captureWarnings(ctx)
     const original = ctx.tokenMeter.estimateMessage.bind(ctx.tokenMeter)
@@ -778,10 +937,11 @@ async function firstAutomaticRollover(
   floor: number,
   maxTurns = 8,
 ): Promise<{ readonly retained: number; readonly keptTurns: string[]; readonly turns: number }> {
+  const cwd = await scratch('dsh-auto-tail-floor-')
   const { ctx, agent, session } = await engineHarness(id, {
     ...AUTOMATIC,
     automaticRolloverRetainTokens: floor,
-  })
+  }, { cwd })
   ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([textResponse('short answer')]))
   let turns = 0
   while (turns < maxTurns && countRollovers(session) === 0) {
@@ -792,6 +952,48 @@ async function firstAutomaticRollover(
     throw new Error(`expected one automatic rollover within ${maxTurns} turns, got ${countRollovers(session)}`)
   }
   return { retained: retainedTailTokens(ctx, session), keptTurns: keptTurns(session), turns }
+}
+
+/** What one branch-priority fixture produced: its session, journal, and document. */
+interface PriorityCrossing {
+  readonly session: Session
+  readonly infos: readonly string[]
+  /** The handoff document the pending variant must commit byte for byte. */
+  readonly document: string
+}
+
+/**
+ * Drive one automatic crossing whose committing pre-step carries a tool call
+ * the engine can act on.
+ *
+ * Turn one seeds a replaceable exchange. Turn two makes two requests: the first
+ * request's tool call lands, and at the next pre-step (the second of the same
+ * turn) the automatic threshold is met and a span of turn one is selectable.
+ * With `kind: 'handoff'` that pre-step also carries the model's pending
+ * `new_context` request; with `kind: 'tool'` it carries a plain tool call and
+ * nothing pending.
+ * @param id - harness session id.
+ * @param kind - the tool call the model makes at that step.
+ */
+async function priorityCrossing(id: string, kind: 'tool' | 'handoff'): Promise<PriorityCrossing> {
+  const cwd = await scratch(`dsh-auto-priority-${kind}-`)
+  const document = '# Handoff\n\nCommit this pending document, not a compiled copy.\n'
+  const documentPath = join(cwd, 'HANDOFF-priority.md')
+  await writeFile(documentPath, document, 'utf8')
+  const { ctx, agent, session } = await engineHarness(id, AUTOMATIC, { cwd })
+  const infos = captureInfos(ctx)
+  const request = kind === 'handoff'
+    ? newContextCall(JSON.stringify({ handoff_path: documentPath }))
+    : toolCall('get_context_remaining', '{}', 'c1')
+  ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
+    textResponse('seed answer'),
+    request,
+    textResponse('crossing answer'),
+  ]))
+
+  await followup(agent, longMessage('seed'))
+  await followup(agent, longMessage('crossing', 200))
+  return { session, infos, document }
 }
 
 /** What one overlapping notes/handoff fixture produced. */
@@ -808,15 +1010,20 @@ interface ContainmentRefusal {
  * report whether the containment check refused it before any notes read.
  * @param id - session id, which becomes the per-session notes leaf.
  * @param config - notesDir and handoffDir for the fixture.
- * @param cwd - session working directory the relative handoff root resolves against.
+ * @param cwd - session working directory the relative handoff root resolves against,
+ *   or `undefined` to mount a session that has none.
  */
 async function containmentRefusal(
   id: string,
   config: Partial<RolloverConfig>,
-  cwd: string,
+  cwd: string | undefined,
 ): Promise<ContainmentRefusal> {
   const renderAll = vi.spyOn(NotesStore.prototype, 'renderAll')
-  const { ctx, agent, session } = await engineHarness(id, { ...AUTOMATIC, ...config }, { cwd })
+  const { ctx, agent, session } = await engineHarness(
+    id,
+    { ...AUTOMATIC, ...config },
+    cwd === undefined ? {} : { cwd },
+  )
   const warnings = captureWarnings(ctx)
   ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([textResponse('short answer')]))
 

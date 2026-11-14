@@ -22,7 +22,10 @@
  * @module tests/rollover-reminder
  */
 
-import { describe, expect, it } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import {
@@ -42,6 +45,23 @@ import {
   usageResponse,
 } from './harness.ts'
 import type { RecordedRequest } from './harness.ts'
+
+/** Scratch workspaces these cases create, removed after the run. */
+const scratchDirs: string[] = []
+
+afterAll(async () => {
+  while (scratchDirs.length > 0) {
+    const dir = scratchDirs.pop()
+    if (dir !== undefined) await rm(dir, { recursive: true, force: true })
+  }
+})
+
+/** Create one scratch workspace for a session that needs a working directory. */
+async function scratch(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix))
+  scratchDirs.push(dir)
+  return dir
+}
 
 /**
  * Output tokens `usageResponse` reports. The token meter counts input plus
@@ -198,15 +218,19 @@ describe('the hard reminder at or above the rollover point', () => {
 
 describe('a pre-step that commits a rollover delivers no hard reminder for that step', () => {
   it('suppresses it in the committing step and delivers it in the next step of the same turn', async () => {
+    // The automatic path reads notes, so its notes/handoff containment check
+    // needs a session working directory and an absolute handoff root.
+    const cwd = await scratch('dsh-reminder-ordering-')
     const { ctx, engine, agent, session } = await engineHarness('hard-reminder-ordering', {
       automaticRollover: true,
       thresholdRatio: 0.002,
       reminderThresholdRatio: 0.001,
       retainTokens: 0,
       automaticRolloverRetainTokens: 200,
+      handoffDir: join(cwd, 'handoff'),
       rolloverReminderMessage: 'ORDERING-HARD-SENTINEL {percent}% at {used_tokens} of {window_tokens}',
       reminderMessage: 'ORDERING-CADENCE leaving {tokens_to_rollover} before the rollover point at {percent}%',
-    })
+    }, { cwd })
     ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([textResponse('short answer')]))
 
     // Two closed long exchanges: enough surface for the automatic path's tail
