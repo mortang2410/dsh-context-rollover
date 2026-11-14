@@ -15,8 +15,9 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { DEFAULT_REMINDER_REPEAT_MS, DEFAULT_ROLLOVER_REMINDER_MESSAGE, resolveConfig } from '../src/config.ts'
 import { ContextRolloverEngine } from '../src/index.ts'
 import { NotesStore } from '../src/notes.ts'
+import { DEFAULT_MAX_RECALL_TOKENS } from '../src/recall.ts'
 import { selectionFor } from '../src/rollover.ts'
-import { engineHarness, seedExchanges } from './harness.ts'
+import { engineHarness, followup, ScriptedAdapter, seedExchanges, textResponse } from './harness.ts'
 
 describe('retainRatio', () => {
   it('sizes the recent tail from the context window when retainTokens is unset', () => {
@@ -104,6 +105,62 @@ describe('notesEnabled and historyEnabled', () => {
     const { ctx } = await engineHarness('config-history-off', { historyEnabled: false })
     expect(ctx.tools.get('history')).toBeUndefined()
     expect(ctx.tools.get('notes')).toBeDefined()
+  })
+})
+
+describe('maxRecallTokens', () => {
+  it('defaults to VCC\'s published recall budget and takes a configured value', () => {
+    const config = resolveConfig({})
+    expect(config.maxRecallTokens).toBe(16_000)
+    expect(config.maxRecallTokens).toBe(DEFAULT_MAX_RECALL_TOKENS)
+    expect(resolveConfig({ maxRecallTokens: 42 }).maxRecallTokens).toBe(42)
+  })
+
+  it('rejects a wrong type or a non-positive value with a TypeError naming the key', () => {
+    const badValues: unknown[] = [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1, '16000', true, {}]
+    for (const bad of badValues) {
+      expect(() => resolveConfig({ maxRecallTokens: bad as number }))
+        .toThrow(TypeError)
+      expect(() => resolveConfig({ maxRecallTokens: bad as number }))
+        .toThrow(/maxRecallTokens/)
+    }
+  })
+
+  it('declares the key in the load-time schema, which validates it', () => {
+    const schema = ContextRolloverEngine.Config
+    expect(() => schema({ maxRecallTokens: 1.5 })).toThrow(/maxRecallTokens/)
+    expect(() => schema({ maxRecallTokens: 0 })).toThrow(/maxRecallTokens/)
+    expect(() => schema({ maxRecallTokens: '16000' as unknown as number })).toThrow(/maxRecallTokens/)
+    expect(schema({ maxRecallTokens: 42 })).toMatchObject({ maxRecallTokens: 42 })
+  })
+
+  it('threads the configured budget into both read-back tools', async () => {
+    const { ctx, agent, session } = await engineHarness('config-max-recall', { maxRecallTokens: 20 })
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([textResponse('short answer')]))
+    const longText = `RECALL-BUDGET-MARKER ${'detail '.repeat(200)}`.trimEnd()
+    await followup(agent, longText)
+
+    const userEvent = session.snapshotEvents().find(event =>
+      event.type === 'user/message' && JSON.stringify(event.data).includes('RECALL-BUDGET-MARKER'))
+    if (userEvent === undefined) throw new Error('expected the long user message in the log')
+    const userSeq = Number(userEvent.seq)
+    const toolText = async (name: string, args: Record<string, unknown>): Promise<string> => {
+      const result = await ctx.tools.execute({
+        signal: new AbortController().signal,
+        callId: ToolCallId(`${name}-max-recall`),
+        name,
+        arguments: args,
+        agent,
+      })
+      return result.content.map(block => block.type === 'text' ? block.text ?? '' : `[${block.type}]`).join('\n')
+    }
+
+    // No per-call max_tokens: the factory's configured budget must apply to
+    // both tools, or the default 16000 would return these records whole.
+    expect(await toolText('recall', { type: 'seq', ref: String(userSeq) }))
+      .toContain('truncated from recall budget')
+    expect(await toolText('search', { query: 'RECALL-BUDGET-MARKER' }))
+      .toContain('truncated from search budget')
   })
 })
 

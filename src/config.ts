@@ -62,8 +62,8 @@ export const DEFAULT_ROLLOVER_REMINDER_MESSAGE =
   + 'write the handoff document with `/handoff-doc` (the `handoff-doc` skill), make it fully sufficient '
   + 'for a fresh context to continue the work, and call `new_context` with the path of that document as '
   + '`handoff_path`. Start no other work before that call. If you do not roll over, the engine rolls over '
-  + 'for you when `automaticRollover` is on, keeping only the notes snapshot and a recent tail, so '
-  + 'anything you left out of the handoff is lost.'
+  + 'for you when `automaticRollover` is on, keeping a compiled copy of the earlier conversation '
+  + 'and a recent tail, so anything you left out of the handoff is lost.'
 
 /**
  * The shipped minimum gap between two cadence reminders in one window, in
@@ -133,12 +133,13 @@ export interface RolloverConfig {
    * Roll the context over by itself at the rollover point, whether or not the
    * model complied. Defaults to `false`, and off means nothing changes.
    *
-   * With it on, the `agent/pre-step` listener commits the deterministic notes
-   * checkpoint plus a recent verbatim tail once measured usage is at or above
-   * the rollover point, with no model in the loop, no summarizer call, and no
-   * handoff file read. It is a safety net, not a substitute for the model's own
-   * handoff: the checkpoint carries the model's handoff document when the model
-   * wrote one into the notes tool, and the notes snapshot when it did not.
+   * With it on, the `agent/pre-step` listener commits the compiled replacement
+   * for the selected span plus a recent verbatim tail once measured usage is at
+   * or above the rollover point, with no model in the loop, no summarizer call,
+   * and no handoff file read. It is a safety net, not a substitute for the
+   * model's own handoff: the compiled copy carries the model's handoff document
+   * when the model wrote one into the notes tool, and the notes header plus the
+   * compiled conversation when it did not.
    */
   automaticRollover?: boolean
   /**
@@ -288,6 +289,12 @@ export interface RolloverConfig {
   toolArgTools?: string[]
   /** Bookkeeping tools dropped from the compiled copy entirely. Empty hides nothing. */
   hideTools?: string[]
+  /**
+   * Total budget, in density-aware tokens, for one `recall` or `search` result.
+   * Defaults to `16000`, VCC's published recall budget. A per-call `max_tokens`
+   * argument overrides it for that call only.
+   */
+  maxRecallTokens?: number
 }
 
 /** Absolute token points for one routed model, replacing its ratio-based points. */
@@ -343,6 +350,7 @@ export const Config: z<RolloverConfig> = z.object({
   includeReasoning: z.boolean(),
   toolArgTools: z.array(z.string()),
   hideTools: z.array(z.string()),
+  maxRecallTokens: z.number().step(1).min(1),
 })
 
 /** Resolved and validated rollover configuration. */
@@ -398,6 +406,8 @@ export interface ResolvedRolloverConfig {
   readonly toolArgTools: readonly string[]
   /** Bookkeeping tools dropped from the compiled copy. */
   readonly hideTools: readonly string[]
+  /** Total budget, in density-aware tokens, for one `recall` or `search` result. */
+  readonly maxRecallTokens: number
 }
 
 /** Reject a ratio that cannot represent a fraction of a context window. */
@@ -549,6 +559,8 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
   validateStringList('toolArgTools', toolArgTools)
   const hideTools = config.hideTools ?? []
   validateStringList('hideTools', hideTools)
+  const maxRecallTokens = config.maxRecallTokens ?? 16000
+  validateTokenCount('maxRecallTokens', maxRecallTokens)
   return {
     thresholdRatio,
     automaticRollover,
@@ -581,6 +593,7 @@ export function resolveConfig(config: RolloverConfig): ResolvedRolloverConfig {
     includeReasoning,
     toolArgTools,
     hideTools,
+    maxRecallTokens,
   }
 }
 

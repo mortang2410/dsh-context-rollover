@@ -609,7 +609,7 @@ describe('the rollover transaction', () => {
     const summaryEvent = sessionEvents(session).find(event => event.type === 'compaction/summary')
     if (summaryEvent?.type !== 'compaction/summary') throw new Error('expected a compaction/summary')
     expect(summaryEvent.data.provider).toBe('dsh-context-rollover')
-    expect(summaryEvent.data.model).toBe('deterministic/window-1')
+    expect(summaryEvent.data.model).toBe('deterministic/handoff-window-1')
     expect(summaryEvent.data.shadowedSeqs.length).toBeGreaterThan(0)
 
     // The replacement carries compaction provenance in its source, not in the

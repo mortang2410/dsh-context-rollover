@@ -11,6 +11,8 @@
  * @module dsh-context-rollover
  */
 
+import { realpath } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Context, symbols } from '@deepseek-ai/cordis'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
@@ -27,6 +29,7 @@ import type { Seq } from './compat.ts'
 import { Config as RolloverConfigSchema, renderReminderMessage, resolveConfig, rolloverPointsFor } from './config.ts'
 import type { ReminderValues, RolloverConfig, ResolvedRolloverConfig } from './config.ts'
 import type { RolloverReplacement } from './checkpoint.ts'
+import { buildCompiledReplacement } from './compiled-fallback.ts'
 import { contextManagementGuidance } from './guidance.ts'
 import { hasSlashGesture } from './idle.ts'
 import { NotesStore } from './notes.ts'
@@ -38,12 +41,15 @@ import {
   countRollovers,
   PLUGIN_NAME,
   REMINDER_SUMMARY_PREFIX,
+  replacementMode,
+  replacementSubject,
   ROLLOVER_REMINDER_SUMMARY_PREFIX,
   selectRolloverRange,
   selectionFor,
+  sizeRolloverReplacement,
 } from './rollover.ts'
 import type { RolloverSelection } from './rollover.ts'
-import { checkpointCarriesNothing, replacementWindowNumber } from './checkpoint.ts'
+import { replacementWindowNumber } from './checkpoint.ts'
 import { createRolloverTools } from './tools.ts'
 import type { PendingRollover } from './state.ts'
 import { startIdleWatchdog } from './watchdog.ts'
@@ -120,6 +126,101 @@ function pendingHandoff(pending: PendingRollover): string {
   return pending.handoff
 }
 
+/** Whether a failed realpath only means the path does not exist yet. */
+function isMissingPath(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+/**
+ * The canonical absolute form of a root that may not exist yet.
+ *
+ * The realpath of the root itself when it exists, otherwise the realpath of
+ * the nearest existing ancestor with the missing suffix appended. This is how
+ * a symlinked base is resolved without requiring the leaf directory to exist.
+ * @param target - the root path, absolute or resolved against the process cwd.
+ * @returns the canonical absolute path.
+ * @throws when an existing ancestor cannot be resolved for any reason other
+ *   than a missing path, so the caller can fail closed.
+ */
+async function canonicalRoot(target: string): Promise<string> {
+  const absolute = resolve(target)
+  let probe = absolute
+  const suffix: string[] = []
+  for (;;) {
+    try {
+      return join(await realpath(probe), ...suffix)
+    } catch (error: unknown) {
+      if (!isMissingPath(error)) throw error
+    }
+    const parent = dirname(probe)
+    if (parent === probe) {
+      throw new Error(`context-rollover: no existing ancestor for ${absolute}`)
+    }
+    suffix.unshift(basename(probe))
+    probe = parent
+  }
+}
+
+/** Whether `child` equals `parent` or lies underneath it. */
+function nestedUnder(parent: string, child: string): boolean {
+  const path = relative(parent, child)
+  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+}
+
+/** Whether two absolute paths are equal or either lies under the other. */
+function pathsOverlap(left: string, right: string): boolean {
+  return nestedUnder(left, right) || nestedUnder(right, left)
+}
+
+/**
+ * The TypeError an overlapping notes/handoff configuration throws.
+ * @param notesDir - the configured base path, named for the operator.
+ * @param notes - the canonical per-session notes root.
+ * @param handoff - the effective handoff root it overlaps.
+ * @returns the error to throw.
+ */
+function notesOverlapError(notesDir: string, notes: string, handoff: string): TypeError {
+  return new TypeError(
+    `context-rollover: notesDir ${notesDir} resolves to ${notes}, which overlaps the effective `
+    + `handoff directory ${handoff}; the notes store must stay outside the handoff directory`,
+  )
+}
+
+/**
+ * The TypeError thrown when the notes/handoff roots cannot be proven disjoint.
+ * @param notesDir - the configured base path, named for the operator.
+ * @param handoff - the effective handoff root that could not be compared.
+ * @param cause - why canonicalization failed.
+ * @returns the error to throw.
+ */
+function notesDisjointnessError(notesDir: string, handoff: string, cause: unknown): TypeError {
+  return new TypeError(
+    `context-rollover: notesDir ${notesDir} cannot be proven disjoint from the effective `
+    + `handoff directory ${handoff}`,
+    { cause },
+  )
+}
+
+/**
+ * Whether a commit failure is the transaction's own pre-bracket shrink refusal.
+ *
+ * `commitRollover` throws a plain `Error` for a non-shrinking replacement and
+ * writes this one sentence through `rolloverTooLargeMessage`; it has no typed
+ * marker of its own. Matching the formatter's stable prefix is what lets the
+ * automatic path return the deferral without swallowing a surface or meter
+ * failure, which must keep propagating.
+ * @param error - the failure `commitRollover` threw.
+ * @param replacement - the candidate the transaction priced.
+ * @returns true when the transaction refused the candidate for its size.
+ */
+function isShrinkRefusal(error: unknown, replacement: RolloverReplacement): boolean {
+  if (!(error instanceof Error)) return false
+  return error.message.startsWith(
+    `the ${replacementSubject(replacement)} is not smaller than the shadowed content `,
+  )
+}
+
 export type { RolloverConfig, ResolvedRolloverConfig, ReminderValues } from './config.ts'
 export {
   DEFAULT_HANDOFF_DIR,
@@ -166,8 +267,8 @@ export { CONTEXT_MANAGEMENT_GUIDANCE, contextManagementGuidance } from './guidan
  * announced to the model: a cadence reminder at or above the handoff point, and
  * a hard reminder every turn at or above the rollover point. Crossing the
  * rollover point also logs one journal warning per turn while
- * `automaticRollover` is off, and with it on the engine commits the notes
- * checkpoint plus a recent tail at the next pre-step instead. A
+ * `automaticRollover` is off, and with it on the engine commits a compiled copy
+ * of the replaced span plus a recent tail at the next pre-step instead. A
  * provider-rejected overflow ends the turn with the provider's own error.
  */
 export class ContextRolloverEngine extends CompactionEngine {
@@ -278,7 +379,12 @@ export class ContextRolloverEngine extends CompactionEngine {
       pendingRollovers: this.pendingRollovers,
       compactionOwnedElsewhere: (agent: { ctx: Context }) => this.compactionOwnedElsewhere(agent as Agent),
     }
-    for (const tool of createRolloverTools(deps, this.config.notesEnabled, this.config.historyEnabled)) {
+    for (const tool of createRolloverTools(
+      deps,
+      this.config.notesEnabled,
+      this.config.historyEnabled,
+      this.config.maxRecallTokens,
+    )) {
       this.ctx.tools.register(tool)
     }
   }
@@ -497,8 +603,8 @@ export class ContextRolloverEngine extends CompactionEngine {
    * document is its own, so above the rollover point the engine says so, once
    * per turn, and waits for the model's own `new_context` call. The warning is
    * reached only when {@link RolloverConfig.automaticRollover} is off, which is
-   * what keeps its wording true. The automatic path commits the notes
-   * checkpoint instead, and neither path reads a handoff file.
+   * what keeps its wording true. The automatic path commits the compiled copy
+   * instead, and neither path reads a handoff file.
    * @param agent - agent whose latest routed request is measured.
    * @param turn - the turn the measurement belongs to, for the once-per-turn warning.
    */
@@ -522,13 +628,17 @@ export class ContextRolloverEngine extends CompactionEngine {
    * The automatic pressure rollover: the engine's own safety net at the
    * rollover point, with no model in the loop.
    *
-   * It commits the deterministic notes checkpoint plus a recent verbatim tail,
-   * floors that tail with {@link RolloverConfig.automaticRolloverRetainTokens}
-   * so a row that keeps no tail still carries conversation into the new window,
-   * and never reads a handoff file. It defers, committing nothing, when the
-   * surface has no selectable span and when the checkpoint would carry neither
-   * notes nor a tail; a deferral is retried at the next pre-step and does not
-   * consume the turn's one commit.
+   * It composes the compiled replacement for the selected span, prices it with
+   * the transaction's own meter before opening the transaction, and commits it
+   * through {@link commitRollover} with a recent verbatim tail floored by
+   * {@link RolloverConfig.automaticRolloverRetainTokens}. It never reads a
+   * handoff file. It defers, committing nothing, when the surface has no
+   * selectable span, when the projection throws or compiles to no entries, and
+   * when the meter does not price the composed text smaller than the span; a
+   * deferral is retried at the next pre-step and does not consume the turn's
+   * one commit. A size refusal raised by the transaction's own recheck after a
+   * passing preflight is returned as that same deferral; every other meter or
+   * surface failure propagates.
    * @param agent - agent whose latest routed request is measured.
    * @param turn - the turn the measurement belongs to, for the once-per-turn rule.
    * @param signal - live turn cancellation signal.
@@ -557,41 +667,154 @@ export class ContextRolloverEngine extends CompactionEngine {
       )
       return null
     }
-    // An empty checkpoint is worse than a deferral, but empty notes alone are
-    // fine: the retained tail carries the continuation, and a session that
-    // complied already wrote its handoff into the notes snapshot.
-    const lastNode = session.surface.nodes[session.surface.nodes.length - 1]
-    const keepsTail = lastNode !== undefined && range.end !== lastNode
-    const notes = await this.renderNotes(session)
-    if (checkpointCarriesNothing(notes, keepsTail)) {
+    signal.throwIfAborted()
+    // The span's fixed-heuristic price only bounds the compiler budget; the
+    // transaction prices the composed text separately against the route price.
+    const startIdx = measurement.nodes.findIndex(node => node.seq === range.start)
+    const selectedNodes = startIdx === -1
+      ? []
+      : measurement.nodes.slice(startIdx, startIdx + range.shadowedSeqs.length)
+    if (selectedNodes.length !== range.shadowedSeqs.length
+      || selectedNodes.some((node, index) => node.seq !== range.shadowedSeqs[index])) {
+      throw new Error('context-rollover: token-meter surface does not match the current session surface')
+    }
+    const shadowedTokens = selectedNodes.reduce((total, node) => total + node.heuristicTokens, 0)
+    // The notes boundary check runs before any note-store access, so an
+    // overlapping notes/handoff configuration never reaches a notes read.
+    const notes = this.config.notesEnabled ? await this.renderAutomaticNotes(session) : null
+    const windowNumber = countRollovers(session) + 1
+    // The composer reads only these compiler keys. They are copied into a raw
+    // configuration because the resolved one carries nullable and readonly
+    // fields the raw shape does not accept, and nothing here mutates them.
+    const compilerConfig: RolloverConfig = {
+      checkpointCap: this.config.checkpointCap,
+      assistantTextTokens: this.config.assistantTextTokens,
+      userTextTokens: this.config.userTextTokens,
+      toolCallTokens: this.config.toolCallTokens,
+      includeReasoning: this.config.includeReasoning,
+      toolArgTools: [...this.config.toolArgTools],
+      hideTools: [...this.config.hideTools],
+    }
+    const replacement = buildCompiledReplacement({
+      session,
+      shadowedSeqs: range.shadowedSeqs,
+      shadowedTokens,
+      windowNumber,
+      notes,
+    }, compilerConfig)
+    if ('defer' in replacement) {
       this.ctx.logger.info(
-        'context rollover deferred: the automatic checkpoint would carry neither notes nor a recent tail; '
+        'context rollover deferred: the compiled replacement has no entries for this span; '
         + 'retrying at the next pre-step',
       )
       return null
     }
-    const windowNumber = countRollovers(session) + 1
-    const result = await commitRollover(
+    // C10: price the exact candidate with the transaction's meter before the
+    // lock, so a known non-shrinking commit never opens a compaction bracket.
+    const sizing = sizeRolloverReplacement(
       { meter: this.ctx.tokenMeter },
       session,
-      range.start,
-      range.end,
-      {
-        owner: 'current-turn',
-        replacement: {
-          kind: 'checkpoint',
-          checkpoint: { reason: 'automatic', windowNumber, notes, handoff: null },
-        },
-      },
+      range,
+      replacement,
     )
+    if (!sizing.fits) return this.deferAutomaticCompiled()
+    let result: CompactionResult
+    try {
+      result = await commitRollover(
+        { meter: this.ctx.tokenMeter },
+        session,
+        range.start,
+        range.end,
+        { owner: 'current-turn', replacement },
+      )
+    } catch (error: unknown) {
+      // The transaction rechecks the size before it opens the bracket. A route
+      // or surface change between the preflight and the commit can turn a
+      // passing candidate into a refusal; that is the same deferral. Any other
+      // failure keeps propagating to the lifecycle's error path.
+      if (isShrinkRefusal(error, replacement)) return this.deferAutomaticCompiled()
+      throw error
+    }
     // Only a committed rollover consumes the turn: every deferral above retries
     // at the next pre-step of the same turn.
     this.automaticRolledTurns.add(key)
     this.ctx.logger.info(
-      `context rollover (automatic): window ${windowNumber} started; `
+      `context rollover (automatic): ${replacementMode(replacement)} mode; window ${windowNumber} started; `
       + `shadowed ${result.shadowedSeqs.length} surface nodes (~${result.shadowedTokenCount} tokens)`,
     )
     return result
+  }
+
+  /**
+   * The deferral one non-shrinking compiled candidate returns.
+   *
+   * The preflight and the transaction's recheck both call this, so the two
+   * paths log the same sentence and return the same nothing.
+   * @returns always `null`.
+   */
+  private deferAutomaticCompiled(): null {
+    this.ctx.logger.info(
+      'context rollover deferred: the compiled replacement is not smaller than the selected span; '
+      + 'retrying at the next pre-step',
+    )
+    return null
+  }
+
+  /**
+   * Render the automatic path's notes after proving the notes root is disjoint
+   * from the effective handoff root.
+   *
+   * The comparison runs before any note-store read: the lexical absolute paths
+   * first, then the canonical notes root, then the handoff root's own realpath
+   * when it exists. A missing notes leaf is canonicalized through its nearest
+   * existing ancestor, and any failure to prove the roots disjoint fails
+   * closed with a TypeError naming `notesDir`.
+   * @param session - session whose notes root and working directory are read.
+   * @returns the rendered notes snapshot, or `null` when notes are disabled or empty.
+   */
+  private async renderAutomaticNotes(session: Session): Promise<string | null> {
+    await this.assertNotesRootDisjoint(session)
+    return this.renderNotes(session)
+  }
+
+  /**
+   * Reject a notes root that equals or lies under the effective handoff root,
+   * or one whose relationship cannot be proven disjoint.
+   *
+   * Only the handoff root's own path is resolved; nothing under it is read,
+   * stated or listed. The handoff root resolves against the session working
+   * directory, matching how a relative handoff path is named, and falls back to
+   * the process working directory for a session without one.
+   * @param session - session whose notes root and working directory are read.
+   */
+  private async assertNotesRootDisjoint(session: Session): Promise<void> {
+    const notesRoot = this.notesStore(session).root
+    const notesAbsolute = resolve(notesRoot)
+    const cwd = session.header.cwd
+    const handoffAbsolute = isAbsolute(this.config.handoffDir)
+      ? resolve(this.config.handoffDir)
+      : resolve(cwd ?? process.cwd(), this.config.handoffDir)
+    if (pathsOverlap(notesAbsolute, handoffAbsolute)) {
+      throw notesOverlapError(notesRoot, notesAbsolute, handoffAbsolute)
+    }
+    let notesCanonical: string
+    try {
+      notesCanonical = await canonicalRoot(notesRoot)
+    } catch (error: unknown) {
+      throw notesDisjointnessError(notesRoot, handoffAbsolute, error)
+    }
+    if (pathsOverlap(notesCanonical, handoffAbsolute)) {
+      throw notesOverlapError(notesRoot, notesCanonical, handoffAbsolute)
+    }
+    let handoffCanonical: string | undefined
+    try {
+      handoffCanonical = await realpath(handoffAbsolute)
+    } catch (error: unknown) {
+      if (!isMissingPath(error)) throw notesDisjointnessError(notesRoot, handoffAbsolute, error)
+    }
+    if (handoffCanonical !== undefined && pathsOverlap(notesCanonical, handoffCanonical)) {
+      throw notesOverlapError(notesRoot, notesCanonical, handoffCanonical)
+    }
   }
 
   /**

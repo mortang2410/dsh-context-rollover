@@ -178,7 +178,12 @@ function assertOrdinalsAreInvocationOrder(): void {
  * The stream count at each edge was sampled inside the `session.event`
  * observer, and the comparison is on the recorded ordinal itself.
  */
-function assertNoStreamInside(window: RolloverWindow, session: Session, windowNumber: number): void {
+function assertNoStreamInside(
+  window: RolloverWindow,
+  session: Session,
+  windowNumber: number,
+  mode: 'handoff' | 'notes',
+): void {
   expect(sessionEventAt(session, window.startSeq)?.type).toBe('compaction/start')
   expect(sessionEventAt(session, window.summarySeq)?.type).toBe('compaction/summary')
   expect(sessionEventAt(session, window.endSeq)?.type).toBe('compaction/end')
@@ -193,7 +198,7 @@ function assertNoStreamInside(window: RolloverWindow, session: Session, windowNu
   // metadata cannot show that no request was made — a backend that also called
   // a model while writing this summary would still record exactly these fields.
   expect(window.provider).toBe(ROLLOVER_PROVIDER)
-  expect(window.model).toBe(`deterministic/window-${windowNumber}`)
+  expect(window.model).toBe(`deterministic/${mode}-window-${windowNumber}`)
 }
 
 /**
@@ -301,7 +306,7 @@ describe('no summarizer on the model-requested rollover path', () => {
     // extended past the rollover would have the later requests to catch.
     assertOrdinalsAreInvocationOrder()
     const window = soleCommittedWindow(windows, session)
-    assertNoStreamInside(window, session, 1)
+    assertNoStreamInside(window, session, 1, 'handoff')
     assertRequestsStraddle(window)
 
     // And the backend that crossed the boundary is this engine, not the
@@ -426,7 +431,7 @@ describe('no summarizer on the manual rollover path', () => {
 
     assertOrdinalsAreInvocationOrder()
     const window = soleCommittedWindow(windows, session)
-    assertNoStreamInside(window, session, 1)
+    assertNoStreamInside(window, session, 1, 'notes')
     assertRequestsStraddle(window)
     expect(session.deriveMessages().map(message => JSON.stringify(message)).join('\n'))
       .toContain('reason: manual')

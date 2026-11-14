@@ -140,6 +140,25 @@ export function rolloverTooLargeMessage(
     + 'the active context is too small for a useful rollover'
 }
 
+/**
+ * The one word naming a replacement's mode in the summary marker and the
+ * journal line.
+ *
+ * Both surfaces derive their mode from the replacement's own variant through
+ * this function, so neither can name a mode the other does not, and neither
+ * needs a separate flag that could drift from what was committed. The mapping
+ * is exposed because the engine journal is written outside this module.
+ * @param replacement - the replacement that committed or is about to commit.
+ * @returns `handoff`, `compiled`, or `notes`, per the replacement variant.
+ */
+export function replacementMode(replacement: RolloverReplacement): 'handoff' | 'compiled' | 'notes' {
+  switch (replacement.kind) {
+    case 'handoff-document': return 'handoff'
+    case 'compiled': return 'compiled'
+    case 'checkpoint': return 'notes'
+  }
+}
+
 /** Options for one rollover transaction. */
 export interface CommitRolloverOptions {
   /** `current-turn` derives the open turn's number; `null` writes a standalone bracket. */
@@ -620,7 +639,7 @@ export async function commitRollover(
       shadowedSeqs: [...selection.shadowedSeqs],
       shadowedTokenCount,
       provider: ROLLOVER_PROVIDER,
-      model: `deterministic/window-${replacementWindowNumber(options.replacement)}`,
+      model: `deterministic/${replacementMode(options.replacement)}-window-${replacementWindowNumber(options.replacement)}`,
     })
     session.append('user/message', checkpointMessage, {
       // The op shape is host-versioned (see replaceSurfaceOp); the cast is

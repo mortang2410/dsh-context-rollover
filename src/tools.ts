@@ -19,7 +19,7 @@ import type { ResolvedRolloverConfig } from './config.ts'
 import { readHandoffFileOrThrow } from './handoff.ts'
 import { readHistoryItem, searchHistory } from './history.ts'
 import { NotesStore } from './notes.ts'
-import { DEFAULT_MAX_RECALL_TOKENS, recallByCheckpoint, recallByResult, recallBySeq } from './recall.ts'
+import { recallByCheckpoint, recallByResult, recallBySeq } from './recall.ts'
 import { searchLog } from './search.ts'
 import { sessionEvents } from './compat.ts'
 import { countRollovers, preflightRolloverReplacement, replacementSubject, rolloverSummarySeqs, rolloverTooLargeMessage } from './rollover.ts'
@@ -572,8 +572,8 @@ type RecallReference = 'seq' | 'result' | 'checkpoint'
 /**
  * The `recall` tool: VCC's complete text projection of one log record, within
  * the recall budget. Every pointer a compiled checkpoint writes resolves here.
- * @param maxRecallTokens - the budget one call may read; a later ticket threads
- *   the configured key, so this defaults to VCC's published value.
+ * @param maxRecallTokens - the configured budget one call may read; a per-call
+ *   `max_tokens` argument overrides it.
  */
 function recallTool(maxRecallTokens: number) {
   return defineTool({
@@ -672,20 +672,22 @@ function searchTool(maxRecallTokens: number) {
  * @param deps - runtime collaborators shared with the engine.
  * @param notesEnabled - whether the `notes` tool is mounted.
  * @param historyEnabled - whether the `history` tool is mounted.
+ * @param maxRecallTokens - total budget one `recall` or `search` call gets by default.
  * @returns the tool definitions to register.
  */
 export function createRolloverTools(
   deps: RolloverToolDependencies,
   notesEnabled: boolean,
   historyEnabled: boolean,
+  maxRecallTokens: number,
 ): ToolDefinition[] {
   const tools = [
     newContextTool(deps),
     getContextRemainingTool(deps),
     ...(notesEnabled ? [notesTool(deps)] : []),
     ...(historyEnabled ? [historyTool()] : []),
-    recallTool(DEFAULT_MAX_RECALL_TOKENS),
-    searchTool(DEFAULT_MAX_RECALL_TOKENS),
+    recallTool(maxRecallTokens),
+    searchTool(maxRecallTokens),
   ]
   return tools
 }

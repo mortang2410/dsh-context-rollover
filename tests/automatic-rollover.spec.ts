@@ -5,11 +5,26 @@
  * The contract held down here:
  *
  * - with the gate on, a session at or above the rollover point commits a
- *   deterministic notes-checkpoint rollover at the next pre-step, with no model
- *   request pending and no `new_context` call;
- * - the committed replacement is exactly `buildCheckpointText`, so it carries
- *   the notes snapshot and never the bytes of a handoff file: no engine path
- *   scans `handoffDir` (the regression commit `ef63415` removed);
+ *   compiled replacement at the next pre-step, with no model request pending
+ *   and no `new_context` call;
+ * - the committed replacement is the composer's own text for that span: the
+ *   recall guide first, the durable notes header after it when notes exist,
+ *   then the framed entries, so it never carries the bytes of a handoff file
+ *   and no engine path scans `handoffDir` (the regression commit `ef63415`
+ *   removed);
+ * - a pending `new_context` handoff still commits its document byte for byte
+ *   before the forced branch runs, and its summary marker names the handoff
+ *   mode;
+ * - the summary `model` marker and the automatic journal line name the mode
+ *   derived from the committed replacement, so handoff, compiled and notes-only
+ *   rollovers cannot be confused;
+ * - the engine prices the compiled candidate with the transaction meter before
+ *   the lock: a non-shrinking candidate defers with no compaction transaction,
+ *   and a size refusal from the commit-time recheck after a passing preflight
+ *   returns the same deferral while unrelated meter failures propagate;
+ * - the notes/handoff roots are proven disjoint before any notes read, and an
+ *   equal, nested or symlinked handoff root is refused with a TypeError naming
+ *   `notesDir`;
  * - with the gate off (the default) nothing changes: no rollover, one warning;
  * - at most one committed automatic rollover per turn, while a deferral is
  *   retried at the next pre-step and consumes nothing;
@@ -22,30 +37,35 @@
  * One branch is deliberately defensive and cannot be reached through the
  * engine: `checkpointCarriesNothing` (empty notes AND an empty tail) needs a
  * selected span that ends at the last surface node, and tail selection always
- * leaves at least one node behind. Its predicate is pinned directly here; the
- * engine-level empty-notes case (notes empty, tail present) commits, and that is
- * asserted on the real path.
+ * leaves at least one node behind. The automatic path now composes compiled
+ * entries instead of that checkpoint; the predicate stays pinned directly here
+ * because manual `/compact` still composes the notes checkpoint.
  *
  * @module tests/automatic-rollover
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { CompactionEngine } from '@deepseek-ai/dsh-compaction'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { buildCheckpointText, checkpointCarriesNothing } from '../src/checkpoint.ts'
+import { checkpointCarriesNothing } from '../src/checkpoint.ts'
+import { buildCompiledReplacement } from '../src/compiled-fallback.ts'
 import { resolveConfig } from '../src/config.ts'
+import type { RolloverConfig } from '../src/config.ts'
 import { CONTEXT_MANAGEMENT_GUIDANCE, contextManagementGuidance } from '../src/guidance.ts'
 import { NotesStore } from '../src/notes.ts'
 import { countRollovers, selectionFor } from '../src/rollover.ts'
+import { CHECKPOINT_OPEN_TAG, RECALL_GUIDE } from '../src/vcc/compiler.ts'
 import {
   derivedTexts,
   engineHarness,
   followup,
+  newContextCall,
   ScriptedAdapter,
+  seedExchanges,
   textResponse,
   toolCall,
 } from './harness.ts'
@@ -58,6 +78,10 @@ afterAll(async () => {
     const dir = scratchDirs.pop()
     if (dir !== undefined) await rm(dir, { recursive: true, force: true })
   }
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
 })
 
 /** Create one scratch workspace, removed after the run. */
@@ -140,6 +164,63 @@ function committedReplacementTexts(session: Session): string[] {
   return texts
 }
 
+/** The facts one committed summary carries: marker, span and heuristic span price. */
+interface SummaryFacts {
+  readonly model: string
+  readonly shadowedSeqs: readonly number[]
+  readonly shadowedTokenCount: number
+}
+
+/** The committed summaries, in commit order. */
+function summaryFacts(session: Session): SummaryFacts[] {
+  const summaries: SummaryFacts[] = []
+  for (const raw of session.snapshotEvents()) {
+    const event = raw as {
+      type: string
+      data: {
+        model?: string
+        shadowedSeqs?: readonly number[]
+        shadowedTokenCount?: number
+      }
+    }
+    if (event.type !== 'compaction/summary') continue
+    summaries.push({
+      model: event.data.model ?? '',
+      shadowedSeqs: event.data.shadowedSeqs ?? [],
+      shadowedTokenCount: event.data.shadowedTokenCount ?? 0,
+    })
+  }
+  return summaries
+}
+
+/**
+ * The compiled text the composer builds for the last committed summary's span.
+ *
+ * Recomputed after the commit from the summary's own shadowed positions, so the
+ * assertion checks the replacement the engine committed rather than a text the
+ * test hand-wrote. The composer's defaults are the resolved defaults these
+ * tests configure (no compiler key is overridden).
+ */
+async function expectedCompiledText(
+  session: Session,
+  notesBase: string,
+  windowNumber = 1,
+): Promise<string> {
+  const summary = summaryFacts(session).at(-1)
+  if (summary === undefined) throw new Error('expected a committed rollover summary')
+  const notes = await new NotesStore(NotesStore.directoryFor(session.id, notesBase)).renderAll(20_000)
+  const built = buildCompiledReplacement({
+    session,
+    shadowedSeqs: summary.shadowedSeqs,
+    shadowedTokens: summary.shadowedTokenCount,
+    windowNumber,
+    notes,
+  }, {})
+  if ('defer' in built) throw new Error('expected the committed span to compose a compiled replacement')
+  if (built.kind !== 'compiled') throw new Error('expected a compiled replacement variant')
+  return built.text
+}
+
 /** How many committed rollovers each turn owns, from the durable bracket's turn field. */
 function startsByTurn(session: Session): Map<number, number> {
   const byTurn = new Map<number, number>()
@@ -160,12 +241,13 @@ function eventKeys(session: Session): string[] {
 
 /**
  * What the first committed rollover kept: the priced tokens of every surface
- * node after the checkpoint message.
+ * node after the compiled replacement message.
  *
- * The checkpoint is found by its own marker text rather than by event seq, so
- * the count cannot drift with the append order of the transaction. The priced
- * nodes and the derived messages are the same surface in the same order, and a
- * mismatch is reported rather than silently mis-indexed.
+ * The replacement is found by its own checkpoint marker text rather than by
+ * event seq, so the count cannot drift with the append order of the
+ * transaction. The priced nodes and the derived messages are the same surface
+ * in the same order, and a mismatch is reported rather than silently
+ * mis-indexed.
  */
 function retainedTailTokens(ctx: Context, session: Session): number {
   const texts = derivedTexts(session)
@@ -173,9 +255,9 @@ function retainedTailTokens(ctx: Context, session: Session): number {
   if (texts.length !== nodes.length) {
     throw new Error(`expected one priced node per derived message, got ${nodes.length} and ${texts.length}`)
   }
-  const checkpoint = texts.findIndex(text => text.includes('<context-rollover checkpoint>'))
-  if (checkpoint === -1) throw new Error('expected a committed checkpoint on the surface')
-  return nodes.slice(checkpoint + 1).reduce((total, node) => total + node.tokens, 0)
+  const replacement = texts.findIndex(text => text.includes(CHECKPOINT_OPEN_TAG))
+  if (replacement === -1) throw new Error('expected a committed compiled replacement on the surface')
+  return nodes.slice(replacement + 1).reduce((total, node) => total + node.tokens, 0)
 }
 
 /** The user messages still on the surface, identified by the `turn N` label. */
@@ -187,7 +269,7 @@ function keptTurns(session: Session): string[] {
 }
 
 describe('the automatic rollover commits when the model never rolls over', () => {
-  it('commits a checkpoint at the next pre-step above the point, with no new_context call', async () => {
+  it('commits the compiled text at the next pre-step above the point, with no new_context call', async () => {
     const cwd = await scratch('dsh-auto-rollover-')
     const handoffDir = join(cwd, '.scratch', 'handoff')
     await mkdir(handoffDir, { recursive: true })
@@ -195,8 +277,9 @@ describe('the automatic rollover commits when the model never rolls over', () =>
     // the newest file here, so its bytes must never reach this surface.
     await writeFile(join(handoffDir, 'HANDOFF-foreign-session.md'), 'FOREIGN-HANDOFF-SENTINEL\n', 'utf8')
 
-    const { ctx, agent, session } = await engineHarness('auto-commits', AUTOMATIC, { cwd })
+    const { ctx, agent, session, notesBase } = await engineHarness('auto-commits', AUTOMATIC, { cwd })
     const warnings = captureWarnings(ctx)
+    const infos = captureInfos(ctx)
     ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([textResponse('short answer')]))
 
     await followup(agent, longMessage('turn 1'))
@@ -214,19 +297,23 @@ describe('the automatic rollover commits when the model never rolls over', () =>
     // pending and no new_context call, the next pre-step commits the rollover.
     expect(countRollovers(session)).toBe(1)
     expect(startsByTurn(session)).toEqual(new Map([[3, 1]]))
-    // The replacement is the deterministic checkpoint, byte for byte: empty
-    // notes (the store is empty) plus the recent tail, and no handoff text.
-    expect(committedReplacementTexts(session)).toEqual([
-      buildCheckpointText({ reason: 'automatic', windowNumber: 1, notes: null, handoff: null }),
-    ])
+    // The replacement is the composer's compiled text for the committed span,
+    // byte for byte. The span's own seqs make the recomputation honest: it is
+    // the text the engine committed, not one the test wrote.
+    expect(committedReplacementTexts(session)).toEqual([await expectedCompiledText(session, notesBase)])
+    const summary = summaryFacts(session).at(-1)
+    expect(summary?.model).toBe('deterministic/compiled-window-1')
+    // The mode word in the journal comes from the same replacement variant as
+    // the summary marker, so the two cannot disagree.
+    expect(infos.filter(message => message.includes('compiled mode; window 1 started'))).toHaveLength(1)
     const visible = derivedTexts(session).join('\n')
-    expect(visible).toContain('<context-rollover checkpoint>')
-    expect(visible).toContain('reason: automatic')
-    expect(visible).toContain('No notes were saved for this rollover.')
+    expect(visible).toContain(CHECKPOINT_OPEN_TAG)
+    expect(visible).toContain(RECALL_GUIDE)
+    expect(visible).not.toContain('<context-rollover checkpoint>')
     // Empty notes do not stop it: the retained tail is turn 2's exchange, and
-    // turn 3 is the message this pre-step entered with. Turn 1 is gone.
+    // turn 3 is the message this pre-step entered with. Turn 1 lives on only
+    // inside the compiled copy, not as a raw surface message.
     expect(keptTurns(session)).toEqual(['turn 2', 'turn 3'])
-    expect(visible).not.toContain('turn 1')
     expect(visible).not.toContain('FOREIGN-HANDOFF-SENTINEL')
     expect(visible).not.toContain('## Handoff')
 
@@ -252,17 +339,137 @@ describe('the automatic rollover commits when the model never rolls over', () =>
     await followup(agent, longMessage('turn three'))
 
     expect(countRollovers(session)).toBe(1)
-    expect(committedReplacementTexts(session)).toEqual([
-      buildCheckpointText({
-        reason: 'automatic',
-        windowNumber: 1,
-        notes: `### state.md\n${noteText}`,
-        handoff: null,
-      }),
-    ])
+    expect(committedReplacementTexts(session)).toEqual([await expectedCompiledText(session, notesBase)])
+    expect(summaryFacts(session).at(-1)?.model).toBe('deterministic/compiled-window-1')
     const visible = derivedTexts(session).join('\n')
+    // The guide leads and the notes header follows it, as the composer orders
+    // them; the exact committed text above already pins the boundary.
+    expect(visible.indexOf(RECALL_GUIDE)).toBeLessThan(visible.indexOf('## Durable notes'))
     expect(visible).toContain('AUTOMATIC-NOTES-SENTINEL')
     expect(visible).not.toContain('FOREIGN-HANDOFF-SENTINEL')
+  })
+})
+
+describe('a pending handoff still commits before the forced branch', () => {
+  it('commits the handoff document byte for byte and names the handoff marker', async () => {
+    const cwd = await scratch('dsh-auto-pending-handoff-')
+    const document = '# Handoff\n\nContinue from this document, byte for byte.\n'
+    const documentPath = join(cwd, 'HANDOFF-pending.md')
+    await writeFile(documentPath, document, 'utf8')
+
+    const { ctx, agent, session } = await engineHarness('auto-pending-handoff', {
+      automaticRollover: true,
+      handoffOnly: true,
+      // Well above the pressure this fixture builds, so the forced branch
+      // cannot preempt the request the model is about to make.
+      thresholdRatio: 0.9,
+      reminderThresholdRatio: 0.5,
+      reminderMessage: 'pending-handoff test reminder, not asserted',
+    }, { cwd })
+    const infos = captureInfos(ctx)
+    const adapter = new ScriptedAdapter([
+      ...Array.from({ length: 12 }, (_unused, index) => textResponse(`pending filler ${index}`)),
+      newContextCall(JSON.stringify({ handoff_path: documentPath })),
+      textResponse('done'),
+    ])
+    ctx.llm.registerAdapter(['mock'], adapter)
+
+    await seedExchanges(agent, 12)
+    await followup(agent, 'cross the boundary with the pending handoff')
+
+    expect(countRollovers(session)).toBe(1)
+    // Byte for byte: no compiled wrapper, no notes header, no narration.
+    expect(committedReplacementTexts(session)).toEqual([document])
+    expect(summaryFacts(session).at(-1)?.model).toBe('deterministic/handoff-window-1')
+    // The forced branch never ran, so its compiled journal line never appeared.
+    expect(infos.filter(message => message.includes('context rollover (automatic)'))).toEqual([])
+  })
+})
+
+describe('the summary marker names the replacement variant', () => {
+  it('writes notes-window-N for a manual notes checkpoint', async () => {
+    const { ctx, engine, agent, session } = await engineHarness('marker-notes-window')
+    const adapter = new ScriptedAdapter(
+      Array.from({ length: 25 }, (_unused, index) => textResponse(`marker filler ${index}`)),
+    )
+    ctx.llm.registerAdapter(['mock'], adapter)
+
+    await seedExchanges(agent, 20)
+    await followup(agent, 'background work before the manual rollover')
+    const compacted = await engine.compactNow(agent, new AbortController().signal)
+    expect(compacted).not.toBeNull()
+
+    expect(summaryFacts(session).at(-1)?.model).toBe('deterministic/notes-window-1')
+    // The notes checkpoint is the replacement this marker names.
+    expect(committedReplacementTexts(session)[0]).toContain('<context-rollover checkpoint>')
+  })
+})
+
+describe('the notes and handoff roots are proven disjoint before notes are read', () => {
+  it('rejects a relative handoff root equal to the per-session notes root', async () => {
+    const cwd = await scratch('dsh-auto-containment-equal-')
+    const refusal = await containmentRefusal('relative-equal', {
+      notesDir: cwd,
+      handoffDir: 'relative-equal',
+    }, cwd)
+
+    expect(refusal.warnings.some(message => message.includes('notesDir') && message.includes('overlaps')))
+      .toBe(true)
+    expect(refusal.compactions).toBe(0)
+    expect(refusal.starts).toBe(0)
+    expect(refusal.renderCalls).toBe(0)
+  })
+
+  it('rejects a notes root nested under the handoff root', async () => {
+    const cwd = await scratch('dsh-auto-containment-nested-')
+    const refusal = await containmentRefusal('nested', {
+      notesDir: join(cwd, 'handoff-root', 'notes'),
+      handoffDir: join(cwd, 'handoff-root'),
+    }, cwd)
+
+    expect(refusal.warnings.some(message => message.includes('notesDir') && message.includes('overlaps')))
+      .toBe(true)
+    expect(refusal.compactions).toBe(0)
+    expect(refusal.starts).toBe(0)
+    expect(refusal.renderCalls).toBe(0)
+  })
+
+  it('rejects a symlinked handoff root that resolves onto the notes base', async () => {
+    const cwd = await scratch('dsh-auto-containment-symlink-')
+    const notesBase = join(cwd, 'notes-base')
+    const sessionId = 'symlinked-handoff'
+    await mkdir(join(notesBase, sessionId), { recursive: true })
+    await writeFile(join(notesBase, sessionId, 'state.md'), 'NOTE-READ-SENTINEL', 'utf8')
+    await symlink(notesBase, join(cwd, 'linked-handoff'))
+
+    const refusal = await containmentRefusal(sessionId, {
+      notesDir: notesBase,
+      handoffDir: 'linked-handoff',
+    }, cwd)
+
+    expect(refusal.warnings.some(message => message.includes('notesDir') && message.includes('overlaps')))
+      .toBe(true)
+    expect(refusal.compactions).toBe(0)
+    expect(refusal.starts).toBe(0)
+    expect(refusal.renderCalls).toBe(0)
+  })
+
+  it('fails closed when the handoff root cannot be resolved', async () => {
+    const cwd = await scratch('dsh-auto-containment-loop-')
+    // A self-referential symlink: the handoff root exists as a directory entry
+    // but its realpath cannot establish a relationship with the notes root.
+    await symlink('loop', join(cwd, 'loop'))
+
+    const refusal = await containmentRefusal('unprovable', {
+      notesDir: join(cwd, 'notes'),
+      handoffDir: 'loop',
+    }, cwd)
+
+    expect(refusal.warnings.some(message =>
+      message.includes('notesDir') && message.includes('cannot be proven disjoint'))).toBe(true)
+    expect(refusal.compactions).toBe(0)
+    expect(refusal.starts).toBe(0)
+    expect(refusal.renderCalls).toBe(0)
   })
 })
 
@@ -411,14 +618,15 @@ describe('the automatic rollover stands down for another backend', () => {
   })
 })
 
-describe('a refused automatic rollover is a warning, not a lost turn', () => {
-  it('logs the shrink refusal and continues the turn with the surface intact', async () => {
+describe('a non-shrinking automatic candidate defers', () => {
+  it('commits nothing, logs the deferral, and continues the turn', async () => {
     const { ctx, agent, session } = await engineHarness('auto-refused', {
       ...AUTOMATIC,
       // The tail floor is met by the long answer alone, so the only span left is
-      // the short user message, which is smaller than the checkpoint framing.
+      // the short user message, which is smaller than the compiled framing.
       automaticRolloverRetainTokens: 1000,
     })
+    const infos = captureInfos(ctx)
     const warnings = captureWarnings(ctx)
     ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([
       textResponse(longMessage('answer one')),
@@ -429,13 +637,87 @@ describe('a refused automatic rollover is a warning, not a lost turn', () => {
     const generation = session.surface.replaceGeneration
     await followup(agent, 'turn two')
 
-    expect(warnings.filter(message => message.includes('context rollover failed'))).toHaveLength(1)
-    expect(warnings.some(message => message.includes('continuing the turn'))).toBe(true)
+    // The preflight refused the candidate before any transaction opened, so
+    // this is a deferral, not the old warning path.
+    expect(infos.filter(message => message.includes('not smaller than the selected span'))).toHaveLength(1)
+    expect(warnings.filter(message => message.includes('context rollover failed'))).toEqual([])
     expect(countRollovers(session)).toBe(0)
     expect(session.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
     expect(session.surface.replaceGeneration).toBe(generation)
     // The turn continued to its answer instead of ending on the refusal.
     expect(derivedTexts(session).join('\n')).toContain('answer two')
+  })
+
+  it('defers when the meter refuses a candidate the compiler composed', async () => {
+    const { ctx, agent, session } = await engineHarness('auto-meter-preflight', AUTOMATIC)
+    const infos = captureInfos(ctx)
+    const warnings = captureWarnings(ctx)
+    // The compiler's own cap accepts this span, so the composer builds a
+    // candidate; the live meter prices it above the span and the preflight
+    // returns the deferral before commitRollover can open a bracket.
+    vi.spyOn(ctx.tokenMeter, 'estimateMessage').mockReturnValue(1_000_000)
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([textResponse('short answer')]))
+
+    await followup(agent, longMessage('turn one'))
+    await followup(agent, longMessage('turn two'))
+    await followup(agent, longMessage('turn three'))
+
+    expect(countRollovers(session)).toBe(0)
+    expect(session.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
+    expect(infos.filter(message => message.includes('not smaller than the selected span'))).toHaveLength(1)
+    expect(warnings.filter(message => message.includes('context rollover failed'))).toEqual([])
+  })
+})
+
+describe('a commit-time size recheck keeps the deferral', () => {
+  it('returns the same deferral when the recheck rejects a preflight-passing candidate', async () => {
+    const { ctx, agent, session } = await engineHarness('auto-commit-recheck', AUTOMATIC)
+    const infos = captureInfos(ctx)
+    const warnings = captureWarnings(ctx)
+    const original = ctx.tokenMeter.estimateMessage.bind(ctx.tokenMeter)
+    let calls = 0
+    vi.spyOn(ctx.tokenMeter, 'estimateMessage').mockImplementation((message) => {
+      calls += 1
+      // The preflight passes; the transaction's own recheck refuses.
+      return calls === 1 ? original(message) : 1_000_000
+    })
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([textResponse('short answer')]))
+
+    await followup(agent, longMessage('turn one'))
+    await followup(agent, longMessage('turn two'))
+    await followup(agent, longMessage('turn three'))
+
+    expect(calls).toBe(2)
+    expect(countRollovers(session)).toBe(0)
+    // The transaction refused before its compaction/start; no bracket exists.
+    expect(session.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
+    expect(infos.filter(message => message.includes('not smaller than the selected span'))).toHaveLength(1)
+    expect(warnings.filter(message => message.includes('context rollover failed'))).toEqual([])
+  })
+
+  it('propagates an unrelated meter failure from the commit instead of deferring', async () => {
+    const { ctx, agent, session } = await engineHarness('auto-commit-meter-error', AUTOMATIC)
+    const infos = captureInfos(ctx)
+    const warnings = captureWarnings(ctx)
+    const original = ctx.tokenMeter.estimateMessage.bind(ctx.tokenMeter)
+    let calls = 0
+    vi.spyOn(ctx.tokenMeter, 'estimateMessage').mockImplementation((message) => {
+      calls += 1
+      if (calls === 1) return original(message)
+      throw new Error('meter surface exploded')
+    })
+    ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([textResponse('short answer')]))
+
+    await followup(agent, longMessage('turn one'))
+    await followup(agent, longMessage('turn two'))
+    await followup(agent, longMessage('turn three'))
+
+    expect(countRollovers(session)).toBe(0)
+    expect(session.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
+    // The failure is a warning through the lifecycle's error path, not a
+    // silently converted deferral.
+    expect(warnings.filter(message => message.includes('meter surface exploded'))).toHaveLength(1)
+    expect(infos.filter(message => message.includes('not smaller than the selected span'))).toEqual([])
   })
 })
 
@@ -510,4 +792,42 @@ async function firstAutomaticRollover(
     throw new Error(`expected one automatic rollover within ${maxTurns} turns, got ${countRollovers(session)}`)
   }
   return { retained: retainedTailTokens(ctx, session), keptTurns: keptTurns(session), turns }
+}
+
+/** What one overlapping notes/handoff fixture produced. */
+interface ContainmentRefusal {
+  readonly warnings: readonly string[]
+  readonly compactions: number
+  readonly starts: number
+  /** Calls to the notes store's reader; zero proves the refusal ran first. */
+  readonly renderCalls: number
+}
+
+/**
+ * Drive one automatic crossing whose notes and handoff roots overlap, and
+ * report whether the containment check refused it before any notes read.
+ * @param id - session id, which becomes the per-session notes leaf.
+ * @param config - notesDir and handoffDir for the fixture.
+ * @param cwd - session working directory the relative handoff root resolves against.
+ */
+async function containmentRefusal(
+  id: string,
+  config: Partial<RolloverConfig>,
+  cwd: string,
+): Promise<ContainmentRefusal> {
+  const renderAll = vi.spyOn(NotesStore.prototype, 'renderAll')
+  const { ctx, agent, session } = await engineHarness(id, { ...AUTOMATIC, ...config }, { cwd })
+  const warnings = captureWarnings(ctx)
+  ctx.llm.registerAdapter(['mock'], new ScriptedAdapter([textResponse('short answer')]))
+
+  await followup(agent, longMessage('turn one'))
+  await followup(agent, longMessage('turn two'))
+  await followup(agent, longMessage('turn three'))
+
+  return {
+    warnings,
+    compactions: countRollovers(session),
+    starts: session.snapshotEvents().filter(event => event.type === 'compaction/start').length,
+    renderCalls: renderAll.mock.calls.length,
+  }
 }
