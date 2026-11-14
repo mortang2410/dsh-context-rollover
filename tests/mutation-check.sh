@@ -201,20 +201,37 @@ run_mutation() {
     status+=("fail"); return
   fi
   # And it must fail on the assertion that pins this guarantee, not something else.
-  # The evidence is the failing test's own summary line, the `→ received` line
+  # The evidence is the failing test's own summary line, the `→ expected` line
   # vitest prints under the `×` row: the stack and the adjacent code frame quote
   # the whole test body, later assertions included, so reading them would accept a
   # failure on any other line. Each expectation is branch, matcher, message.
   local expectation=${expectations[$index]}
   local branch=${expectation%|*} internal=${expectation#*|}
-  local marker="" hit=""
+  local marker="" hit="" matcher="" phrase=""
   while IFS= read -r marker; do
     case $marker in
       *m=*)
-        if grep -qE -- '^[[:space:]]+→.*[[:alnum:]_]\('"${marker#*m=}"'\)' "$log"; then hit="$marker"; fi
+        # The assertion's own summary sentence, printed on the arrow line under the
+        # `×` row: the code frame below it quotes the test body, later assertions
+        # included, so only this line proves which assertion failed. Vitest prints
+        # matcher names as prose ("to contain", "to be less than"), so the marker
+        # is translated first.
+        matcher=${marker#*m=}
+        case $matcher in
+          toContain) phrase='to contain' ;;
+          toBeGreaterThan) phrase='to be greater than' ;;
+          toBeLessThan) phrase='to be less than' ;;
+          *) phrase=$matcher ;;
+        esac
+        if grep -qE -- '^[[:space:]]+(→|←).*expected [^|]*'"$phrase" "$log"; then
+          hit="$marker"
+        fi
         ;;
       *s=*)
-        if grep -qF -- "${marker#*s=}" "$log"; then hit="$marker"; fi
+        # A behaviour named by its subject rather than its matcher is read from the
+        # same arrow line or the `← received` line, never from the frame or the
+        # stack, which repeat the whole test body.
+        if grep -qE -- '^[[:space:]]+(→|←).*'"${marker#*s=}" "$log"; then hit="$marker"; fi
         ;;
     esac
     if [ -n "$hit" ]; then break; fi
