@@ -748,7 +748,7 @@ describe('the model-facing guidance follows the gate', () => {
     const on = contextManagementGuidance({ automaticRollover: true })
     expect(on).toContain('temporary working memory')
     expect(on).toContain('the engine also rolls the')
-    expect(on).toContain('notes checkpoint')
+    expect(on).toContain('compiled copy of the conversation')
     expect(on).toContain('safety net, not a')
     expect(on).toContain('your document is what the fresh context')
     expect(on).not.toContain('Only your `new_context` call starts a handoff rollover')
