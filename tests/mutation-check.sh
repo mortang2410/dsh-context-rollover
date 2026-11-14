@@ -12,7 +12,8 @@
 #                    recall guide  -> "crosses the rollover point" fails at
 #                                      `expect(replacementText).toContain(CHECKPOINT_OPEN_TAG)`
 #                                      or `RECALL_GUIDE`
-#   log-position     every compiled entry loses its `(seq N)` position
+#   log-position     the compiled copy stops rendering log positions (the
+#                    cut markers keep the words a later append moves)
 #                    -> the same test fails at `expect(logPositions.length).toBeGreaterThan(0)`
 #   cap-shrink       the compiler cap loses its half-the-span ceiling
 #                    -> "compiles a copy that would outsize its span down to the
@@ -130,7 +131,10 @@ names=(); files=(); olds=(); news=(); counts=(); expectations=(); titles=()
 
 # One mutation: the file it edits, the exact text it removes, the exact text it
 # puts there, how many occurrences that text has, the spec test it must break, and
-# the assertions its log must name, `|`-separated.
+# the assertion behind that test, written `branch|part;part`: `branch` is the name
+# the failure must be reported under, `m=<matcher>` matches the summary line vitest
+# prints under the `×` row for a failed matcher, and `s=<text>` matches a summary
+# line carrying that text. The runner reads only those summary lines.
 add_mutation() {
   names+=("$1"); files+=("$2"); counts+=("$3"); titles+=("$6")
   olds+=("$(printf '%b' "$4")")
@@ -144,19 +148,19 @@ add_mutation() {
 add_mutation compiled-marker src/compiled-fallback.ts 1 \
   'const text = frameCheckpoint(body).map(block => block.text).join(\x27\\n\\n\x27)' \
   'const text = body.map(entry => (typeof entry === \x27string\x27 ? entry : entry.text)).join(\x27\\n\\n\x27)' \
-  "crosses the rollover point" "CHECKPOINT_OPEN_TAG|RECALL_GUIDE"
+  "crosses the rollover point" "toContain|m=toContain;s=CHECKPOINT_OPEN_TAG;s=RECALL_GUIDE"
 
 # log-position: the `(seq N)` position every compiled row carries.
 add_mutation log-position src/vcc/compiler.ts 1 \
-  'function seqRef(seq: number): string {\n  return `seq ${seq}`\n}' \
-  'function seqRef(seq: number): string {\n  return \x27its position\x27\n}' \
-  "crosses the rollover point" "expect(logPositions.length).toBeGreaterThan(0)"
+  'function seqRef(seq: number): string {\n  return `seq ${seq}`\n}\n\n/**\n * One-line pointer standing in for an elided instruction block. Carries the seq\n * so the agent can `recall` the original, plus what it was and how big it was \xe2\x80\x94' \
+  'function seqRef(seq: number): string {\n  return \x27its position\x27\n}\n\n/**\n * One-line pointer standing in for an elided instruction block. The agent can `recall` the original, plus what it was and how big it was \xe2\x80\x94' \
+  "crosses the rollover point" "toBeGreaterThan|m=toBeGreaterThan;s=logPositions.length"
 
 # cap-shrink: the half-the-span ceiling on the compiler cap.
 add_mutation cap-shrink src/vcc/cap.ts 1 \
   'const cap = Math.min(checkpointCap, half)' \
   'const cap = checkpointCap' \
-  "half-the-span cap" "toBeLessThan"
+  "half-the-span cap" "toBeLessThan|m=toBeLessThan;s=sourceTokens"
 
 run_mutation() {
   local index=$1
@@ -197,18 +201,31 @@ run_mutation() {
     status+=("fail"); return
   fi
   # And it must fail on the assertion that pins this guarantee, not something else.
-  local alternatives=${expectations[$index]}
-  local alternative hit=""
-  while IFS= read -r alternative; do
-    if grep -q -- "$alternative" "$log"; then hit="$alternative"; break; fi
-  done <<<"$(printf '%s' "$alternatives" | tr '|' '\n')"
+  # The evidence is the failing test's own summary line, the `→ received` line
+  # vitest prints under the `×` row: the stack and the adjacent code frame quote
+  # the whole test body, later assertions included, so reading them would accept a
+  # failure on any other line. Each expectation is branch, matcher, message.
+  local expectation=${expectations[$index]}
+  local branch=${expectation%|*} internal=${expectation#*|}
+  local marker="" hit=""
+  while IFS= read -r marker; do
+    case $marker in
+      *m=*)
+        if grep -qE -- '^[[:space:]]+→.*[[:alnum:]_]\('"${marker#*m=}"'\)' "$log"; then hit="$marker"; fi
+        ;;
+      *s=*)
+        if grep -qF -- "${marker#*s=}" "$log"; then hit="$marker"; fi
+        ;;
+    esac
+    if [ -n "$hit" ]; then break; fi
+  done <<<"$(printf '%s' "$internal" | tr ';' '\n')"
   if [ -z "$hit" ]; then
-    echo "mutation-check: FAIL $name failed for another reason; the log names none of \"${alternatives//|/\" or \"}\" (log: $log)" >&2
+    echo "mutation-check: FAIL $name failed for another reason; no failing assertion names ${internal//;/ or } as ${branch} (log: $log)" >&2
     status+=("fail"); return
   fi
   local assertions
   assertions=$(grep -cE '^\s+(×|✗)' "$log" || true)
-  echo "mutation-check: killed $name ($assertions failing assertion(s); the log names $hit)"
+  echo "mutation-check: killed $name ($assertions failing assertion(s); the failing line names $hit)"
   status+=("killed")
 }
 
@@ -233,23 +250,24 @@ start = text.find(heading)
 end = text.find('\n### ', start + len(heading)) if start != -1 else -1
 if start == -1:
     raise SystemExit('mutation-check: the README has no compiled-copy section to mutate')
+# Only the section is written out: the check reads it from the heading, and a
+# short file keeps the evidence about the removed anchors alone.
 section = text[start:end if end != -1 else len(text)]
 tip = chr(96)
-anchors = [tip + 'recall' + tip + ' or ' + tip + 'search' + tip + ' lookup']
-anchors += [tip + 'search' + tip, tip + 'recall' + tip, 'type: "' + tip + 'seq' + tip + '"', 'frame', 'cap', 'restores']
-broken_section = section
+anchors = [tip + 'recall' + tip + ' or ' + tip + 'search' + tip + ' lookup', 'half-the-span cap',
+           tip + 'search' + tip, tip + 'recall' + tip, 'type: "' + tip + 'seq' + tip + '"',
+           'frame', 'restores', 'includeReasoning']
+broken = section
 dropped = []
 for anchor in anchors:
-    if anchor in broken_section:
-        broken_section = broken_section.replace(anchor, '', 1)
-        dropped.append(anchor)
-    else:
+    if anchor not in broken:
         raise SystemExit(f'mutation-check: the README section no longer carries {anchor!r}, so the check cannot prove it')
+    broken = broken.replace(anchor, '', 1)
+    dropped.append(anchor)
 Path(sys.argv[3]).write_text('\n'.join(dropped), encoding='utf-8')
-Path(sys.argv[2]).write_text(text[:start] + broken_section + text[end if end != -1 else len(text):], encoding='utf-8')
+Path(sys.argv[2]).write_text(broken, encoding='utf-8')
 print('mutation-check: README anchors removed:', ', '.join(dropped))
 PY
-  cp -- "$good" "$missing"
   # A file with no such section at all.
   python3 - "$missing" <<'PY'
 import sys
@@ -262,6 +280,20 @@ PY
   timeout 60s node "$README_CHECK" "$broken" >"$LOG_DIR/$name.broken.log" 2>&1 || rc=$?
   if [ $rc -eq 0 ]; then
     echo "mutation-check: FAIL $name survived; the check passed a README with an anchor removed (log: $LOG_DIR/$name.broken.log)" >&2
+    python3 - "$broken" >"$WORK_DIR/README.full.md" <<'PY'
+import sys
+from pathlib import Path
+real = Path('README.md').read_text(encoding='utf-8')
+broken = Path(sys.argv[1]).read_text(encoding='utf-8')
+heading = '### Automatic path: the compiled copy'
+start = real.find(heading)
+end = real.find('\n### ', start + len(heading)) if start != -1 else -1
+sys.stdout.write(real[:start] + broken + real[end if end != -1 else len(real):])
+PY
+    echo "mutation-check: the same anchors inside the whole README are at $WORK_DIR/README.full.md; running the check on it" >&2
+    rc=0
+    timeout 60s node "$README_CHECK" "$WORK_DIR/README.full.md" >"$LOG_DIR/$name.survived.log" 2>&1 || rc=$?
+    echo "mutation-check: the whole README exits $rc there (log: $LOG_DIR/$name.survived.log)" >&2
     status+=("fail"); return
   fi
   if ! grep -q 'readme-check: FAIL' "$LOG_DIR/$name.broken.log"; then
@@ -269,7 +301,9 @@ PY
     status+=("fail"); return
   fi
   # Every anchor the mutation removed must be named by one of the failure lines,
-  # so a check that passes everything but one word cannot survive this either.
+  # so a check that passes everything but one word cannot survive this either. The
+  # leave-out guarantee is asserted apart because its failure line has to quote
+  # the config key rather than a word the section states.
   local anchor missing_anchor=""
   while IFS= read -r anchor; do
     if [ -n "$anchor" ] && ! grep -qF -- "$anchor" "$LOG_DIR/$name.broken.log"; then
@@ -277,6 +311,10 @@ PY
       break
     fi
   done <"$WORK_DIR/README.anchors"
+  if ! grep -qF -- 'includeReasoning' "$LOG_DIR/$name.broken.log"; then
+    echo "mutation-check: FAIL $name never reported the removed includeReasoning mention (log: $LOG_DIR/$name.broken.log)" >&2
+    status+=("fail"); return
+  fi
   if [ -n "$missing_anchor" ]; then
     echo "mutation-check: FAIL $name never reported the removed anchor \"$missing_anchor\" (log: $LOG_DIR/$name.broken.log)" >&2
     status+=("fail"); return

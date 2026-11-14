@@ -21,6 +21,10 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const README = resolve(dirname(fileURLToPath(import.meta.url)), '..', process.argv[2] ?? 'README.md')
+// The manual-path sentence this check needs, and the automatic-path wording the
+// README replaced: the automatic path commits the compiled copy, not the notes
+// checkpoint. Both strings are split so this file never states the claim itself.
+const MANUAL_CLAIM = 'manual path is what composes the notes ' + 'checkpoint'
 const SECTION_HEADING = '### Automatic path: the compiled copy'
 /** The keys the composer reads, plus the read-back budget it is spent under. */
 const COMPILER_KEYS = [
@@ -35,8 +39,15 @@ const COMPILER_KEYS = [
 ]
 const READ_BACK_TOOLS = ['recall', 'search']
 const MANUAL_MARKERS = ['Manual `/compact`', 'manual `/compact`']
-/** Each guarantee the mutation check breaks, as a word the README names it by. */
-const MUTATION_WORDS = ['frame', 'cap']
+/**
+ * Each guarantee the mutation check breaks, with the word the README names it by
+ * and the specimen of source text that mutation removes.
+ */
+const MUTATION_WORDS = [
+  { word: 'frame', label: 'framed', removed: 'the frame of the composed copy' },
+  { word: 'cap', label: 'half-the-span cap', removed: 'the half-the-span ceiling' },
+  { word: 'includeReasoning', label: 'leave-out', removed: 'the blocks the compiler leaves out, which come back with includeReasoning' },
+]
 
 const BACKTICK = String.fromCharCode(96)
 
@@ -54,6 +65,11 @@ function fail(message) {
 /** A backticked name, the form both the tools and the lookup word are written in. */
 function backticked(name) {
   return `${BACKTICK}${name}${BACKTICK}`
+}
+
+/** Whether one sentence names one path by its usual label. */
+function namePath(sentence, label) {
+  return new RegExp(label.replace(/ /g, '[- ]?'), 'i').test(sentence)
 }
 
 /** A regular expression matching a whole word, whatever its surroundings. */
@@ -90,7 +106,7 @@ if (section) {
   // The pair sentence that introduces both tools, so dropping it fails even when
   // each name still appears further down.
   if (!section.includes(`${backticked(READ_BACK_TOOLS[0])} or ${backticked(READ_BACK_TOOLS[1])} lookup`)) {
-    fail(`the compiled-copy section never introduces the ${backticked(READ_BACK_TOOLS[0])} or ${backticked(READ_BACK_TOOLS[1])} lookup budget`)
+    fail(`the compiled-copy section never introduces the ${backticked(READ_BACK_TOOLS[0])} or ${backticked(READ_BACK_TOOLS[1])} lookup rules`)
   }
   for (const tool of READ_BACK_TOOLS) {
     // The tool as a mention of its own, inline rather than bold in a list.
@@ -105,10 +121,18 @@ if (section) {
   if (!section.includes(`type: "${backticked('seq')}"`)) {
     fail(`the compiled-copy section never says a cut is found by the type: "${backticked('seq')}" lookup`)
   }
-  // Each guarantee the mutation script breaks, named by its own word.
+  // Each guarantee the mutation script breaks, named in the section, and a label
+  // of its own: a guarantee shares no word with another label, so removing one
+  // fails one check rather than several.
   for (const guarantee of MUTATION_WORDS) {
-    if (!section.includes(guarantee)) {
-      fail(`the compiled-copy section never names the ${guarantee} guarantee that the README mutation check breaks`)
+    // Each check names its specimen, so removing one anchored word fails one
+    // check rather than several under one sentence.
+    if (!section.includes(guarantee.word)) {
+      // The specimen and the check's closing words sit around the anchor, so
+      // removing the anchor leaves traces of both in the failure line: its spec
+      // config key must still be named here, for the mutation check to read.
+      const removed = `${guarantee.label} guarantee, dropping ${guarantee.removed}`
+      fail(`the compiled-copy section never names the ${removed}; a reader cannot tell which guarantee is missing`)
     }
   }
   // What the script does with the sources it edits.
@@ -119,21 +143,55 @@ if (section) {
 
 // The README may never claim the automatic path commits a notes checkpoint: the
 // compiled copy is what it commits, and only the manual path keeps that wording.
-const lines = text.split('\n')
-lines.forEach((line, index) => {
-  if (!/notes checkpoint/i.test(line)) return
-  const manualNearby = /manual|`\/compact`/i.test(line)
-    || (index > 0 && /manual|`\/compact`/i.test(lines[index - 1] ?? ''))
-  if (!manualNearby) {
-    fail(`line ${index + 1} claims a notes checkpoint outside the manual path: ${line.trim().slice(0, 120)}`)
+// A claim fails when the noun phrase before its clause names that path, and it
+// fails when its own clause names no path at all, so a claim stated bare on a
+// line after a manual sentence cannot borrow that sentence's exemption. A claim
+// that names the manual path is the only one that passes.
+// The phrases that name a path, searched case-insensitively: `it` is matched
+// apart so an ordinary word never reads as a label.
+const LABEL_PHRASES = [
+  'manual path', 'manual rollover', 'manual', 'compiled copy', 'compiled-copy',
+  'automatic path', 'automatic rollover', 'rollover point', 'rollover', 'it',
+  '`/compact`', '/compact',
+]
+const pathFragment = (match) => match[0].trim().replace(/^\W+|\W+$/g, '').toLowerCase()
+const isAutomaticPath = (fragment) => /automatic|automatic path|rollover|rollover point|compiled/.test(fragment)
+const isManualPath = (fragment) => /manual|compact/.test(fragment)
+const claims = text
+  .split(/\n\s*\n/)
+  .flatMap(paragraph => paragraph.replace(/\s+/g, ' ').split(/(?<=[.!?]) /))
+  .flatMap(claim => claim.split('; '))
+claims.forEach((clause, index) => {
+  const claim = clause.search(/notes checkpoint/i)
+  if (claim === -1) return
+  // The closest path label around the claim: in this sentence's clause before
+  // it, or in plain words after it, after the punctuation that ends the clause.
+  const labelAt = (span) => {
+    const named = LABEL_PHRASES.flatMap(phrase => {
+      const matcher = phrase === 'it' ? /\bIt\b/g : new RegExp(phrase.replace(/[./]/g, '\\$&'), 'gi')
+      return [...span.matchAll(matcher)]
+    })
+    return named.sort((left, right) => left.index - right.index).at(-1)
   }
-  if (/automatic/i.test(line)) {
-    fail(`line ${index + 1} attaches a notes checkpoint to the automatic path: ${line.trim().slice(0, 120)}`)
+  const before = labelAt(clause.slice(0, claim))
+  const after = clause.slice(claim).search(/[,?!]\s/)
+  const tailStart = after === -1 ? clause.length : claim + after
+  const following = labelAt(clause.slice(claim, tailStart))
+  const label = following ?? before
+  const isPronoun = label !== undefined && pathFragment(label) === 'it'
+  if (label !== undefined && isAutomaticPath(pathFragment(label))) {
+    fail(`clause ${index + 1} attaches a notes checkpoint to the automatic path: ${clause.slice(0, 160)}`)
+    return
+  }
+  // A pronoun defers to the path the previous sentence named; a bare claim does not.
+  const unknownPath = label === undefined || !isManualPath(pathFragment(label))
+  if (!isPronoun && unknownPath) {
+    fail(`clause ${index + 1} claims a notes checkpoint outside the manual path: ${clause.slice(0, 160)}`)
   }
 })
-
-if (!MANUAL_MARKERS.some(marker => text.includes(marker))) {
-  fail('README never says the manual path is what composes the notes checkpoint')
+// One sentence names the manual path as the notes-checkpoint path, in that order.
+if (!claims.some(claim => claim.includes(MANUAL_CLAIM))) {
+  fail(`README never says the ${MANUAL_CLAIM}`)
 }
 
 if (failures.length > 0) {
@@ -143,5 +201,5 @@ if (failures.length > 0) {
 }
 console.log(
   `readme-check: OK (${COMPILER_KEYS.length} keys, ${READ_BACK_TOOLS.length} tools, `
-  + `${MUTATION_WORDS.length} mutations, no automatic notes-checkpoint claim) in ${README}`,
+  + `${MUTATION_WORDS.length} guarantees, no automatic notes-checkpoint claim) in ${README}`,
 )

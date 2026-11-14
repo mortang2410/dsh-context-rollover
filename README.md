@@ -181,7 +181,7 @@ info level, not as a failure, and it leaves the model's request pending so the
 rollover is retried rather than lost.
 
 Manual `/compact` has no model in the loop and therefore no document to name;
-it composes the deterministic notes checkpoint.
+the manual path is what composes the notes checkpoint.
 No engine path reads a handoff file or scans a handoff directory: `handoffDir` and
 `handoffPattern` are accepted configuration keys that nothing reads, `handoffDir`
 only names the directory the automatic path must prove disjoint from the notes
@@ -522,15 +522,18 @@ An entry is not checked against the model's window. A `thresholdTokens` at or ab
 
 When the automatic rollover fires, it compiles the span it is about to replace
 into the text the new window starts with. The replaced span is projected from
-the session's own derived messages, compiled under a token budget derived from
-the span, and framed as the recall guide first, your durable notes snapshot
-after it when there are notes, then the entries in log order. Nothing in a
+the session's own derived messages and compiled under a token budget derived from
+the span. The compiled frame opens the copy with a header that tells the reader
+how to read a cut back; your durable notes snapshot follows it
+when there are notes, and the entries come last in log order. Nothing in a
 compiled copy is paraphrased: the conversation text is the source text, and
-every truncation, cut or elision carries the recorded entry it came from,
-either inside the cut marker (`(seq 12)` or `(seqs 5-8)`) or in the cut's own
-suffix (`...(truncated from seq 12)`, which names the head cut and the tail cut
-both). A `recall` call with `type: "`seq`"` and that position then reads the
-original bytes from the append-only log.
+every truncation and every cut keeps the record it came from, carrying its log
+position in the marker (`(seq 12)` or `(seqs 5-8)`) or in its own suffix
+(`...(truncated from seq 12)`, which names the head cut and the tail cut both).
+A `recall` call with `type: "`seq`"` and that position then reads the original
+bytes from the append-only log. What the compiler leaves out entirely, such as
+reasoning blocks while that setting is off, comes back through the span
+the checkpoint replaced.
 
 Each compiled copy still names its mode: the summary event's model label is
 `deterministic/compiled-window-N`, the journal line reads
@@ -551,7 +554,7 @@ the key):
 | `includeReasoning` | `false` | carry assistant reasoning blocks into the copy |
 | `toolArgTools` | VCC's published list | tools whose key argument appears in a tool-call line |
 | `hideTools` | nothing hidden | bookkeeping tools dropped from the copy entirely |
-| `maxRecallTokens` | `16000` | total budget for one `recall` or `search` lookup result, overridden per call by an explicit argument |
+| `maxRecallTokens` | `16000` | `recall` or `search` lookup budget, the default both tools get; a `recall` call's own `max_tokens` overrides it, and `search` takes no override |
 
 Two read-back tools exist beside the session so a cut is never a loss: a
 `recall` call reads one record by its log position (or a tool result's
@@ -587,7 +590,7 @@ the half-the-span cap in turn, shows that named test failing for each, then prov
 removed and accepts the real one. The script backs up the sources it edits and
 restores them on every exit, so the tree matches the commit afterwards.
 
-## Local development with HMR
+### Local development with HMR
 
 The fast loop runs DSH from your checkout with the plugin linked from this
 directory and Cordis HMR watching the source:
@@ -598,8 +601,10 @@ directory and Cordis HMR watching the source:
    dsh plugin --profile rollover-dev add D:/path/to/dsh-context-rollover
    ```
 
-   (A custom profile initializes with just `dsh-base`; the bundle's patch
-   applies automatically because the package declares `dsh.bundle.patch`.)
+   A custom profile initializes with just `dsh-base`; the bundle's patch applies
+   automatically because the package declares `dsh.bundle.patch`. On Windows
+   Git Bash, a `link:` entry can come out mangled; see
+   [Windows: `link:` junctions and Git Bash](#windows-link-junctions-and-git-bash).
 
 2. **Enable the `hmr` row** in `$DSH_HOME/profiles/rollover-dev/cordis.patch.yml`
    (patch rows replace whole configs, so restate `root`):
@@ -631,7 +636,7 @@ directory and Cordis HMR watching the source:
    (`patchReload: live` is the default for custom profiles).
 
 5. **Restart is still required for**: initial bundle installation, bundle
-   membership changes (`dsh.plugin add/remove`), framework-level dependency
+   membership changes (`dsh plugin` add and remove), framework-level dependency
    changes (Cordis falls back to `loader.exit()`), and anything HMR cannot
    safely swap.
 
@@ -653,6 +658,17 @@ engine share the host's module instances: a service plugin that extends
 `CompactionEngine` must import the exact classes the host loaded, so
 resolving its `@deepseek-ai/*` imports through the same closure as the host
 is load-bearing, not an optimization.
+
+## Quick start: check the package before editing
+
+Three checks run in order, because each one assumes the tree the one before it
+left:
+
+1. `npm run typecheck` reads the sources as TypeScript and prints `error TS`
+   lines for any type break.
+2. `npx vitest run` reads the spec and asserts this package's behaviour.
+3. `bash tests/mutation-check.sh` breaks one behaviour at a time and proves the
+   spec notices each break.
 
 ## Tests and typecheck (no DSH build needed)
 

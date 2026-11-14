@@ -641,22 +641,24 @@ describe('overlapping notes and handoff roots are refused before any notes acces
     assertRefusedBeforeNotes(refusal)
   })
 
-  it('refuses a symlinked notes base whose per-session leaf is absent', async () => {
+  it('refuses a symlinked handoff root whose notes leaf is absent', async () => {
     const cwd = await scratch('dsh-forced-overlap-absent-leaf-')
-    const realBase = join(cwd, 'real-notes-base')
-    mkdirSync(realBase, { recursive: true })
-    await symlink(realBase, join(cwd, 'notes-link'))
-    // The handoff root is a link to the notes base, so it equals the notes base
-    // canonical form of the notes root; the per-session leaf under the link
-    // does not exist at all, which is the state the note-before-read check
-    // must survive.
-    const refusal = await overlapRefusal('overlap-absent-leaf-session', cwd, {
-      handoffDir: 'notes-link',
-      notesDir: join(cwd, 'notes-link'),
+    const notesBase = join(cwd, 'real-notes-base')
+    mkdirSync(notesBase, { recursive: true })
+    // The handoff root is a link to the notes base, and the notes root is a
+    // directory inside that base. Neither name lies under the other as written,
+    // so only the handoff root's own realpath shows the containment, and the
+    // per-session leaf under it does not exist, which is the state the
+    // note-before-read check must survive.
+    await symlink(notesBase, join(cwd, 'handoff-link'))
+    const sessionId = 'overlap-absent-leaf-session'
+    const refusal = await overlapRefusal(sessionId, cwd, {
+      handoffDir: 'handoff-link',
+      notesDir: notesBase,
     })
 
     expect(refusal.refusal).toMatch(/^TypeError: context-rollover: notesDir /)
-    expect(refusal.refusal).toContain(resolve(cwd, 'notes-link'))
+    expect(refusal.refusal).toContain(realpathSync(notesBase))
     assertRefusedBeforeNotes(refusal)
   })
 })
