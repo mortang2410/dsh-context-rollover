@@ -27,16 +27,18 @@
 
 | Id | Path | Responsibility | Allowed deps | Forbidden deps | Exposed surface |
 |----|------|----------------|--------------|----------------|-----------------|
-| M1 | `src/vcc/compiler.ts` | Vendored deterministic compiler: tokenizer, block budgets, elision passes, checkpoint framing, recall guide, and the text helpers the read-back cores use | none | M2 M3 M4 M5 M6 M7 M8 M9 M10 | `compileRegion`, `compileNodes`, `frameCheckpoint`, `RECALL_GUIDE`, checkpoint tags, default budget constants, `tokenize`, `countTokens`, `sanitize`, `entryText`, `joinCompiledEntries`, `isCheckpointSource`, `estimateEntryTokens`, `projectToolResultText`, `truncateTokens` |
-| M2 | `src/vcc/project.ts` | Project shadowed surface positions into the compiler's node shape | M1 M10 | M3 M4 M5 M6 M7 M8 M9 | `projectShadowedNodes(session, shadowedSeqs)` |
-| M3 | `src/checkpoint.ts` | Existing rollover compositions; gains the compiled composition | M1 | M2 M4 M5 M6 M7 M8 M9 M10 | `RolloverReplacement` (new `compiled` variant), `buildReplacementText` |
-| M4 | `src/compiled-fallback.ts` | Compose the forced replacement: project, compile, cap from the span, frame guide-first, then place the notes header after the guide and before the entries when notes exist | M1 M2 M3 M7 M10 | M5 M6 M8 M9 | `buildCompiledReplacement(input)` |
-| M5 | `src/index.ts` | Engine wiring: forced path builds the compiled replacement, preflights it with the meter, rejects an overlapping notes/handoff root before rendering notes, then defers or commits; journal marker | M3 M4 M6 M7 M9 M10 | none | unchanged public plugin class, journal mode line |
-| M6 | `src/rollover.ts` | Replacement metadata written to the summary event; names the replacement mode; owns the commit-time shrink guard | M3 M7 M10 | none | summary `model` marker format |
-| M7 | `src/config.ts` | Compiler budget keys, recall budget key, defaults, and static key validation; per-session path containment lives in M5 | none | none | resolved config fields |
-| M8 | `src/recall.ts`, `src/search.ts` | Vendored read-back cores adapted to the fork's session accessors | M1 M7 M10 | M5 | `recallBySeq`, `recallByResult`, `recallByCheckpoint`, `searchLog` |
-| M9 | `src/tools.ts` | Register `recall` and `search` tools when the model surface is enabled | M7 M8 | none | tool definitions |
-| M10 | `src/compat.ts` | Host event-accessor compatibility only; message derivation stays on `Session.deriveEventMessage` | none | M5 M9 | `sessionEventAt`, `sessionEvents`, `nodeHeuristicTokens`, `replaceSurfaceOp`, `Seq` |
+| M1 | src/vcc/compiler.ts | Vendored deterministic compiler: tokenizer, block budgets, elision passes, checkpoint framing, recall guide, and the text helpers the read-back cores use | none | M2 M3 M4 M5 M6 M7 M8 M12 M9 M10 M11 | `compileRegion`, `compileNodes`, `frameCheckpoint`, `RECALL_GUIDE`, `CHECKPOINT_PREAMBLE`, `CHECKPOINT_OPEN_TAG`, `CHECKPOINT_CLOSE_TAG`, `DEFAULT_TOOL_KEY_FIELDS`, `DEFAULT_ARG_TOOLS`, `DEFAULT_NOISE_PATTERNS`, `tokenize`, `countTokens`, `sanitize`, `entryText`, `joinCompiledEntries`, `isCheckpointSource`, `estimateEntryTokens`, `projectToolResultText`, `truncateTokens` |
+| M2 | src/vcc/project.ts | Project shadowed surface positions into the compiler's node shape | M1 M10 | M3 M4 M5 M6 M7 M8 M12 M9 M11 | `projectShadowedNodes` |
+| M3 | src/checkpoint.ts | Existing rollover compositions; gains the compiled composition | M1 | M2 M4 M5 M6 M7 M8 M12 M9 M10 M11 | `RolloverReplacement`, `buildReplacementText` |
+| M4 | src/compiled-fallback.ts | Compose the forced replacement: project, compile, cap from the span, frame guide-first, then place the notes header after the guide and before the entries when notes exist | M1 M2 M3 M7 M10 M11 | M5 M6 M8 M12 M9 | `buildCompiledReplacement` |
+| M5 | src/index.ts | Engine wiring: forced path builds the compiled replacement, preflights it with the meter, rejects an overlapping notes/handoff root before rendering notes, then defers or commits; journal marker | M3 M4 M6 M7 M9 M10 M11 | none | `ContextRolloverEngine` |
+| M6 | src/rollover.ts | Replacement metadata written to the summary event; names the replacement mode; owns the commit-time shrink guard | M3 M7 M10 | none | `commitRollover`, `sizeRolloverReplacement` |
+| M7 | src/config.ts | Compiler budget keys, recall budget key, defaults, and static key validation; per-session path containment lives in M5 | none | none | `resolveConfig`, `Config`, `RolloverConfig`, `ResolvedRolloverConfig` |
+| M8 | src/recall.ts | Vendored recall core: textual projection by seq, result, or checkpoint ordinal, within the recall budget | M1 M7 M10 | M5 | `recallBySeq`, `recallByResult`, `recallByCheckpoint`, `DEFAULT_MAX_RECALL_TOKENS`, `RecallMissError`, `RecallResult`, `findCheckpointSeqs`, `projectMessageText` |
+| M12 | src/search.ts | Vendored search core over the durable log | M1 M7 M8 M10 | M5 | `searchLog`, `InvalidSearchPatternError`, `SearchResult` |
+| M9 | src/tools.ts | Register `recall` and `search` tools when the model surface is enabled; both rows sit behind the same gate, and the recall budget stays at VCC's default until `4fne` threads the configured key | M6 M7 M8 M10 M12 | none | `createRolloverTools` |
+| M10 | src/compat.ts | Host event-accessor compatibility only; message derivation stays on `Session.deriveEventMessage` | none | M5 M9 | `sessionEventAt`, `sessionEvents`, `nodeHeuristicTokens`, `replaceSurfaceOp`, `Seq` |
+| M11 | src/vcc/cap.ts | Checkpoint cap derived from the shadowed span and bounded by the configured cap | none | M2 M3 M4 M5 M6 M7 M8 M12 M9 M10 | `checkpointCapFor` |
 
 ## Contracts
 
@@ -82,10 +84,10 @@ projectShadowedNodes(session: Session, shadowedSeqs: readonly number[]): Compile
 - satisfies: R1, R6, R7, R11, R12
 
 ```ts
-buildCompiledReplacement(input: { session: Session; shadowedSeqs: readonly number[]; shadowedTokens: number; windowNumber: number; notes: string | null; config: ResolvedConfig }): RolloverReplacement | { defer: true }
+buildCompiledReplacement(input: { session: Session; shadowedSeqs: readonly number[]; shadowedTokens: number; windowNumber: number; notes: string | null }, config: RolloverConfig): RolloverReplacement | { defer: true }
 ```
 
-- pre: the span is balanced and non-empty; `shadowedTokens` is the span's heuristic count and only bounds the compiler's budget
+- pre: the span is balanced and non-empty; `shadowedTokens` is the span's heuristic count and only bounds the compiler's budget; `config` is the raw `RolloverConfig` the composer reads with VCC's defaults until `4fne` wires resolution, and the resolved type is `ResolvedRolloverConfig`
 - post: returns a `compiled` replacement whose text holds the recall guide first, the durable notes header after it when notes exist, then the framed entries; returns `{ defer: true }` when the projection throws or compiles to no entries
 - errors: none; the compiler elides rows further when the body exceeds its cap
 - invariants: the compiler cap never exceeds the configured cap and never exceeds half the shadowed span tokens; the return is smaller than the span only after C10 prices it
@@ -133,7 +135,7 @@ model === `deterministic/handoff-window-${n}` | `deterministic/compiled-window-$
 - satisfies: R3
 
 ```ts
-recall({ type: 'seq' | 'result' | 'checkpoint'; ref: string }): string
+recall({ type: 'seq' | 'result' | 'checkpoint'; ref: string; max_tokens?: number }): string
 search({ query: string }): string
 ```
 
@@ -278,3 +280,5 @@ No new shared state. The fallback is a pure function of the session's log and th
 | 2026-11-14 | Round 4: C7 rejects an overlapping notes/handoff base directory, C8 precondition requires notes outside the handoff directory, M7 responsibility extended | Review round 4 finding | wilder |
 | 2026-11-14 | Round 5: per-session containment moves from M7 to the C8 precondition on M5 with documented resolutions and realpath roots; 4fne meter wording corrected | Review round 5 findings | wilder |
 | 2026-11-14 | Round 6: canonical notes root defined for a missing leaf with fail-closed comparison, C10 hook and 4fne AC added for the commit-time rejection fallback | Review round 6 findings | wilder |
+| 2026-11-14 | Implementation, b61t: M11 cap module added and M4/M5 deps extended; M8 split into M8/M12 so each module row names one path; module Path cells made plain so drift_check resolves them; C3 takes the config as a second argument and names `RolloverConfig`/`ResolvedRolloverConfig`; config budget keys landed early by b61t, with `4fne` owning resolution wiring and config-readers tests | `559b2ba` report; tier 2 revision pending delta review | wilder |
+| 2026-11-14 | Implementation, 2zex: M8 and M12 surface rows list the exported helpers and refusals; M9 names the model-surface gate and the VCC-default recall budget; C6 carries the optional per-call `max_tokens`; `recall` takes `ref`; `search` scopes itself to original conversation records, with generated checkpoints reached through `recall({ type: "checkpoint" })`; the history predicate added by 2zex was reverted as redundant and out of scope | `6a02ba9` report plus review round 8 findings | orchestrator |
