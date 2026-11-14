@@ -592,7 +592,7 @@ function recallTool(maxRecallTokens: number) {
         required: true,
         description: 'Reference type: "seq" for events by position, "result" for a tool result, "checkpoint" for a whole checkpoint.',
       },
-      id: {
+      ref: {
         type: 'string',
         required: true,
         description: 'Type-dependent reference: "3-7,15" or "seq 12" for seq; "result 3" or "3" for result; "1", "checkpoint 1", or "seq 12345" for checkpoint.',
@@ -616,11 +616,11 @@ function recallTool(maxRecallTokens: number) {
       const reference = args.type as RecallReference
       switch (reference) {
         case 'seq':
-          return { text: recallBySeq(session, args.id, budget).text }
+          return { text: recallBySeq(session, args.ref, budget).text }
         case 'result':
-          return { text: recallByResult(session, args.id, budget).text }
+          return { text: recallByResult(session, args.ref, budget).text }
         case 'checkpoint':
-          return { text: recallByCheckpoint(session, args.id, budget).text }
+          return { text: recallByCheckpoint(session, args.ref, budget).text }
         default:
           throw new Error(`invalid recall type "${String(reference)}"; expected "seq", "result", or "checkpoint"`)
       }
@@ -629,8 +629,10 @@ function recallTool(maxRecallTokens: number) {
 }
 
 /**
- * The `search` tool: keyword or regular-expression search over every record of
- * this session's log, reporting the log positions `recall` accepts.
+ * The `search` tool: keyword or regular-expression search over every original
+ * conversation record of this session's log, reporting the log positions
+ * `recall` accepts. Generated checkpoint bodies are not conversation, so they
+ * are reached through `recall({ type: "checkpoint" })` instead.
  * @param maxRecallTokens - the budget the matching lines are rendered under.
  */
 function searchTool(maxRecallTokens: number) {
@@ -638,10 +640,11 @@ function searchTool(maxRecallTokens: number) {
     name: 'search',
     description:
       'Search THIS conversation\'s durable event log by keyword or regular expression (case-insensitive, '
-      + 'Unicode-aware). Every event ever recorded is searchable, including text elided or cut by a compiled '
-      + 'checkpoint, because the log is append-only and untouched. Returns the matching records with their '
-      + '(seq N) positions and the matching lines; then call recall with that position to restore the full '
-      + 'exact original content. Escape regex special characters when you mean them literally.',
+      + 'Unicode-aware). Every original conversation record is searchable, including text elided or cut by a '
+      + 'compiled checkpoint, because the log is append-only and untouched; generated checkpoint bodies are '
+      + 'not conversation and come back through recall with type="checkpoint". Returns the matching records '
+      + 'with their (seq N) positions and the matching lines; then call recall with that position to restore '
+      + 'the full exact original content. Escape regex special characters when you mean them literally.',
     parameters: {
       query: {
         type: 'string',

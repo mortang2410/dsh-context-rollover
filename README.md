@@ -110,9 +110,10 @@ Responsibilities stay split (the Codex lesson):
   with an ordinal (`1` is the oldest). Media comes back as a label, and a record
   larger than the recall budget (16000 tokens by default, `max_tokens` per call)
   comes back cut, and the cut carries a marker plus the call that reads the rest.
-- **`search`** — keyword or regular-expression search over every record in the
-  log, including text only a tool result ever held, reported with the log
-  positions `recall` accepts.
+- **`search`** — keyword or regular-expression search over every original
+  conversation record in the log, including text only a tool result ever held,
+  reported with the log positions `recall` accepts. Generated checkpoint bodies
+  are not conversation: they come back through `recall` with `type: "checkpoint"`.
 
 ### Rollover paths
 

@@ -261,7 +261,7 @@ function recallSeqs(session: Session, seqs: readonly number[], maxTokens: number
       entries.push({
         seq,
         text: `${kept.text}\n[the record continues past the recall budget; `
-          + `reply with recall({ type: "seq", id: "${seq}" }) and a larger max_tokens to read it all]`,
+          + `reply with recall({ type: "seq", ref: "${seq}" }) and a larger max_tokens to read it all]`,
       })
       continue
     }

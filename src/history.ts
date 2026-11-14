@@ -10,18 +10,6 @@
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Seq } from './compat.ts'
 import { sessionEventAt, sessionEvents } from './compat.ts'
-import { isCheckpointSource } from './vcc/compiler.ts'
-
-/**
- * Whether one shadowed event is the checkpoint node of a committed rollover.
- * Its body is a generated replacement that replaces the shadowed span, so it is
- * neither history (the span it replaced is) nor searchable conversation.
- * @param event - a shadowed log event.
- * @returns true for a compact-checkpoint message node.
- */
-export function isCheckpointEvent(event: SessionEvent): boolean {
-  return event.type === 'user/message' && isCheckpointSource(event.data.source)
-}
 
 /** Which kind of surface event one history item came from. */
 export type HistoryItemKind = 'user' | 'assistant' | 'tool-result'
@@ -104,7 +92,6 @@ export function collectHistory(
   const items: HistoryItem[] = []
   for (const event of sessionEvents(session)) {
     if (surface.has(event.seq)) continue
-    if (isCheckpointEvent(event)) continue
     let kind: HistoryItemKind
     let text: string
     switch (event.type) {
@@ -198,7 +185,7 @@ export function readHistoryItem(
 ): HistoryItem | null {
   if (session.surface.nodes.includes(seq as Seq)) return null
   const event = sessionEventAt(session, seq)
-  if (event === undefined || isCheckpointEvent(event)) return null
+  if (event === undefined) return null
   let kind: HistoryItemKind
   let text: string
   switch (event.type) {

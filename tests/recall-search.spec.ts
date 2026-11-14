@@ -193,7 +193,7 @@ async function runTool(
 describe('recall by seq', () => {
   it('returns the complete text of the named position with its log position', async () => {
     const fx = await fixture('recall-seq-user')
-    const { text, isError } = await runTool(fx, 'recall', { type: 'seq', id: String(fx.userSeq) })
+    const { text, isError } = await runTool(fx, 'recall', { type: 'seq', ref: String(fx.userSeq) })
     expect(isError).toBe(false)
     expect(text).toContain(`[seq ${fx.userSeq}: user]`)
     expect(text).toContain('read the calibration table')
@@ -201,7 +201,7 @@ describe('recall by seq', () => {
 
   it('keeps the tool call, its raw arguments, and the result pointer', async () => {
     const fx = await fixture('recall-seq-assistant')
-    const { text } = await runTool(fx, 'recall', { type: 'seq', id: String(fx.assistantSeq) })
+    const { text } = await runTool(fx, 'recall', { type: 'seq', ref: String(fx.assistantSeq) })
     expect(text).toContain(ASSISTANT_TEXT)
     expect(text).toContain('[tool-call read]')
     expect(text).toContain('calibration.txt')
@@ -209,7 +209,7 @@ describe('recall by seq', () => {
 
   it('names the requested position that does not exist', async () => {
     const fx = await fixture('recall-seq-missing')
-    const { text, isError } = await runTool(fx, 'recall', { type: 'seq', id: '99999' })
+    const { text, isError } = await runTool(fx, 'recall', { type: 'seq', ref: '99999' })
     expect(isError).toBe(true)
     expect(text).toContain('seq(s) 99999 not found')
     expect(text).toContain(`this log ends at seq ${Number(fx.session.seq) - 1}`)
@@ -219,7 +219,7 @@ describe('recall by seq', () => {
 describe('recall by result position', () => {
   it('returns the tool result projection as text, not a bare marker', async () => {
     const fx = await fixture('recall-result')
-    const { text, isError } = await runTool(fx, 'recall', { type: 'result', id: `result ${fx.resultSeq}` })
+    const { text, isError } = await runTool(fx, 'recall', { type: 'result', ref: `result ${fx.resultSeq}` })
     expect(isError).toBe(false)
     expect(text).toContain(`[seq ${fx.resultSeq}: tool]`)
     expect(text).toContain(RESULT_ONLY_PHRASE)
@@ -229,7 +229,7 @@ describe('recall by result position', () => {
 
   it('names a position that is not a tool result', async () => {
     const fx = await fixture('recall-result-wrong-kind')
-    const { text, isError } = await runTool(fx, 'recall', { type: 'result', id: String(fx.userSeq) })
+    const { text, isError } = await runTool(fx, 'recall', { type: 'result', ref: String(fx.userSeq) })
     expect(isError).toBe(true)
     expect(text).toContain(`seq ${fx.userSeq} is not a tool result`)
     expect(text).toContain('user/message')
@@ -239,7 +239,7 @@ describe('recall by result position', () => {
 describe('recall by checkpoint ordinal', () => {
   it('returns the prior checkpoint body when it fits', async () => {
     const fx = await fixture('recall-checkpoint')
-    const { text, isError } = await runTool(fx, 'recall', { type: 'checkpoint', id: '1' })
+    const { text, isError } = await runTool(fx, 'recall', { type: 'checkpoint', ref: '1' })
     expect(isError).toBe(false)
     expect(text).toContain(`[seq ${fx.checkpointSeq}: user]`)
     expect(text).toContain(CHECKPOINT_BODY)
@@ -247,7 +247,7 @@ describe('recall by checkpoint ordinal', () => {
 
   it('names the ordinal that does not exist and counts the checkpoints', async () => {
     const fx = await fixture('recall-checkpoint-missing')
-    const { text, isError } = await runTool(fx, 'recall', { type: 'checkpoint', id: '2' })
+    const { text, isError } = await runTool(fx, 'recall', { type: 'checkpoint', ref: '2' })
     expect(isError).toBe(true)
     expect(text).toContain('checkpoint 2 not found')
     expect(text).toContain('this session has 1 checkpoint(s)')
@@ -257,7 +257,7 @@ describe('recall by checkpoint ordinal', () => {
 describe('media', () => {
   it('comes back as one label, never as the reference or invented text', async () => {
     const fx = await fixture('recall-media')
-    const { text } = await runTool(fx, 'recall', { type: 'seq', id: String(fx.resultSeq) })
+    const { text } = await runTool(fx, 'recall', { type: 'seq', ref: String(fx.resultSeq) })
     expect(text.split('[image]').length - 1).toBe(1)
     expect(text).not.toContain(IMAGE_REF.attachmentId)
   })
@@ -266,11 +266,11 @@ describe('media', () => {
 describe('recall budget', () => {
   it('cuts an over-budget record with a marker naming the cut', async () => {
     const fx = await fixture('recall-budget')
-    const { text, isError } = await runTool(fx, 'recall', { type: 'seq', id: String(fx.verboseSeq), max_tokens: 20 })
+    const { text, isError } = await runTool(fx, 'recall', { type: 'seq', ref: String(fx.verboseSeq), max_tokens: 20 })
     expect(isError).toBe(false)
     expect(text).toContain('VERBOSE-INSTRUCTION')
     expect(text).toContain('truncated from recall budget')
-    expect(text).toContain(`reply with recall({ type: "seq", id: "${fx.verboseSeq}" })`)
+    expect(text).toContain(`reply with recall({ type: "seq", ref: "${fx.verboseSeq}" })`)
   })
 
   it('cuts a record that is itself wider than its budget', async () => {
@@ -279,7 +279,7 @@ describe('recall budget', () => {
     const fx = await fixture('recall-budget-wider')
     const { text } = await runTool(fx, 'recall', {
       type: 'seq',
-      id: String(fx.verboseSeq),
+      ref: String(fx.verboseSeq),
       max_tokens: 22,
     })
     expect(text).toContain('truncated from recall budget')
@@ -291,7 +291,7 @@ describe('recall budget', () => {
     const fx = await fixture('recall-range-bound')
     const { text } = await runTool(fx, 'recall', {
       type: 'seq',
-      id: `${fx.userSeq}-${Number(fx.session.seq) + 1000}`,
+      ref: `${fx.userSeq}-${Number(fx.session.seq) + 1000}`,
       max_tokens: 10,
     })
     expect(text).toContain('call recall again for the remaining positions or raise max_tokens')
@@ -378,8 +378,8 @@ describe('the registry', () => {
     try {
       // The engine reads the roster through a typed service; a provider stub
       // with the one method it calls is the roster.
-      ;(ctx as unknown as { provide(name: string, value: unknown): void })
-        .provide('agentPresets', { serviceFor: () => undefined })
+      const providerCtx = ctx as unknown as { provide(name: string, value: unknown): void }
+      providerCtx.provide('agentPresets', { serviceFor: () => undefined })
       new ContextRolloverEngine(ctx, { notesDir: notesBase })
       expect(ctx.tools.get('new_context')).toBeUndefined()
       expect(ctx.tools.get('recall')).toBeUndefined()
