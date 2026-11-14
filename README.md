@@ -182,7 +182,6 @@ rollover is retried rather than lost.
 
 Manual `/compact` has no model in the loop and therefore no document to name;
 the manual path is what composes the notes checkpoint.
-The automatic path commits a notes checkpoint even though the manual path does not.
 No engine path reads a handoff file or scans a handoff directory: `handoffDir` and
 `handoffPattern` are accepted configuration keys that nothing reads, `handoffDir`
 only names the directory the automatic path must prove disjoint from the notes
@@ -633,8 +632,8 @@ directory and Cordis HMR watching the source:
 
 4. **Edit `src/*.ts` in this package**: the affected plugin reloads in place;
    registrations (tools, system-prompt sections, event listeners) unwind and
-   reapply through Cordis effects. Profile patch edits also recompose live
-   (`patchReload: live` is the default for custom profiles).
+   reapply through Cordis effects. Profile patch files are watched at their exact
+   paths and recompose live; no configuration field turns that watch on or off.
 
 5. **Restart is still required for**: initial bundle installation, bundle
    membership changes (`dsh plugin` add and remove), framework-level dependency

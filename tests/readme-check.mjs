@@ -159,13 +159,27 @@ const isAutomaticPath = (fragment) => /automatic|automatic path|rollover|rollove
 const isManualPath = (fragment) => /manual|compact/.test(fragment)
 const claims = text
   .split(/\n\s*\n/)
-  .flatMap(paragraph => paragraph.replace(/\s+/g, ' ').split(/(?<=[.!?]) /))
-  .flatMap(claim => claim.split('; '))
-claims.forEach((clause, index) => {
+  // A semicolon starts a new claim inside the same sentence, so each claim keeps
+  // the sentence and the paragraph it came from and reads their labels for context.
+  .flatMap(paragraph => paragraph
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.!?]) /)
+    .flatMap(sentence => sentence.split('; ').map(claim => ({ claim, sentence, paragraph }))))
+
+claims.forEach(({ claim: clause, sentence, paragraph }, index) => {
   const claim = clause.search(/notes checkpoint/i)
+  // A code block that lists the three paths side by side labels them as a table,
+  // so a line there is read by its own label rather than by the last one above.
+  const isListed = paragraph.split('\n').some(line => line.trim().startsWith('```'))
+  if (isListed) {
+    if (claim !== -1 && !isManualPath(clause)) {
+      fail(`clause ${index + 1} claims a notes checkpoint outside the manual path: ${clause.slice(0, 160)}`)
+    }
+    return
+  }
   if (claim === -1) return
-  // The closest path label around the claim: in this sentence's clause before
-  // it, or in plain words after it, after the punctuation that ends the clause.
+  // The closest path label before the claim, and the nearest one after it up to
+  // the first comma, question mark or exclamation mark.
   const labelAt = (span) => {
     const named = LABEL_PHRASES.flatMap(phrase => {
       const matcher = phrase === 'it' ? /\bIt\b/g : new RegExp(phrase.replace(/[./]/g, '\\$&'), 'gi')
@@ -173,24 +187,67 @@ claims.forEach((clause, index) => {
     })
     return named.sort((left, right) => left.index - right.index).at(-1)
   }
-  const before = labelAt(clause.slice(0, claim))
+  // A path named by the sentence's own "automatic", "rollover" or "compiled" word
+  // is automatic wherever it sits, counted from the "on the <label> path" list on:
+  // that list names objects, not the path committing the checkpoint. A sentence
+  // that reaches a path and then claims a checkpoint for it counts all of its words.
+  const objectLabel = [...clause.slice(0, claim).matchAll(/on the ([^,]+?) path\b/gi)].at(-1)
+  const pathWord = [...clause.slice(0, claim).matchAll(/automatic|rollover|compiled/gi)].at(-1)
+  const namedPath = clause.slice(0, claim).search(/(automatic|rollover|compiled|manual|compact)[^.]*\b(?:it|this|the path|that path)\b/i) !== -1
+  const automaticBefore = pathWord !== undefined
+    && (namedPath || (objectLabel !== undefined && pathWord.index >= objectLabel.index))
+  const beforeRaw = automaticBefore
+    ? undefined
+    : objectLabel
+      ? labelAt(clause.slice(0, objectLabel.index))
+      : labelAt(clause.slice(0, claim))
+  // A pronoun carries the nearest path the paragraph named before it, so "The
+  // automatic path reaches the threshold. It commits a notes checkpoint." fails.
+  const contextLabel = beforeRaw !== undefined && pathFragment(beforeRaw) === 'it'
+    ? labelAt(paragraph.slice(0, paragraph.indexOf(clause)))
+    : undefined
+  const before = contextLabel ?? beforeRaw
   const after = clause.slice(claim).search(/[,?!]\s/)
   const tailStart = after === -1 ? clause.length : claim + after
   const following = labelAt(clause.slice(claim, tailStart))
-  const label = following ?? before
-  const isPronoun = label !== undefined && pathFragment(label) === 'it'
-  if (label !== undefined && isAutomaticPath(pathFragment(label))) {
+  // An automatic label wins wherever a later label sits: a trailing mention of
+  // another path never excuses "the automatic path commits a notes checkpoint
+  // even though the manual path ...". A clause with no label of its own takes the
+  // label of the paragraph's text before it, and the inline list of the three
+  // paths is skipped there, since its labels read as a table rather than a claim.
+  const automaticLabel = before !== undefined && !objectLabel && isAutomaticPath(pathFragment(before))
+  if (automaticBefore || automaticLabel) {
     fail(`clause ${index + 1} attaches a notes checkpoint to the automatic path: ${clause.slice(0, 160)}`)
     return
   }
-  // A pronoun defers to the path the previous sentence named; a bare claim does not.
-  const unknownPath = label === undefined || !isManualPath(pathFragment(label))
-  if (!isPronoun && unknownPath) {
+  if (following !== undefined && isAutomaticPath(pathFragment(following))) {
+    fail(`clause ${index + 1} attaches a notes checkpoint to the automatic path: ${clause.slice(0, 160)}`)
+    return
+  }
+  if (before === undefined && following === undefined) {
+    const inherited = labelAt(paragraph.slice(0, paragraph.indexOf(clause)))
+
+    if (inherited !== undefined && isAutomaticPath(pathFragment(inherited))) {
+      fail(`clause ${index + 1} continues the automatic path's notes checkpoint: ${clause.slice(0, 160)}`)
+      return
+    }
+  }
+  // What passes is the manual path, in plain words or as `/compact`; or a pronoun
+  // that hands the clause to the previous sentence's path; or a mention of the
+  // read-back tools that put the log back in reach, the only object the README
+  // gives a notes checkpoint anywhere.
+  const handsBack = READ_BACK_TOOLS.some(tool => word(tool).test(clause))
+  const manual = following !== undefined
+    ? isManualPath(pathFragment(following))
+    : before === undefined
+      ? false
+      : isManualPath(pathFragment(before)) || pathFragment(before) === 'it'
+  if (!manual && !handsBack) {
     fail(`clause ${index + 1} claims a notes checkpoint outside the manual path: ${clause.slice(0, 160)}`)
   }
 })
 // One sentence names the manual path as the notes-checkpoint path, in that order.
-if (!claims.some(claim => claim.includes(MANUAL_CLAIM))) {
+if (!claims.some(({ claim }) => claim.includes(MANUAL_CLAIM))) {
   fail(`README never says the ${MANUAL_CLAIM}`)
 }
 
