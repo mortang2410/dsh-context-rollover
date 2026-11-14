@@ -307,6 +307,8 @@ describe('search', () => {
     expect(text).toContain(`[search "${RESULT_ONLY_PHRASE}": 1 matching record(s)`)
     expect(text).toContain(`[seq ${fx.resultSeq}: tool]`)
     expect(text).toContain(RESULT_ONLY_PHRASE)
+    // The restore instruction names the field the recall schema actually takes.
+    expect(text).toContain('recall({ type: "seq", ref: "<seq>" })')
   })
 
   it('reads a query as a case-insensitive regular expression', async () => {

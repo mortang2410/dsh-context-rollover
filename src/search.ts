@@ -130,6 +130,6 @@ export function searchLog(session: Session, query: string, maxTokens = DEFAULT_M
   lines.push(...hits.map(hit => hit.text))
   if (omitted > 0) lines.push(`[${omitted} more matching record(s) omitted; narrow the pattern or read them with recall]`)
   if (truncated) lines.push('[search budget exhausted; some hits were cut, so narrow the pattern or read them with recall]')
-  lines.push('[use recall({ type: "seq", id: "<seq>" }) to restore any hit\'s full original content]')
+  lines.push('[use recall({ type: "seq", ref: "<seq>" }) to restore any hit\'s full original content]')
   return { text: lines.join('\n\n'), pattern: pattern.source, totalMatches, omitted, truncated }
 }

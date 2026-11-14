@@ -1194,7 +1194,7 @@ export function compileRegion(
       result.stats.elidedRows += elided.length
       // Dropped prior checkpoints never vanish silently: each leaves a single
       // `[checkpoint N]` line the agent can restore in full via
-      // recall(type:"checkpoint", id:"N").
+      // recall(type:"checkpoint", ref:"N").
       const markerLines = [`[${elided.length} earlier entries elided: ${seqRangeOf(elided)}]`]
       for (const dropped of droppedCheckpoints) {
         const ordinal = config.checkpointOrdinals?.get(dropped.seq)
