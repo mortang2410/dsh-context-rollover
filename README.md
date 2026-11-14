@@ -182,6 +182,7 @@ rollover is retried rather than lost.
 
 Manual `/compact` has no model in the loop and therefore no document to name;
 the manual path is what composes the notes checkpoint.
+The automatic path commits a notes checkpoint even though the manual path does not.
 No engine path reads a handoff file or scans a handoff directory: `handoffDir` and
 `handoffPattern` are accepted configuration keys that nothing reads, `handoffDir`
 only names the directory the automatic path must prove disjoint from the notes
